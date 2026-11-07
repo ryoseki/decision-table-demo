@@ -33,4 +33,15 @@ Get-VerifiedArtifact `
     -Sha256 'a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978'
 & tar -xzf $codexArchive -C $codexDir
 if ($LASTEXITCODE -ne 0) { throw 'Codex archive extraction failed.' }
+
+$codeModeAsset = 'codex-code-mode-host-x86_64-unknown-linux-musl'
+$codeModeArchive = Join-Path $codexDir "$codeModeAsset.tar.gz"
+Get-VerifiedArtifact `
+    -Url "https://github.com/openai/codex/releases/download/rust-v0.166.0/$codeModeAsset.tar.gz" `
+    -Destination $codeModeArchive `
+    -Sha256 '7588334fd47bc4003d970b70dfd4d1e4578491b1e9baa72976a4c2d7e97590da'
+& tar -xzf $codeModeArchive -C $codexDir $codeModeAsset
+if ($LASTEXITCODE -ne 0) { throw 'Codex Code Mode host extraction failed.' }
+Move-Item -LiteralPath (Join-Path $codexDir $codeModeAsset) -Destination (Join-Path $codexDir 'codex-code-mode-host') -Force
+
 Write-Host 'Run: pwsh -File scripts/Start-Symphony.ps1 -Check'

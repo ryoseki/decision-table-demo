@@ -5,14 +5,16 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 state_root="$repo_root/.symphony"
 symphony_bin="$repo_root/.tools/symphony/symphony-v0.0.3-linux_x86_64"
 codex_bin="$repo_root/.tools/codex/codex-x86_64-unknown-linux-musl"
+codex_code_mode_host="$repo_root/.tools/codex/codex-code-mode-host"
 
 for executable in git sed sha256sum; do
   command -v "$executable" >/dev/null || { printf 'Missing command: %s\n' "$executable" >&2; exit 1; }
 done
 test -f "$symphony_bin" || { printf 'Run scripts/Install-SymphonyRuntime.ps1 first.\n' >&2; exit 1; }
 test -f "$codex_bin" || { printf 'Linux Codex binary is missing.\n' >&2; exit 1; }
+test -f "$codex_code_mode_host" || { printf 'Run scripts/Install-SymphonyRuntime.ps1 to install the Codex Code Mode host.\n' >&2; exit 1; }
 printf '%s  %s\n' 'ea35a04a54a6d37c0cafe3f195da871e47614a8c05765b90dbb4cac32e1435ee' "$symphony_bin" | sha256sum --check --status
-chmod u+x "$symphony_bin" "$codex_bin"
+chmod u+x "$symphony_bin" "$codex_bin" "$codex_code_mode_host"
 
 # Link to an existing login without copying a credential into the repo.
 auth_file="${SYMPHONY_CODEX_AUTH_FILE:-$HOME/.codex/auth.json}"
