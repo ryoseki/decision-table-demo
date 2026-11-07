@@ -1,0 +1,80 @@
+# PRの更新ごとに、lint・ビルド・E2Eスモークを実行する。
+# 3つのジョブ名（frontend / backend / e2e）が、取り込み前に必須とするチェック名の候補。
+# アクションはコミットSHAで固定している（コメントは対応するタグ）。
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# GITHUB_TOKEN の既定は読み取りだけにする
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 26.13.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: 3.14.10
+      - run: pip install --require-hashes -r requirements.txt -r requirements-dev.txt
+      - run: ruff check .
+      # 差分を書き換えず、整形が必要かどうかだけを判定する
+      - run: ruff format --check .
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      # ローカルと同じコマンド。起動・待機・停止はComposeが担当する
+      - run: bash scripts/e2e.sh
+        env:
+          CI: "true"
+      # 失敗時にPRからレポート・トレースを確認できるよう、成功・失敗を問わず保存する
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: ${{ !cancelled() }}
+        with:
+          name: e2e-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          if-no-files-found: warn
+          retention-days: 14
