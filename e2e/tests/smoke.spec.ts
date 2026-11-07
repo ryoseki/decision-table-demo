@@ -8,7 +8,7 @@ const expectedHealthStatus = process.env.E2E_EXPECTED_HEALTH_STATUS ?? "ok";
 
 test("初期画面が表示される", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "不正審査デモ" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "存在しない見出し" })).toBeVisible();
 });
 
 test("GET /health が正常を返す", async ({ request }) => {
