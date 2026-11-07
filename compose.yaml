@@ -1,0 +1,10 @@
+# 初期化の確認用。ポート・ボリュームなどの細目は開発環境担当が決める。
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
