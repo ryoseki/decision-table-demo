@@ -85,6 +85,19 @@ Windows側のクローンでは、`pwsh -File scripts/Start-Symphony.ps1 -Projec
 
 停止するときは、起動したターミナルでCtrl+Cを押してください。`max_turns: 5`は1回の実行内の連続ターン上限です。総実行回数の上限ではなく、Issueが実行対象の状態に残ると再実行されるため、初回はレビュー待ちへの状態変更まで確認します。
 
+## E2E環境のスモークテスト
+
+WSL 2のUbuntuで、クローン先のルートから次を実行します。必要なのはDocker Composeだけで、Node.jsやPythonをホストへ導入する必要はありません。
+
+```bash
+bash scripts/e2e.sh                  # 成功を期待する通常実行
+bash scripts/e2e.sh --force-failure  # /health の期待値を変えて意図的に失敗させる
+```
+
+Composeが専用のプロジェクト名（`decision-table-demo-e2e`）でfrontend（Vite）とbackend（FastAPI）を起動し、healthcheckで待機してからPlaywright（`e2e/`）を実行します。終了後は、そのプロジェクトのコンテナとネットワークだけを停止・削除します。ホストのポートは公開しないため、通常の開発環境（`docker compose up`）を起動したままでも実行でき、その環境には影響しません。終了コードは成功が0、失敗が0以外です。起動や待機の失敗も0以外になります。失敗時は`e2e/playwright-report/index.html`のレポートと`e2e/test-results/`のトレースで理由を確認します。CIも同じ`bash scripts/e2e.sh`を呼びます。CIのワークフローとチェック名は別の課題で決めます。
+
+対象は初期画面の表示と`GET /health`の応答だけです。業務E2Eのシナリオ・入力・期待結果は、初版要件の合意後に別に追加し、この環境のスモーク結果とは分けて記録します。
+
 ## 成果物とレビュー
 
 | 場所 | 内容 |
