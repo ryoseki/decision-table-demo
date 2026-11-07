@@ -5,3 +5,10 @@
 !.env.example
 node_modules/
 dist/
+
+# 個人用
+.pkb-outbox
+
+# E2E
+e2e/test-results/
+e2e/playwright-report/

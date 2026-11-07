@@ -1,0 +1,21 @@
+# 初期化の確認用。ポート・ボリュームなどの細目は開発環境担当が決める。
+# E2E用の設定は compose.e2e.yaml に分けている（scripts/e2e.sh が専用プロジェクト名で使う）。
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
