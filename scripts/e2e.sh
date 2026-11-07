@@ -20,12 +20,32 @@ mkdir -p e2e/test-results e2e/playwright-report
 # 通常の開発環境を止めないよう、E2E専用のプロジェクト名とポート無公開の設定で分離する。
 compose=(docker compose -p decision-table-demo-e2e -f compose.yaml -f compose.e2e.yaml)
 "${compose[@]}" up --build --abort-on-container-exit --exit-code-from e2e e2e
-code=$?
-"${compose[@]}" down --remove-orphans
+up_code=$?
 
-if [ "$code" -eq 0 ]; then
+# 後片付けはテスト結果に関わらず必ず実行し、その終了コードも記録する。
+"${compose[@]}" down --remove-orphans
+down_code=$?
+
+# 終了コードの決定:
+#   - up（起動・テスト）が失敗していれば、down の成否に関わらずその終了コードを保持する。
+#   - up が成功し down だけ失敗した場合は、down の終了コードで失敗扱いにする。
+if [ "$up_code" -ne 0 ]; then
+  exit_code=$up_code
+elif [ "$down_code" -ne 0 ]; then
+  exit_code=$down_code
+else
+  exit_code=0
+fi
+
+if [ "$up_code" -ne 0 ]; then
+  echo "E2Eスモークテスト: 失敗（テストまたは起動の終了コード $up_code）。e2e/playwright-report と e2e/test-results を確認してください。" >&2
+fi
+if [ "$down_code" -ne 0 ]; then
+  echo "E2Eスモークテスト: 後片付け（docker compose down）に失敗（終了コード $down_code）。プロジェクト decision-table-demo-e2e のコンテナやネットワークが残っている可能性があります。" >&2
+fi
+if [ "$exit_code" -eq 0 ]; then
   echo "E2Eスモークテスト: 成功"
 else
-  echo "E2Eスモークテスト: 失敗（終了コード $code）。e2e/playwright-report と e2e/test-results を確認してください。" >&2
+  echo "E2Eスモークテスト: 失敗（最終終了コード $exit_code）" >&2
 fi
-exit "$code"
+exit "$exit_code"
