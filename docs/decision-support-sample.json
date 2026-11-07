@@ -1,0 +1,122 @@
+{
+  "review_cases": [
+    {
+      "case_id": "CASE-C",
+      "scenario": "credits",
+      "source_case_ref": "INBOX-C",
+      "summary": "主対象ユーザーの無料枠利用を確認する。",
+      "user_data": { "user_id": "123" },
+      "inquiry_data": {
+        "subject": "無料枠の利用について",
+        "body": "同じ学校の回線から無料枠が使われているとの連絡が届いた。（架空の問い合わせ）"
+      }
+    },
+    {
+      "case_id": "CASE-A",
+      "scenario": "account_api",
+      "source_case_ref": "INBOX-A",
+      "summary": "心当たりのないログインとクレジット消費について問い合わせが届いた。",
+      "user_data": { "user_id": "456" },
+      "inquiry_data": {
+        "subject": "心当たりのないログイン",
+        "body": "身に覚えのないログインとクレジットの消費があった。（架空の問い合わせ）"
+      },
+      "period_start_at": "2026-10-20T09:00:00+09:00",
+      "period_end_at": "2026-10-20T12:00:00+09:00"
+    }
+  ],
+  "review_questions": [
+    {
+      "question_code": "C01",
+      "scenario": "credits",
+      "category": "registration",
+      "prompt": "2つのアカウントの登録氏名は異なるか？",
+      "auto_answer_key": "mock_parity",
+      "source_kind": "アカウント登録情報",
+      "source_field": "氏名照合結果"
+    },
+    {
+      "question_code": "C06",
+      "scenario": "credits",
+      "category": "credit",
+      "prompt": "対象取引はキャンペーン付与か？",
+      "auto_answer_key": "mock_parity",
+      "source_kind": "クレジット台帳",
+      "source_field": "対象取引の種別"
+    },
+    {
+      "question_code": "A03",
+      "scenario": "account_api",
+      "category": "account_changes",
+      "prompt": "対象期間に登録メールアドレスが変更されたか？",
+      "auto_answer_key": null,
+      "source_kind": "アカウント変更履歴",
+      "source_field": "登録メールアドレスの変更回数"
+    },
+    {
+      "question_code": "A09",
+      "scenario": "account_api",
+      "category": "api",
+      "prompt": "対象期間にAPIキーが新しく発行されたか？",
+      "auto_answer_key": "mock_parity",
+      "source_kind": "APIキー発行履歴",
+      "source_field": "対象期間の新規発行数"
+    }
+  ],
+  "decision_rules": [
+    {
+      "rule_id": "DEMO-RULE-1",
+      "scenario": "credits",
+      "result_code": "demo_result",
+      "conditions": { "C01": "yes", "C06": "no" }
+    }
+  ],
+  "case_results": [
+    {
+      "case_id": "CASE-C",
+      "scenario": "credits",
+      "result_code": "demo_result",
+      "rule_id": "DEMO-RULE-1",
+      "recorded_by": "OP-1",
+      "recorded_at": "2026-10-20T13:05:00+09:00"
+    },
+    {
+      "case_id": "CASE-A",
+      "scenario": "account_api",
+      "result_code": "demo_manual_result",
+      "rule_id": null,
+      "recorded_by": "OP-1",
+      "recorded_at": "2026-10-20T13:05:00+09:00"
+    }
+  ],
+  "case_checks": [
+    {
+      "case_id": "CASE-C",
+      "question_code": "C01",
+      "answer": "yes",
+      "answered_by": "OP-1",
+      "answered_at": "2026-10-20T13:00:00+09:00"
+    },
+    {
+      "case_id": "CASE-C",
+      "question_code": "C06",
+      "answer": "no",
+      "answered_by": "OP-1",
+      "answered_at": "2026-10-20T13:00:00+09:00"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A03",
+      "answer": "no",
+      "answered_by": "OP-1",
+      "answered_at": "2026-10-20T13:00:00+09:00"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A09",
+      "answer": "pending",
+      "answered_by": "OP-1",
+      "answered_at": "2026-10-20T13:00:00+09:00"
+    }
+  ]
+}
