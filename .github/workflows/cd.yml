@@ -1,0 +1,270 @@
+# 検証環境（Lambda）への手動配布。PR・pushでは動かない。
+# 設計・前提・未実施の確認は docs/development-workflow.md、初回構築は infra/cd/bootstrap.md を参照。
+# 信頼境界:
+#   - 配布処理のコード（scripts/*）は常に起動したmainのコミット（github.sha）のものを使う。
+#     対象SHAの内容はビルドジョブでだけ、AWSの資格情報なしでビルドする。
+#   - AWSの資格情報（OIDC）は deploy ジョブだけ。Environment `demo` の承認・設定確認の後に取得する。
+# アクションはコミットSHAで固定している（コメントは対応するタグ）。
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "配布するmain上の完全なコミットSHA（40桁の小文字16進数。ブランチ名・タグ・短縮SHA不可）"
+        required: true
+        type: string
+
+permissions: {}
+
+# 同時に動かせる配布は1つ。実行中のものはキャンセルしない。
+concurrency:
+  group: demo
+  cancel-in-progress: false
+
+env:
+  # ローカル向けの緩和は配布では使わない。
+  CD_ALLOW_LOCAL: "false"
+
+jobs:
+  build:
+    name: build ${{ inputs.source_sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+    outputs:
+      zip_sha256: ${{ steps.build.outputs.zip_sha256 }}
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      ci_run_url: ${{ steps.source.outputs.ci_run_url }}
+    steps:
+      # main以外から起動された場合は、スキップ（成功に見える）ではなく明示的に失敗させる。
+      # 何も取得せず、後続のジョブ（deploy）も動かない。
+      - name: mainからの起動であることを確認する
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "このワークフローは main からだけ起動できます（起動したref: $GITHUB_REF）。" >&2
+            exit 1
+          fi
+
+      # 配布コードは起動したmainのコミット。対象SHAのチェックアウトは検証の後に行う。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: オフラインテスト（偽のAWS・偽のGitHub APIを使う。実環境の検証ではない）
+        run: python3 -B -I -m unittest discover -s tests/cd
+
+      - name: Environmentの保護設定を確認する
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CD_APPROVER_LOGIN: ${{ vars.CD_APPROVER_LOGIN }}
+        run: |
+          if [ -z "${CD_APPROVER_LOGIN//[[:space:]]/}" ]; then
+            echo "リポジトリ変数 CD_APPROVER_LOGIN が未設定です。" >&2
+            exit 1
+          fi
+          python3 -B -I scripts/cd-preflight.py environment --approver "$CD_APPROVER_LOGIN"
+
+      - name: ソースSHAとCIの成功を確認する
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 -B -I scripts/cd-preflight.py source --sha "$SOURCE_SHA"
+
+      # 検証済みのSHAの内容へ切り替える（履歴は fetch-depth: 0 で取得済み）。
+      - name: 対象SHAをチェックアウトする
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          git -c advice.detachedHead=false checkout --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: ZIPをビルドする（AWSの資格情報なし）
+        id: build
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          out="dist/cd/$SOURCE_SHA"
+          bash scripts/build-lambda.sh "$SOURCE_SHA" "$out"
+          zip_hex="$(sha256sum "$out/lambda-$SOURCE_SHA.zip" | cut -d' ' -f1)"
+          if ! [[ "$zip_hex" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ZIPのハッシュを取得できません。" >&2
+            exit 1
+          fi
+          jq -e --arg sha "$SOURCE_SHA" --arg zip "$zip_hex" \
+            '.sourceSHA == $sha and .releaseEligible == true and .dirty == false and .zip.sha256Hex == $zip' \
+            "$out/manifest.json" >/dev/null
+          {
+            echo "zip_sha256=$zip_hex"
+            echo "artifact_name=lambda-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+
+      # 同じrun内の専用名。上書きしない。配布ジョブはこの成果物だけを使う。
+      - name: 成果物を保存する
+        id: upload
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ${{ steps.build.outputs.artifact_name }}
+          path: dist/cd/${{ inputs.source_sha }}/
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: 承認前の確認用サマリー
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_RUN_URL: ${{ steps.source.outputs.ci_run_url }}
+          ZIP_SHA256: ${{ steps.build.outputs.zip_sha256 }}
+          ARTIFACT_NAME: ${{ steps.build.outputs.artifact_name }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          {
+            echo "### 配布候補（承認前に確認する）"
+            echo "- ソースSHA: \`$SOURCE_SHA\`"
+            echo "- CIのrun: $CI_RUN_URL"
+            echo "- ZIPのSHA-256（実測）: \`$ZIP_SHA256\`"
+            echo "- 成果物: \`$ARTIFACT_NAME\`（ID $ARTIFACT_ID）"
+            echo "- 上記を確認してから、Environment \`demo\` を承認する。承認後に内容が変わっていれば配布は止まる。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: deploy ${{ inputs.source_sha }}
+    needs: build
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # 承認はAWSの資格情報の発行前。Environmentの名前（demo）は運用上の選択で、設定は実施前に確認する。
+    environment: demo
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+      id-token: write
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      ZIP_SHA256: ${{ needs.build.outputs.zip_sha256 }}
+      CI_RUN_URL: ${{ needs.build.outputs.ci_run_url }}
+    steps:
+      # 配布コードは対象SHAではなく、起動したmainのコミット。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: ビルド成果物を取得する（同じrunのもの）
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ${{ runner.temp }}/lambda-artifact
+
+      - name: 承認後の設定・承認記録・変数を確認する（AWSの資格情報の前）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CD_APPROVER_LOGIN: ${{ vars.CD_APPROVER_LOGIN }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
+          CD_BASE_URL: ${{ vars.CD_BASE_URL }}
+          LAMBDA_LAYER_CODE_SHA256: ${{ vars.LAMBDA_LAYER_CODE_SHA256 }}
+        run: |
+          for name in AWS_ROLE_ARN LAMBDA_FUNCTION_NAME CD_BASE_URL LAMBDA_LAYER_CODE_SHA256 CD_APPROVER_LOGIN; do
+            value="${!name}"
+            if [ -z "${value//[[:space:]]/}" ]; then
+              echo "変数 $name が未設定または空です。" >&2
+              exit 1
+            fi
+          done
+          if ! [[ "$AWS_ROLE_ARN" =~ ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$ ]]; then
+            echo "AWS_ROLE_ARN の形式が不正です。" >&2
+            exit 1
+          fi
+          if ! [[ "$ZIP_SHA256" =~ ^[0-9a-f]{64}$ ]] || ! [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ビルドジョブの出力が不正です。" >&2
+            exit 1
+          fi
+          python3 -B -I scripts/cd-preflight.py environment --approver "$CD_APPROVER_LOGIN"
+          python3 -B -I scripts/cd-preflight.py approval --approver "$CD_APPROVER_LOGIN" --run-id "$GITHUB_RUN_ID"
+
+      # 取得した成果物（manifestとZIP）を、ソースSHA・ビルドジョブのZIPハッシュ・
+      # releaseEligible=true・dirty=false と照合する。AWS CLI・資格情報・通信は使わない。
+      # 改ざん・取り違えがあれば、AWSの資格情報の発行前にここで止まる。
+      - name: 成果物を検証する（AWSの資格情報の前。AWS CLI・通信なし）
+        run: |
+          python3 -B -I scripts/deploy-lambda.py --verify-artifact-only \
+            --artifact-dir "$RUNNER_TEMP/lambda-artifact" \
+            --source-sha "$SOURCE_SHA" \
+            --zip-sha256 "$ZIP_SHA256"
+
+      - name: AWSの一時資格情報を取得する（OIDC）
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: cd-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 3600
+          role-skip-session-tagging: true
+
+      - name: 配布する（検証 → 現行版の確認 → 更新 → スモーク確認 → 失敗時の戻し）
+        env:
+          LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
+          CD_BASE_URL: ${{ vars.CD_BASE_URL }}
+          LAMBDA_LAYER_CODE_SHA256: ${{ vars.LAMBDA_LAYER_CODE_SHA256 }}
+        run: |
+          python3 -B -I scripts/deploy-lambda.py \
+            --artifact-dir "$RUNNER_TEMP/lambda-artifact" \
+            --source-sha "$SOURCE_SHA" \
+            --zip-sha256 "$ZIP_SHA256" \
+            --ci-run-url "$CI_RUN_URL" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --base-url "$CD_BASE_URL" \
+            --layer-code-sha256 "$LAMBDA_LAYER_CODE_SHA256" \
+            --result-file cd-result/result.json
+
+      - name: 結果のサマリー
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### 配布結果"
+            if [ -f cd-result/result.json ]; then
+              jq -r '
+                "- 全体: **\(.overall)**（最後の段階: \(.stage)）",
+                "- ソースSHA: `\(.sourceSHA)` / ZIP: `\(.zipSha256)`",
+                "- CIのrun: \(.ciRunUrl)",
+                "- 検証: \(.validation) / 現行版のスモーク: \(.previousSmoke)",
+                "- 配布処理: \(.deployment) / 新しい版のスモーク: \(.smoke) / ロールバック: \(.rollback)",
+                "- 版: 直前 \(.versions.previous) → 今回 \(.versions.new)、エイリアス: \(.alias.state)（版 \(.alias.version)）",
+                "- AWSの変更操作の開始: " + (if .mutationStarted == true then "開始した（成功を意味しない。結果を確認する）" elif .mutationStarted == false then "開始前" else "不明" end),
+                (if .note then "- 備考: \(.note)" else empty end),
+                (if .error then "- エラー: \(.error)" else empty end),
+                (if .recoveryNote then "- 復旧メモ: \(.recoveryNote)" else empty end)
+              ' cd-result/result.json
+            else
+              echo "結果ファイルがありません。AWSの操作の有無は未確認です（結果の書き込みはAWSの変更後に失敗することがある）。"
+              echo "エイリアス demo の指す版と関数の状態を人が確認し、必要なら infra/cd/bootstrap.md の復旧手順に従ってください。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ビルド成果物とは別の成果物。失敗時も保存する。
+      - name: 結果とスモーク確認のレポートを保存する
+        if: ${{ always() }}
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: cd-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            cd-result/
+            e2e/cd/playwright-report/
+            e2e/cd/test-results/
+          if-no-files-found: warn
+          overwrite: false
+          retention-days: 90

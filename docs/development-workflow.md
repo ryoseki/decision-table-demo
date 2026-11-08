@@ -1,6 +1,6 @@
 # Issueから検証環境までの開発運用
 
-2026-11-07更新。GitHubを使う運用案です。Codexが案件別コピーでブランチを作り、変更・検証・PR作成まで進めます。人はGitHub上で差分とCI結果を確認し、マージを判断します。GitHubへの書き込み権限、ブランチ保護、CI/CDは導入前に確認します。業務要件の根拠は[要件書](requirements.md)です。
+2026-11-08更新。GitHubを使う運用案です。Codexが案件別コピーでブランチを作り、変更・検証・PR作成まで進めます。人はGitHub上で差分とCI結果を確認し、マージを判断します。GitHubへの書き込み権限、ブランチ保護、CI/CDは導入前に確認します。業務要件の根拠は[要件書](requirements.md)です。
 
 ## 着手条件と担当
 
@@ -14,7 +14,7 @@
 | マージ承認者（人） | GitHub上でPRの差分と最新コミットのCI結果を確認し、マージするか判断する。 |
 | 検証環境への配布承認者（人） | 配布対象コミット、検証先、復旧手順を確認して配布を承認する。 |
 
-リポジトリ管理担当をマージ承認者、検証環境管理担当を配布承認者とする案です。同じ人の兼任も可とし、担当者と代理をLinearに記録します。承認者が決まるまでマージ・配布は保留します。
+リポジトリ管理担当をマージ承認者、検証環境管理担当を配布承認者とする案です。同じ人の兼任も可とし、担当者と代理をLinearに記録します。配布については、唯一の人が起動し承認する運用を合意済みです（後述の「自己承認の扱い」）。承認者が決まるまでマージ・配布は保留します。
 
 現在の対象はREADME記載のSymphony v0.0.3／Codex 0.166.0です。現行の`WORKFLOW.md`は元リポジトリをIssueごとに別の場所へクローンし、その中でCodexを起動します。元の作業ツリーのブランチは切り替わりません。クローンに入るのはコミット済みの内容です。準備確認、Linearへの実接続、GitHubへのPR作成、アプリの確認は分けて記録します。
 
@@ -43,7 +43,7 @@
 
 PRには目的・変更点、対象Issueとworkpad、基点／成果／PRのSHA、確認コマンド・結果、未確認事項を記載します。内部リンクはPRとLinearに置き、公開文書には記載しません。
 
-CI構築の子課題で、次のチェックと必須チェック名を確定します。現時点では実行済みではありません。
+CI構築タスクのDone時点の記録では、`require-ci-main`ルールセットでmainブランチに以下の必須チェックを設定しています。2026-11-08に、CodexがGitHubのAPIで`main`の`protect-main`と`require-ci-main`のルールセットが有効であることを確認しました。
 
 | CIで判定する検査 | 受入結果 |
 | --- | --- |
@@ -63,9 +63,204 @@ AIレビューを使う場合も、機械的な合否はCIが判定し、マー�
 
 ## 検証環境への配布
 
-CD構築の子課題で配布先・認証の管理方法・承認者・手順を合意します。本番環境は対象外です。配布承認者はCI通過済みかつ人が承認したコミットSHAを指定し、そのSHAに対応する成果物を配布します。
+この節は配布手順の案と、その実装（コードのみ）の状況です。実際の配布・承認・マージ・AWS操作は未実施です（GitHubのEnvironment `demo` とリポジトリ変数 `CD_APPROVER_LOGIN` はCodexが設定済み）。**案の合意と実行許可は別**で、AWSのリソース作成・設定・配布の許可はまだ与えられていません。実際のCD（配布・ロールバック）の動作は未検証です。現在、配布を承認したコミットSHAはありません。
 
-配布ごとに、PR、配布SHA、承認記録、デプロイ実行URLと結果、検証URL、配布後の確認結果をworkpadへ結び付けます。初期画面と`GET /health`のスモーク結果を、配布処理の成功とは分けて残します。失敗時は次の配布を保留し、直前の正常版のSHAと復旧手順を使って戻し、再確認の結果も残します。直前の正常版がない初回配布では、停止・再配布の手順を事前に合意します。
+### 現在の状況
+
+| 区分 | 内容 |
+| --- | --- |
+| 要件・合意済みの前提 | FastAPIがViteでビルドした静的UIを配信する。AWS Lambda（ZIP、Python 3.14）で実行し、データベースはAurora DSQLとする（初回配布ではDBを作らない）。月額ゼロ円は目標であり保証ではない。 |
+| 利用者の直接回答で確認済み（2026-11-08） | リージョンは東京（ap-northeast-1）。既存のLambda関数とAurora DSQLクラスタはない（利用者の報告。他のAWSリソースの有無は確認していない）。月額の許容上限は最大1,000円。公開URLは架空データのみを扱う、誰でもアクセスできるデモとし、常時公開を目指す。AWSアカウントは非常に古い（利用者の報告）。 |
+| 設計の合意（2026-11-08。実行許可ではない） | 唯一の人が配布を起動し承認する。Environmentの自己承認禁止（`prevent_self_review`）は意識して無効（false）にする。費用アラートは300・500・800円、500円の通知で人が手動で公開を止める。請求データの反映遅れのため、1,000円の厳密な上限は作れない（説明済み）。 |
+| 前提（仮定） | 古いアカウントのため、現行の「Freeアカウントプラン」ではなく従来の従量課金・無料利用枠のアカウントと仮定する。コンソールでの実際の種別・無料枠の対象は未確認で、確認するまで仮定として扱う。既存アカウントの利用を推奨し、新たなFreeプランやクレジットを使い回す運用はしない。LambdaとAurora DSQLがないことは利用者の報告で、他のAWSリソースがないとは仮定しない。 |
+| 実装・ローカル確認の状況（Codex、2026-11-08） | ZIPのビルド・スモーク確認はローカルで実装済みで、最終ZIPでローカルのコンテナとブラウザの確認を実行した記録がある（後述の「ローカルでの確認結果」）。手動のCDワークフロー（`.github/workflows/cd.yml`）、事前確認（`scripts/cd-preflight.py`）、配布ヘルパー（`scripts/deploy-lambda.py`）、IAMの雛形、初回構築の手順書（`infra/cd/bootstrap.md`）はコードと文書として追加した。ヘルパーのオフラインテスト（`tests/cd/`。偽のAWS・偽のGitHub APIを使う）は実行済みだが、**実際のAWS・GitHubの検証ではない**（直近の実行結果は、Codexが報告する最新のものを参照）。ワークフローはGitHub上で実行しておらず、変更は未コミットで、承認されたコミットはない。CIにはオフラインテストを回す`cd-offline`ジョブを追加した（PR・`main`で実行。必須チェック名には含めていない）。 |
+| 確認済み（2026-11-08、Codex） | GitHubリポジトリは公開で、GitHub APIで`main`の`protect-main`と`require-ci-main`のルールセットが有効。Codexが既存の`main`（CIのrunは成功）を読み取りで確認し、Environment `demo`を設定した（必須レビュー担当者1人、自己承認の禁止は無効、デプロイブランチは`main`のブランチのみ）。リポジトリ変数`CD_APPROVER_LOGIN`も設定済み。管理者による迂回の無効化は要求したがAPIの応答にフィールドがなく**未確認**。AWS関連の変数は**すべて未設定**で、AWSの認証・操作は行っていない。 |
+| 範囲外 | SLAは依頼・要件に含まれていないため、運用前の決定事項にしない。 |
+| 未確認・未決 | AWSコンソールで読み取り専用に確認する、実際のアカウント種別と無料枠の対象。予算アラートの宛先（利用者がAWS側で非公開に入力する。円建ての閾値をUSDへ換算する為替・税の扱いは、作成前に人が確認する）。アダプタのレイヤー実体のハッシュと、実際のLambda上での動作。AWS関連のリポジトリ変数（AWS作成後）。実際のCD（配布・ロールバック）の動作。常時公開の最終判断。 |
+
+以前の「配布ワークフローを作らない」という記述は、当時の計画段階の範囲に関するものです。担当の配布Issueの受入条件は、人が承認したCI通過済みの正確なコミットSHAを実際にLambdaのZIPとして配布し、SHAからURLと結果までたどれ、FastAPIがビルド済みのVite画面とヘルスを配信することを初期画面とヘルスで別々に確認し、結果を別に記録して、直前の正常版へ戻せることです。実際の配布・レビュー・マージが完了するまで、そのIssueを`Done`にはしません。現時点では、配布・レビュー・マージのいずれも未実施です。
+
+### 初回構築（配布とは別の操作）
+
+配布の前に、IAMロール、Lambda関数、エイリアス`demo`、関数URL、ログの保持期間、配布用のOIDCロールを作る初回構築が必要です。この構築は配布ワークフローとは別の、人が承認する操作で、具体的なコマンド・IAMの雛形・GitHubの設定は[初回構築の手順書](../infra/cd/bootstrap.md)にあります（**未実行**。AWSでの作成は未承認）。CDは、そこで作った既存で正常なエイリアスを更新するだけで、IAM・関数URL・同時実行数・ログの操作を含みません。
+
+データベースはAurora DSQLのままとします。ただし、現在の最小構成のアプリはDBを使っていないため、初期画面とヘルスの初回配布の前にAurora DSQLを作る必要はありません。クラスタの作成、接続、スキーマはDB接続・スキーマを扱う別の課題で行います。
+
+### 配布の流れ（実装済み・未実行）
+
+詳細はワークフローとスクリプトのコメントを参照し、ここでは要点だけ記します。
+
+1. **起動**: 人が`workflow_dispatch`で、`main`から、マージ済み`main`上の完全な40桁のSHAを指定する。ブランチ名・タグ・短縮SHAは受け付けない。`main`以外から起動した場合は、スキップ（成功に見える）ではなく、buildジョブが明示的に失敗する。自動の配布はなく、手動のみ。同時に動かせる配布は1つで、実行中のものはキャンセルしない。
+2. **事前確認（buildジョブ。AWSの資格情報なし）**: 起動したコミットの配布コードで、オフラインテスト、Environment`demo`の保護設定の確認（必須レビュー担当者がリポジトリ変数`CD_APPROVER_LOGIN`の1人のユーザー、自己承認禁止は無効、デプロイブランチは`main`のみ、管理者の迂回なし）、対象SHAが`origin/main`の祖先であること、同じSHAの`ci.yml`のpushのrun（最新）と、その最新の試行の`frontend`・`backend`・`e2e`のジョブがすべて成功していること（スキップ・部分成功は不可）を確認する。Environmentが無い・読めない場合は止まり、自動作成には頼らない。
+3. **ビルドと保管**: 確認後に対象SHAをチェックアウトし、`scripts/build-lambda.sh`でリリースモードのZIPとマニフェストを作る。同じrun内の専用名で上書きなしに保存し、ZIPの実測ハッシュ、CIのrun、ソースSHA、成果物IDをサマリーに出す。**承認者はこのサマリーを見てから承認する**。
+4. **承認と再確認（deployジョブ）**: Environment`demo`の承認後、AWSの資格情報の前に、設定・承認記録・必須変数（`AWS_ROLE_ARN`、`LAMBDA_FUNCTION_NAME`、`CD_BASE_URL`、`LAMBDA_LAYER_CODE_SHA256`、`CD_APPROVER_LOGIN`）を確認する。配布コードは対象SHAではなく起動したコミットのもの。続けて、ダウンロードした成果物（manifestとZIP）を、ソースSHA・ビルドジョブのZIPハッシュ・`releaseEligible=true`・`dirty=false`と照合する（`deploy-lambda.py --verify-artifact-only`。AWS CLI・資格情報・通信を使わない）。改ざんがあれば資格情報の前に止まる。その後にOIDCで一時資格情報を得る（ロールセッション名はrun番号と試行）。`CD_ALLOW_LOCAL`は常にfalseで、ワークフローとヘルパーは拒否する。
+5. **変更前の検証（`deploy-lambda.py`。失敗したら変更しない）**: マニフェストとZIPの内容、ビルドの出力とのハッシュ照合、`releaseEligible=true`・`dirty=false`、関数がPython 3.14・x86_64・ハンドラ`run.sh`・固定レイヤー・`/opt/bootstrap`であること、レイヤーのCodeSha256が記録値と一致すること、関数URLがエイリアス`demo`で認証なし・BUFFERED・期待するオリジンであること、エイリアスが加重なしの数値の版を指し、その版のdescription（`source=<sha>;zip=<hex>;run=<id>`）がコードのハッシュと一致すること、現在の版のスモーク確認が成功すること。
+6. **更新**: 検証時に取得した関数のRevisionIdを条件にコードを更新する（現行版のスモーク確認の間に設定が変わっていれば、更新は拒否される。更新の直前に読み直した値は使わない）。返ってきたCodeSha256がマニフェストと一致することを確認し、更新完了を待つ（AWS CLIの`wait function-updated-v2`。`GetFunction`を使う）。更新後に設定を読み直し、検査対象の設定とコードのハッシュ、こちらの更新が返したRevisionIdのままであること（他者の変更がないこと）を確認してから、そのRevisionIdとコードのSHA-256を条件に版を発行する（descriptionに出所を記録）。発行された版（再利用する既存の版も同じ）は、Pendingのことがあるため、AWS CLIの`wait function-active-v2 --qualifier <版>`（上限つき。追加の権限は不要）でActiveを待ってから確認し、その後にエイリアスを切り替える。待機の失敗・タイムアウトはエイリアスを動かさず失敗とする。AWSはコード・設定が変わらないと新しい版を作らず既存の版を返すため、返された版を読み、descriptionのソースSHA・ZIPのハッシュ、コードのハッシュ、検査対象の設定がすべて今回と一致すると証明できたときだけ再利用する。証明できなければ、エイリアスを動かさず止まり、手動確認とする（設定を変えて版を作らせることはしない）。続いて、エイリアスの`RevisionId`を条件に（加重なしで）切り替え、承認したSHAでブラウザのスモーク確認を行う。配布処理とスモーク確認は別々に記録する。エイリアスが既に今回と同じソースSHA・ZIPの版を指し、現行版のスモーク確認が合格した場合は、変更なしの成功（`overall=no-change-success`、`deployment=already-current`）として終え、新しい版の発行も新しい配布のスモーク確認もしない。新しい配布の成功とは扱わない。
+7. **失敗時の戻し**: 切り替えた後にスモーク確認が失敗したら、**こちらの更新が成功として返した**`RevisionId`だけを条件に、記録した直前の版へ戻す。戻しの応答（版・`RevisionId`）を検証できたときだけ、直前のSHAでスモーク確認を行う。応答が不正なら戻しの失敗とし、手動復旧とする。戻しが成功しても全体は失敗として終了する。エイリアス更新の結果が不明な場合（エラー応答、期待と異なる応答）は、読み直した`RevisionId`は外部の変更かもしれず戻しの根拠にしないため、自動では戻さず、観測した状態を記録して全体を失敗とし、手動復旧とする（観測した版が今回の版でも上書きしない）。エイリアスが外部で変更されていた場合（条件付き更新の拒否）も、上書きせず、エイリアスの実際の版は不明と記録する。切り替え前の失敗では、無関係な変更を戻さない。版・成果物・DBは削除しない。
+8. **記録**: 結果JSON（ソースSHA、ZIPのハッシュ、CIのrun、配布・スモーク・戻しの状態、版、エイリアスのRevisionId、AWSの変更操作の開始の有無`mutationStarted`）を、処理の各段階と最後に書き、ビルド成果物とは別の成果物として常に保存する。秘密・ローカルの絶対パス・Lambda設定の全体は含めない。プロセスが強制終了・タイムアウトした場合は戻し処理が走らないことがあり、その場合は結果JSONの復旧メモと手順書で人が確認する（保証はしない）。
+
+**成果物の保管**: GitHub Actionsの成果物は90日で消えます。Lambdaの現在の版と直前の版は、より新しい版がスモーク確認に合格するまで削除しません。成果物が期限切れでも、版のdescriptionのZIPハッシュと照合して正確なZIPを取り戻せます（[手順書](../infra/cd/bootstrap.md)）。ソースの承認とrunの記録はworkpadに残します。成果物が永久に残るとは扱いません。
+
+### ZIPのビルドと確認（コマンド）
+
+実行はWSLのシェルでリポジトリルートから行います。AWSへは接続しません。ローカルでの確認結果は、この節の末尾の「ローカルでの確認結果」にまとめています。
+
+固定情報（実行方式の候補。採用・動作は未確認）:
+
+| 項目 | 値 |
+| --- | --- |
+| ランタイム・アーキテクチャ | Python 3.14（`python3.14`）・x86_64 |
+| 依存のwheel | `pip --platform manylinux2014_x86_64 --python-version 3.14 --abi cp314 --only-binary=:all: --require-hashes`（`backend/requirements.txt`のハッシュ固定。固定済みの本番依存を、Lambdaの公式手順と同じくpipで取得する）。ホストのwheelは使わない |
+| ビルドの実行基盤 | `docker buildx build --platform linux/amd64`で全ステージをx86_64に固定（arm64ホストではエミュレーションが必要） |
+| Lambda Web Adapter | v1.1.0（コミット`596bdbcea78a89084fd0b522807d04cd2f1f3f7e`）のREADMEに記載の東京x86レイヤー`arn:aws:lambda:ap-northeast-1:753240598075:layer:LambdaAdapterLayerX86:28` |
+| 関数の設定 | 環境変数`AWS_LAMBDA_EXEC_WRAPPER=/opt/bootstrap`・`PORT=8000`、ハンドラ`run.sh` |
+| 未検証 | レイヤー実体のハッシュ、このレイヤーとPython 3.14ランタイムの互換性 |
+
+```bash
+# 1. ビルド（承認済みのクリーンなHEADだけ。dist/cd はGit無視）
+bash scripts/build-lambda.sh <40桁のSHA> dist/cd/<40桁のSHA>
+#    ローカル検証専用（releaseEligible=false。配布には使わない）
+bash scripts/build-lambda.sh --allow-dirty <40桁のSHA> dist/cd/local
+
+# 2. 外部のURLに対するスモーク確認（httpsと releaseEligible=true が必須）
+CD_BASE_URL=https://<公開URL> CD_EXPECTED_SHA=<40桁のSHA> bash scripts/cd-smoke.sh
+
+# 3. 配布ヘルパーと事前確認のオフラインテスト（標準ライブラリのみ。偽のAWS・偽のGitHub APIを使う）
+python3 -B -I -m unittest discover -s tests/cd
+```
+
+3のテストは配布ロジックの確認で、実際のAWS・Lambda・GitHubの動作の検証ではありません。実行記録: Codexが固定したPython 3.14のホストで83件成功し、actionlint 1.7.12は`ci.yml`・`cd.yml`の両方で成功、`git diff --check`も成功した（この時点の結果）。その後、発行した版のActive待機のテスト4件を追加して87件になり、Claude Codeがローカル（Python 3.10.12）で87件成功を確認した。Python 3.14での再実行はCodexが行う（未実施）。CIの`cd-offline`ジョブは、同じテストを固定済みのPython 3.14イメージで、リポジトリを読み取り専用にマウントし、通信なし・資格情報なしで実行します。`python -B -I`でも、`-I`は`PYTHON*`環境変数を無視するだけなので、バイトコードを作らないよう`-B`を必ず付けます（`__pycache__`が作業ツリーに残ると、リリースのビルドが未コミットの変更として止まる原因になります）。
+
+ローカルのスモーク確認は、ZIPを空の専用ディレクトリに展開し、Python 3.14のコンテナで`run.sh`を起動して行います。ZIPの内容は信頼せずに扱い、展開は標準ライブラリの`zipfile`で行います（パスの逸脱を拒否します。実行権限は復元されませんが、`sh run.sh`で起動するため不要です）。
+
+```bash
+sha=<40桁のSHA>
+python3 -I -m zipfile -e "dist/cd/$sha/lambda-$sha.zip" "dist/cd/$sha/unpacked"
+
+docker network create cd-local
+docker run -d --rm --name cd-local-app --network cd-local \
+  -v "$PWD/dist/cd/$sha/unpacked:/var/task:ro" -w /var/task \
+  python:3.14.10-slim-trixie@sha256:af8a5aa14780025dbfbcfbc81bd8a91ebd87711dd5b0f48ed71090949dd7cb1d \
+  sh /var/task/run.sh
+CD_ALLOW_LOCAL=true CD_BASE_URL=http://cd-local-app:8000 CD_EXPECTED_SHA="$sha" \
+  bash scripts/cd-smoke.sh --network cd-local
+docker stop cd-local-app && docker network rm cd-local
+```
+
+注意: ZIPを置く場所を`--tmpfs`にする場合は`--tmpfs /var/task:exec`のように`exec`を付けます。Dockerの`--tmpfs`は既定で`noexec`で、pydanticなどのネイティブ共有ライブラリを読み込めず起動に失敗します（`noexec`のファイルシステムに展開した場合も同様）。これはテスト環境の設定の問題で、アプリの不具合ではありません。`CD_ALLOW_LOCAL=true`はローカル確認専用で、CDワークフローとヘルパーでは使えません。
+
+- `manifest.json`には、ZIPのSHA-256（16進とbase64。後者がAWSの`CodeSha256`）、ソースSHA、`dirty`、`releaseEligible`、ランタイム、アダプタの固定情報が入ります。`releaseEligible`はクリーンな作業ツリーかつHEADが指定SHAと一致したことだけを示し、人による承認を意味しません。ZIPのバイト単位の再現性は保証しません。
+- スモーク確認は、画面のHTTP 200・見出し・バンドルの読み込み、`/health`の完全一致、`/release`のSHAと配布可否を確認します。期待するSHAと違えば失敗します。`CD_BASE_URL`はオリジンのみ（認証情報・パス・クエリ・`#`を含むと拒否）で、httpは`CD_ALLOW_LOCAL=true`のときだけ許し、そのときだけ`releaseEligible=false`も許します。再試行はしません。レポートは`e2e/cd/playwright-report/<ID>`、トレース等は`e2e/cd/test-results/<ID>`に出ます（Git無視）。既存のE2E（`scripts/e2e.sh`）は`e2e/playwright-report`と`e2e/test-results`を整理するため、CDの結果はその外の`e2e/cd`配下に分けています。環境変数`CD_REPORT_ID`（任意。英数字で始まる64文字以内の英数字・`_`・`.`・`-`）を指定すると、それぞれの下の`<CD_REPORT_ID>/`に出力し、成功と失敗の記録を別々に残せます。未指定の場合は`_default/`だけに出力し、再実行で上書きされるのは`_default`のみです。正式な配布確認では、実行ごとに一意な`CD_REPORT_ID`を使います（CDヘルパーは`run<run番号>-<試行>-<previous|new|rollback>`を使う）。
+- FastAPIは環境変数`STATIC_DIR`と`RELEASE_FILE`が設定されたときだけ、ビルド済み画面と`/release`を配信します。未設定の開発時は従来どおり`/`が404です。
+
+#### ローカルでの確認結果
+
+2026-11-08にCodexが、アプリ・基盤の修正をすべて入れた後の最終ZIPで実行した結果の記録です（このレビューで再実行したものではありません）。ローカルのコードとコンテナ・ブラウザでの確認であり、AWS上での動作の確認ではありません。**この記録は、スモーク確認・ZIPビルドまでの過去の実測で、今回追加した配布ヘルパー・事前確認・ワークフローの検証ではありません。** 修正前の初期ビルド（SHA-256が`88e3effb…`で始まるもの）の記録は過去のもので、下の最終ZIPの値とは別です。
+
+最終ZIP（過去のローカル検証用。承認されたものではない）:
+
+| 項目 | 値 |
+| --- | --- |
+| 置き場所 | `dist/cd/dec14-local-final`（Git無視） |
+| ビルド方法 | `--allow-dirty`。変更は未コミット |
+| ソースSHAのラベル | `a9914ec77e36b7470e7c38186c81588e7f0fcf67`（作業ツリーが未コミットのため、このSHAの内容とは一致しない。承認されたSHAではない） |
+| ZIPのSHA-256（実測） | `44fc6c3aae3d12edc0ea28cad8afe5ea8850d30b34759a8144e0ca5d57c12532` |
+| `releaseEligible` | `false`（配布には使えない） |
+
+| 項目 | 結果（Codexが実際に観測したもの） |
+| --- | --- |
+| マニフェストとZIPの内容 | 実測したZIPのハッシュ（16進・base64）がマニフェストと一致。キャッシュと`node_modules`を除いたZIPの内容と、起動スクリプトの実行権限ビットを確認 |
+| 公式Lambda Python 3.14イメージ（digest `sha256:cf4c3a72…da9a29`、Amazon Linux 2023）上の最終ZIP単体（アダプタ・AWSのサービスなし）、正常系 | ブラウザのスモーク確認が4件中4件成功、終了コード0（`CD_REPORT_ID=final-positive`）。確認できたのはAmazon Linux 2023のネイティブライブラリでの読み込みまで |
+| 意図的に誤ったSHAを期待値にした異常系 | 3件成功・1件失敗、終了コード1。失敗は`/release`の不一致のみ。トレースは残っている（`CD_REPORT_ID=final-negative`） |
+| `CD_REPORT_ID`未指定の通常実行 | 4件中4件成功、終了コード0。実行後も名前付きの正常系・異常系のHTMLレポートと異常系のトレースが残っていた |
+| URLの検証 | パス・認証情報・クエリを含む`CD_BASE_URL`は、HTTP通信の前に`config --list`が非ゼロで終了して拒否された |
+| 拒否の確認 | 作業ツリーが未コミットのままのリリースモードのビルド、存在しないSHA、空でない出力先は、いずれも期待どおり拒否された |
+| 静的検査 | Ruffのlintと整形チェックが成功。シェルの構文確認と`git diff --check`が成功 |
+| 既存のE2E（`bash scripts/e2e.sh`） | 2件中2件成功。後片付けも完了 |
+| 最初の試行（記録済み） | 失敗。テスト側が`--tmpfs`を`noexec`のまま使い、ネイティブ共有ライブラリを読み込めなかった。`exec`を付けて成功した（上の注意を参照）。アプリの不具合ではない |
+
+名前付きレポートの保存先（Git無視）: `e2e/cd/playwright-report/final-positive/index.html`、`e2e/cd/playwright-report/final-negative/index.html`、異常系のトレースは`e2e/cd/test-results/final-negative`。
+
+未実施（成功とは扱わない）:
+
+- 変更後のワークフロー（`cd.yml`・`ci.yml`の`cd-offline`ジョブ）のGitHub上での実行、新しいコミットに対するCI（オフラインテストのローカル実行と、実際のAWS・GitHubでの動作は別）
+- クリーンな作業ツリーでの`releaseEligible=true`のビルド（承認されたコミットがない）
+- GitHubのCDワークフローの実行、AWS関連のリポジトリ変数の設定（Environmentと`CD_APPROVER_LOGIN`は設定済み）
+- AWSアカウントでの認証、アダプタのレイヤー実体のハッシュと、アダプタ・Lambdaサービスでの動作の確認
+- 実際の配布とロールバック（偽のAWSでのテストは実際のAWSの検証ではない）
+- 新しいコミットに対するCI、人の承認、マージ
+
+### Lambdaの設定と操作
+
+具体的なコマンドは[初回構築の手順書](../infra/cd/bootstrap.md)（未実行）です。
+
+- 設定: ランタイムpython3.14、アーキテクチャx86_64、ハンドラ`run.sh`、上記アダプタのレイヤー、環境変数`AWS_LAMBDA_EXEC_WRAPPER`・`PORT`、512MiB・予約済み同時実行数1・10秒・ログ7日。初回構築は予約済み同時実行数0で始め、公開の許可を作り、承認した初回デモの確認時だけ1にする。
+- 配布: 上記の「配布の流れ」のとおり。
+- ロールバック: 切り替え後のスモーク確認の失敗で、こちらが切り替えたエイリアスだけを記録した直前の正常版へ戻し、直前のSHAで同じスモーク確認を行って別に記録する。
+- 公開停止: 予約済み同時実行数を0にする（人が行い、再開は人の承認後）。
+
+### 自己承認の扱い
+
+合意（2026-11-08）: 唯一の人が配布を起動し、同じ人が承認する。GitHub Environmentの「レビュー担当者による自己承認の禁止」は意識して無効にする。これは独立した承認者を置かないことを意味し、承認の独立性は確保されない。その代わり、CDは承認前にサマリー（CIのrun、ソースSHA、実測したZIPのハッシュ）を示し、承認後にEnvironmentの設定・承認記録（承認者が`CD_APPROVER_LOGIN`の1人であること）・成果物のハッシュを再確認し、`main`以外のブランチからの配布を拒否する。Environmentがこの設定でない場合は、AWSの資格情報の前に止まる。承認者のログインはリポジトリ変数に置き、公開文書には書かない。
+
+### 権限の分離
+
+IAMの初期構築、Lambda関数URLの設定、予約済み同時実行数の変更（公開停止を含む）は、配布ワークフローの権限に含めず、人が承認した別の操作（前述の初回構築）にします。Aurora DSQLの作成と権限は、DB接続・スキーマの課題で人が承認する別の操作とします。配布用ロールの権限は、対象関数のコードの更新・版の発行・エイリアスの参照と更新・設定の読み取りと、固定したレイヤー版の読み取りに限り、`iam:PassRole`や管理者権限は含みません（雛形は`infra/cd/deploy-policy.json`、`infra/cd/oidc-trust-policy.json`）。
+
+### ロールバック
+
+- 失敗時は次の配布を保留し、記録した直前の正常版へエイリアスを戻す。戻した後に、同じスモーク確認を行って別に記録する。
+- 現在の正常版と直前の正常版の成果物・Lambdaの版は、より新しい版がスモーク確認に合格するまで保管する。
+- 初回配布には戻す先の正常版がない。失敗時は、後述の「費用と超過時の制御」の手動停止（予約済み同時実行数を0にする）を使う。
+- データベースとの互換性が必要な変更は、自動では戻さない。スキーマの変更を伴う場合は、人が別に判断する。
+
+### 費用と超過時の制御
+
+月額ゼロ円は目標であり、保証ではありません。利用者は月額の許容上限を最大1,000円と回答していますが、請求データの反映に遅れがあるため、1,000円の厳密な上限は作れず、1,000円以内に収まることも保証できません。公開URLは常時公開を目指します。
+
+**AWSアカウントの前提**
+
+利用者の報告ではアカウントは非常に古いため、従量課金・無料利用枠のアカウントと仮定します（前述の「前提（仮定）」）。実際の種別と無料枠の対象は配布前に読み取り専用で確認し、登録日や無料枠の残りは推測しません。プランの変更・アップグレードを起こす操作は行いません。仮定が外れた場合（期限やクレジットで終了するプランなど）は、常時公開の可否を含め人が改めて判断します。
+
+**構成**（設計の合意。AWSでの作成・設定は未実施で、実際の費用は未検証）
+
+| 項目 | 内容 |
+| --- | --- |
+| Lambdaのメモリ | 512MiB |
+| 予約済み同時実行数 | 1 |
+| タイムアウト | 10秒 |
+| ログの保持期間 | 7日 |
+| プロビジョニング済み同時実行 | 使わない |
+| NAT・ECR・S3・CloudFront | このデモのためだけには作らない |
+
+**条件付きの試算**（実際の予測ではありません）
+
+- Lambdaの呼び出しが月合計10,000回、平均1秒・512MiBの場合、0.5GB×1秒×10,000回＝5,000GB秒です。回数は利用者の訪問数ではなく、アセットの配信やモックの実行も含むすべての呼び出しの合計です。
+- Lambdaの無料利用枠（月100万リクエスト・40万GB秒）はアカウント全体で共有されます。アカウントが対象で、ほかで使っていなければ、この部分は0円になり得ます。これはLambda分だけの条件付きの見方で、アカウント全体の費用の見積もりではありません。
+- Aurora DSQLの無料利用枠は月100,000DPU・1GBですが、このアプリの実際のDPUは測定していません（初回配布ではDSQLを作らない）。
+- ログ、通信量、GitHub Actions、成果物の保存容量と、実際のアカウント種別・無料枠の対象が未確認のため、合計の円額はまだ見積もれません。
+
+**予算アラートと公開停止**（設計の合意。AWSでの設定は未実施。自動停止は実装しません）
+
+- 予算アラートを300円・500円・800円の通知とする設計は承認済み（作成は未承認）。通知先は利用者がAWS側で非公開に入力し、リポジトリ・チャット・Linearには書かない。
+- AWS Budgetsの予算額の単位は、公式のSpend APIの例ではUSDで、円建ての単位を使えるとは確認していない。300・500・800円に相当するUSDの閾値は、為替レート・税の扱いを人が確認して、作成前に決める（為替レートを作り話で置かない）。AWS Budgetsの監視と通知は無料で、有料のレポート・アクションは追加しない（[Spend API](https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_budgets_Spend.html)・[Budgetsの料金](https://aws.amazon.com/aws-cost-management/aws-budgets/pricing/)をCodexが2026-11-08に本文確認）。
+- 予算アラートは通知であって利用の上限ではありません（請求データの反映の遅れ）。
+- 初回配布が失敗したとき（戻す先の正常版がない）、または500円のアラートが届いたときは、人が手動でLambdaの予約済み同時実行数を0にして公開を止める。0の間、関数URLは無効になり、リクエストには429が返ります。
+- 公開の再開は、原因を修正し、人が承認してから行う。
+- この停止はデータを削除しません（現在はDBなし）。残るリソースの費用は止まりません。
+
+### 外部操作の前に必要な確認
+
+AWSなど外部の操作を行う前に、次を人が確認します。未確認の間は操作を行いません。リソース作成は、現時点では許可されていません。
+
+- 既存のAWSアカウント（リージョンは東京）の利用と、コンソールで読み取り専用に確認する実際のアカウント種別・無料枠の対象（プラン変更を起こす操作は行わない）。リソース作成・課金の権限と支払い方法の状態（内部の確認事項）
+- 予算アラートの宛先（利用者がAWS側で非公開に入力）と、円建ての閾値をUSDへ換算する為替・税の扱い
+- OIDCの正確なsub・aud（`repo:<リポジトリ>:environment:demo`と`sts.amazonaws.com`）と、AWS関連のリポジトリ変数の設定（Environmentと`CD_APPROVER_LOGIN`は設定済み）
+- 初回のZIPにするクリーンなソースのSHAとCIの成功、公開してよいという人の承認
+
+### 記録
+
+配布ごとに、PR、配布SHA、承認記録、マニフェスト、ビルドとデプロイの実行URLと結果、公開URL、スモーク確認の結果、ロールバックや公開停止の有無をworkpadに結び付けます。確認済みの事実、合意済みの内容、未確認の内容は区別して記録します。
 
 ## 一連の流れの検証とレビュー判断
 
@@ -84,3 +279,20 @@ CD構築の子課題で配布先・認証の管理方法・承認者・手順を
 ## 公式資料と適用範囲
 
 2026-11-07（日本時間）に、Symphony v0.0.3のIssueごとの作業場所と準備フック、OpenAIのCodexレビュー運用、GitHubのPR・必須チェックによるブランチ保護を確認しました。案件別コピーのクローン方法、専用ブランチからのPR作成、人によるマージ、配布条件は、このプロジェクトの運用案です。固定版でのGitHubへの書き込みと保護設定の適用は未検証です。 [Symphony v0.0.3の仕様](https://github.com/openai/symphony/blob/v0.0.3/SPEC.md) · [Codexレビュー運用](https://learn.chatgpt.com/docs/third-party/github) · [GitHubのブランチ保護](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
+
+2026-11-08（日本時間）に、Symphony v0.0.3のSPEC.mdを再確認しました。CD・デプロイに関する記述はなく、CDワークフローの設計はプロジェクト独自の判断です。同日、Codexが[Codex開発ワークフローの反復改善](https://developers.openai.com/cookbook/examples/codex/iterating-development-workflows-with-codex)の本文を確認しました。事実・合意・未確認を分けて記録する考え方を例として参考にしており、必須の設計としては扱っていません。
+
+CD案の一次資料として、Codexが2026-11-08（日本時間）に本文を確認した次の資料も参照しています（この作業では本文を独立に再読していません）。AWSの料金・仕様と、GitHubの設定は変わり得るため、実行前に再確認します。費用の試算は条件付きで、合計金額は見積もっていません。AWS Budgetsの請求反映の遅れと、予約済み同時実行数0で関数URLが無効になり429を返すことも、同日にCodexが本文を確認した資料によります。ワークフローが固定した公式アクション（checkout、upload-artifact、download-artifact、configure-aws-credentials）のコミットSHAは、Codexがタグから確認した値です。
+
+- [AWS Budgetsによる費用の管理](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html)
+- [Lambda関数URLの設定](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html)
+- [GitHub ActionsのOIDCによるAWS認証](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)
+- [GitHubのデプロイと環境](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
+- [Lambdaのバージョン](https://docs.aws.amazon.com/lambda/latest/dg/configuration-versions.html)
+- [LambdaのPython ZIP配布](https://docs.aws.amazon.com/lambda/latest/dg/python-package.html)
+- [Lambda UpdateFunctionCode API](https://docs.aws.amazon.com/lambda/latest/api/API_UpdateFunctionCode.html)（CodeSha256とRevisionIdによる条件付き更新）
+- [Lambda PublishVersion API](https://docs.aws.amazon.com/lambda/latest/api/API_PublishVersion.html)（`CodeSha256`・`RevisionId`で競合を防ぐ）
+- [Lambda UpdateAlias API](https://docs.aws.amazon.com/lambda/latest/api/API_UpdateAlias.html)（`RevisionId`で外部の変更の上書きを防ぐ）
+- [Lambda Web Adapter（v1.1.0の固定コミット）](https://github.com/awslabs/aws-lambda-web-adapter/tree/596bdbcea78a89084fd0b522807d04cd2f1f3f7e)（READMEのレイヤーARN・設定値は2026-11-08にCodexがGitHub CLIで確認。レイヤー実体のハッシュと互換性は未検証）
+- [Lambdaの料金](https://aws.amazon.com/lambda/pricing/)
+- [Aurora DSQLの料金](https://aws.amazon.com/rds/aurora/dsql/pricing/)
