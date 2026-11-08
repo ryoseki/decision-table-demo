@@ -10,9 +10,96 @@
 
 ## 現在の段階
 
-2026-11-07時点で、初版の要件と受入条件、主要な技術構成と初期化方針（技術計画）は合意済みで、アプリは未実装です。正確な版の固定、Composeの細目、保存設計、CI/CDなどは担当ごとに具体化します。主要構成はReact + Vite（TypeScript）、FastAPI、AWSのLambda、Aurora DSQL、ローカルのDocker ComposeとPostgreSQLです。詳細と未決事項は[要件書](docs/requirements.md)の「初版の技術構成」を参照してください。Symphonyの設定と起動スクリプトは用意しています。
+2026-11-07時点で、初版の要件と受入条件、主要な技術構成と初期化方針（技術計画）は合意済みで、React + Viteの確認用画面とFastAPIのヘルスチェックを初期化済みです。業務機能は未実装です。保存設計、CI/CDなどは担当ごとに具体化します。主要構成はReact + Vite（TypeScript）、FastAPI、AWSのLambda、Aurora DSQL、ローカルのDocker ComposeとPostgreSQLです。詳細と未決事項は[要件書](docs/requirements.md)の「初版の技術構成」を参照してください。Symphonyの設定と起動スクリプトは用意しています。
 
 準備時のローカル確認と、未確認の範囲は[確認記録](#確認記録)にまとめています。
+
+## アプリのローカル開発（Docker Compose）
+
+リポジトリを新規にチェックアウトし、ルート（`compose.yaml`がある場所）で以下を実行します。Docker EngineとComposeプラグインを用意し、`docker version`でサーバーへ接続できること、`docker compose version`でComposeを使えることを確認してください。イメージと依存の取得にはネットワーク接続が必要です。ホストへのNode.js・Python・npm・uvの導入や、アプリ用環境変数・認証情報の設定は不要です。
+
+### 固定した構成
+
+初期化時の検証記録ではDocker 29.4.0／Compose 5.1.2を使用しています。最低対応版を示すものではありません。
+
+| 対象 | 固定版・定義 |
+| --- | --- |
+| フロント | Node.js 26.13.0、npm 11.20.0（ベースイメージ同梱）、React 19.3.1、Vite 8.3.6、TypeScript 6.0.3、ESLint 10.14.0 |
+| API | Python 3.14.10、uv 0.13.7、Ruff 0.17.4。FastAPI・Uvicornを含む具体版と推移依存は`backend/requirements.txt`に固定 |
+| npm依存 | `frontend/package.json`と`frontend/package-lock.json`。イメージビルド時に`npm ci`で導入 |
+| Python依存 | ハッシュ付き`backend/requirements.txt`と`backend/requirements-dev.txt`。ビルド時に`uv pip sync --system requirements.txt requirements-dev.txt`でコンテナ内Pythonへ同期 |
+
+イメージは次のタグとマルチアーキテクチャdigestで固定しています。定義の根拠は各Dockerfileです。
+
+- `frontend/Dockerfile`: `node:26.13.0-trixie-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072`
+- `backend/Dockerfile`: `python:3.14.10-slim-trixie@sha256:af8a5aa14780025dbfbcfbc81bd8a91ebd87711dd5b0f48ed71090949dd7cb1d`
+- 同Dockerfileのuv取得元: `ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490`
+
+通常の起動でロックを再生成する必要はありません。Pythonのロック生成元は`backend/requirements.in`と`backend/requirements-dev.in`で、生成コマンドは各ロック冒頭に記録しています。npmは`minimatch`を11.0.5へoverrideしています。上位依存の要求範囲外のため、依存更新時はESLintの対象・除外動作も再確認します。
+
+### ビルド・同時起動・確認
+
+```bash
+docker compose config --quiet
+docker compose build --no-cache
+docker compose up -d
+docker compose ps
+docker compose logs --tail=50 frontend backend
+```
+
+`frontend`はコンテナ内`/app`で`npm run dev`、`backend`は`/app`で`uvicorn app.main:app --host 0.0.0.0 --port 8000`を実行します。起動直後は準備が終わるまで待ち、両サービスが稼働した状態で次を確認します。ホストの5173・8000番ポートを空けてください。
+
+| 確認先 | 期待結果 |
+| --- | --- |
+| ブラウザーで[http://localhost:5173/](http://localhost:5173/) | 見出し「不正審査デモ」、説明「初期化の確認用の画面です。業務画面は未実装です。」 |
+| [http://localhost:8000/health](http://localhost:8000/health) | HTTP 200、JSON `{"status":"ok"}` |
+
+```bash
+curl --fail --show-error http://localhost:5173/
+curl --fail --show-error http://localhost:8000/health
+```
+
+ViteのHTML取得だけではReactの描画確認にならないため、ブラウザーで見出しと説明文も確認します。ポートはそれぞれホスト5173→コンテナ5173、ホスト8000→コンテナ8000です。
+
+### コンテナ内の静的チェック
+
+起動後、同じリポジトリルートで実行します。すべて終了コード0が期待結果です。
+
+```bash
+docker compose exec -T frontend npm run lint
+docker compose exec -T frontend npm run build
+docker compose exec -T backend ruff check .
+docker compose exec -T backend ruff format --check .
+docker compose exec -T backend uv pip check
+```
+
+ESLintはlint、Ruffはlintとファイルを書き換えない整形チェックです。フロントの整形専用ツールは現構成にありません。`npm run build`はTypeScriptの確認とViteビルドを行います。停止中は`docker compose run --rm --no-deps frontend npm run lint`のように`exec -T`を`run --rm --no-deps`へ置き換えて単発実行できます。
+
+### 変更の反映・停止
+
+現在のComposeはソースのbind mountや永続ボリュームを使いません。依存とソースはイメージへコピーするため、ファイルを変更したらルートで`docker compose up -d --build`を実行して再ビルド・再作成します。コンテナ内だけで変更したファイルは再作成で失われます。
+
+```bash
+docker compose down
+```
+
+上記はサービスとComposeのネットワークを停止・削除します。ビルドしたイメージは残ります。DB・HTTPモック・業務機能・AWSへの配布はこの起動手順に含みません。
+
+### この手順の検証状況
+
+2026-11-08、日本時間。Ubuntu 22.04.3 LTS（WSL 2、カーネル6.18系）、Bash 5.1.16で、Dockerデーモンへ接続できる環境を使い、新規チェックアウトから本手順の全体を実行して確認しました。Docker CLIとサーバーエンジンはいずれも29.4.0、Composeは5.1.2です。確認した項目と結果は次のとおりです。
+
+- `docker compose config --quiet`: 成功。
+- `docker compose build --no-cache`: frontend・backendの両イメージをビルド成功。
+- `docker compose up -d`・`docker compose ps`: 両サービスが起動。
+- HTTP応答: `http://localhost:8000/health` はHTTP 200でJSON `{"status":"ok"}`。`http://localhost:5173/` はHTTP 200。
+- ブラウザー表示: ヘッドレスブラウザーで `http://localhost:5173/` を開き、見出し「不正審査デモ」と説明「初期化の確認用の画面です。業務画面は未実装です。」の描画を確認。
+- コンテナ内チェック: `npm run lint`・`npm run build`・`ruff check .`・`ruff format --check .`・`uv pip check` はすべて終了コード0。
+- `docker compose down`: サービスとComposeのネットワークを停止・削除。
+
+ブラウザー表示は手順どおり `http://localhost:5173/` で確認します。Viteの開発サーバーは既定で `localhost`・`.localhost`・IPアドレスからの接続だけを許可し（Vite公式 `server.allowedHosts` の既定動作、確認日2026-11-08）、このリポジトリでは `frontend/vite.config.ts` の `allowedHosts` でE2E用にComposeのサービス名 `frontend` も追加許可しています。それ以外のホスト名でのアクセス確認はこの手順の対象外です。
+
+初期化時には、別の検証記録で各コンポーネント単体（フロントの依存導入・lint・ビルド・DOM描画、APIの依存導入・ヘルスチェック・Ruff）の成功も報告されています。
 
 ## 文書とツールの役割
 
