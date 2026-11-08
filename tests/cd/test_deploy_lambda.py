@@ -28,8 +28,20 @@ NEW_SHA = "a" * 40
 OLD_SHA = "b" * 40
 OTHER_SHA = "c" * 40
 LAYER_SHA = base64.b64encode(hashlib.sha256(b"layer").digest()).decode()
-BASE_URL = "https://abcdefgh12345678.lambda-url.ap-northeast-1.on.aws"
 FUNCTION = "demo-fn"
+ACCOUNT = "123456789012"  # 架空のアカウントID
+OTHER_ACCOUNT = "210987654321"
+BASE_URL = "https://d1234abcd5678.cloudfront.net"  # 公開URL（CloudFront）
+CF_HOST = "d1234abcd5678.cloudfront.net"
+LAMBDA_HOST = "abcdefgh12345678.lambda-url.ap-northeast-1.on.aws"
+FUNCTION_ARN = f"arn:aws:lambda:ap-northeast-1:{ACCOUNT}:function:{FUNCTION}"
+ALIAS_ARN = FUNCTION_ARN + ":demo"
+DIST_ID = "E2ABCDEFGHIJKL"
+DIST_ARN = f"arn:aws:cloudfront::{ACCOUNT}:distribution/{DIST_ID}"
+OAC_ID = "E3ZYXWVUTSRQPO"
+WAF_NAME = "demo-acl"
+WAF_ID = "11111111-2222-3333-4444-555555555555"
+WAF_ARN = f"arn:aws:wafv2:us-east-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"
 SECRET = "SUPER-SECRET-ENV-VALUE"
 OLD_ZIP = hashlib.sha256(b"previous zip").hexdigest()
 MUTATING = {"update-function-code", "publish-version", "update-alias"}
@@ -37,6 +49,165 @@ MUTATING = {"update-function-code", "publish-version", "update-alias"}
 
 def code_sha(hex_digest: str) -> str:
     return base64.b64encode(bytes.fromhex(hex_digest)).decode()
+
+
+def make_distribution() -> dict:
+    """CloudFront GetDistribution の応答の形（正常な基準）。"""
+    return {
+        "ETag": "E1",
+        "Distribution": {
+            "Id": DIST_ID,
+            "ARN": DIST_ARN,
+            "Status": "Deployed",
+            "DomainName": CF_HOST,
+            "DistributionConfig": {
+                "Enabled": True,
+                "DefaultRootObject": "",
+                "WebACLId": WAF_ARN,
+                "Origins": {
+                    "Quantity": 1,
+                    "Items": [
+                        {
+                            "Id": "lambda-origin",
+                            "DomainName": LAMBDA_HOST,
+                            "OriginPath": "",
+                            "CustomHeaders": {"Quantity": 0},
+                            "OriginAccessControlId": OAC_ID,
+                            "CustomOriginConfig": {
+                                "HTTPPort": 80,
+                                "HTTPSPort": 443,
+                                "OriginProtocolPolicy": "https-only",
+                                "OriginSslProtocols": {"Quantity": 1, "Items": ["TLSv1.2"]},
+                            },
+                        }
+                    ],
+                },
+                "OriginGroups": {"Quantity": 0},
+                "DefaultCacheBehavior": {
+                    "TargetOriginId": "lambda-origin",
+                    "ViewerProtocolPolicy": "redirect-to-https",
+                    "AllowedMethods": {
+                        "Quantity": 3,
+                        "Items": ["GET", "HEAD", "OPTIONS"],
+                        "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]},
+                    },
+                    "CachePolicyId": dl.CACHING_DISABLED_POLICY_ID,
+                    "OriginRequestPolicyId": dl.ALL_VIEWER_EXCEPT_HOST_POLICY_ID,
+                    "LambdaFunctionAssociations": {"Quantity": 0},
+                    "FunctionAssociations": {"Quantity": 0},
+                    "Compress": True,
+                },
+                "CacheBehaviors": {"Quantity": 0},
+                "CustomErrorResponses": {"Quantity": 0},
+            },
+        },
+    }
+
+
+def make_oac() -> dict:
+    return {
+        "ETag": "E2",
+        "OriginAccessControl": {
+            "Id": OAC_ID,
+            "OriginAccessControlConfig": {
+                "Name": "demo-oac",
+                "SigningProtocol": "sigv4",
+                "SigningBehavior": "always",
+                "OriginAccessControlOriginType": "lambda",
+            },
+        },
+    }
+
+
+def visibility(name: str) -> dict:
+    return {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True, "MetricName": name}
+
+
+def make_web_acl() -> dict:
+    return {
+        "LockToken": "token",
+        "WebACL": {
+            "Name": WAF_NAME,
+            "Id": WAF_ID,
+            "ARN": WAF_ARN,
+            "DefaultAction": {"Allow": {}},
+            "VisibilityConfig": visibility("demo-acl"),
+            "Rules": [
+                {
+                    "Name": "per-ip",
+                    "Priority": 0,
+                    "Statement": {
+                        "RateBasedStatement": {
+                            "Limit": 300,
+                            "EvaluationWindowSec": 300,
+                            "AggregateKeyType": "IP",
+                        }
+                    },
+                    "Action": {"Block": {}},
+                    "VisibilityConfig": visibility("per-ip"),
+                },
+                {
+                    "Name": "global",
+                    "Priority": 1,
+                    "Statement": {
+                        "RateBasedStatement": {
+                            "Limit": 1500,
+                            "EvaluationWindowSec": 300,
+                            "AggregateKeyType": "CONSTANT",
+                            "ScopeDownStatement": {
+                                "ByteMatchStatement": {
+                                    "SearchString": "Lw==",  # CLIのJSON出力ではblobはbase64
+                                    "FieldToMatch": {"UriPath": {}},
+                                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                                    "PositionalConstraint": "STARTS_WITH",
+                                }
+                            },
+                        }
+                    },
+                    "Action": {"Block": {}},
+                    "VisibilityConfig": visibility("global"),
+                },
+            ],
+        },
+    }
+
+
+def make_policy_document() -> dict:
+    """`aws lambda add-permission` が生成する条件の形（実CLIの出力に合わせた偽物）。
+
+    --source-arn → ArnLike の AWS:SourceArn、--function-url-auth-type AWS_IAM → StringEquals の
+    lambda:FunctionUrlAuthType、--invoked-via-function-url → Bool の lambda:InvokedViaFunctionUrl。
+    実際のAWSの出力そのものの確認ではなく、公式CLIの説明に基づく想定（未確認）。
+    """
+    principal = {"Service": "cloudfront.amazonaws.com"}
+    return {
+        "Version": "2012-10-17",
+        "Id": "default",
+        "Statement": [
+            {
+                "Sid": "cf-url",
+                "Effect": "Allow",
+                "Principal": principal,
+                "Action": "lambda:InvokeFunctionUrl",
+                "Resource": ALIAS_ARN,
+                "Condition": {
+                    "StringEquals": {"lambda:FunctionUrlAuthType": "AWS_IAM"},
+                    "ArnLike": {"AWS:SourceArn": DIST_ARN},
+                },
+            },
+            {
+                "Sid": "cf-invoke",
+                "Effect": "Allow",
+                "Principal": principal,
+                "Action": "lambda:InvokeFunction",
+                "Resource": ALIAS_ARN,
+                "Condition": {
+                    "ArnLike": {"AWS:SourceArn": DIST_ARN},
+                    "Bool": {"lambda:InvokedViaFunctionUrl": "true"},
+                },
+            },
+        ],
+    }
 
 
 def make_artifact(directory: Path, sha: str = NEW_SHA, payload: bytes = b"new zip") -> str:
@@ -100,8 +271,34 @@ class FakeAws:
         self.dedupe_publish = False  # True: コード・設定が同じなら既存の版を返す（AWSの仕様どおり）
         self.versions = {"1": self._snapshot("1", dl.make_description(OLD_SHA, OLD_ZIP, "100"))}
         self.alias = {"FunctionVersion": "1", "RevisionId": "a-1", "RoutingConfig": {}}
-        self.url = {"FunctionUrl": BASE_URL + "/", "AuthType": "NONE", "InvokeMode": "BUFFERED"}
+        self.url = {
+            "FunctionUrl": f"https://{LAMBDA_HOST}/",
+            "FunctionArn": ALIAS_ARN,
+            "AuthType": "AWS_IAM",
+            "InvokeMode": "BUFFERED",
+        }
         self.layer = {"Content": {"CodeSha256": LAYER_SHA}}
+        self.dist = make_distribution()
+        self.oac = make_oac()
+        self.acl = make_web_acl()
+        self.policy_doc = make_policy_document()
+
+    # テストから設定を書き換えやすくする入口
+    @property
+    def dist_config(self):
+        return self.dist["Distribution"]["DistributionConfig"]
+
+    @property
+    def behavior(self):
+        return self.dist_config["DefaultCacheBehavior"]
+
+    @property
+    def origin(self):
+        return self.dist_config["Origins"]["Items"][0]
+
+    @property
+    def rules(self):
+        return self.acl["WebACL"]["Rules"]
 
     def ops(self):
         return [call[1] for call in self.calls]
@@ -139,6 +336,24 @@ class FakeAws:
         conflict = dl.AwsError(op, 254, conflict=True)
         if op == "get-function-url-config":
             return dict(self.url)
+        if op == "get-policy":
+            return {"Policy": json.dumps(self.policy_doc), "RevisionId": "p-1"}
+        # 実APIの形の引数だけを受け付ける（CloudFront・WAFは読み取りのみ）
+        if op == "get-distribution":
+            assert args[0] == "cloudfront" and set(opts) == {"--id"}
+            if opts["--id"] != DIST_ID:
+                raise dl.AwsError(op, 254)  # 存在しないID
+            return json.loads(json.dumps(self.dist))
+        if op == "get-origin-access-control":
+            assert args[0] == "cloudfront" and set(opts) == {"--id"}
+            if opts["--id"] != OAC_ID:
+                raise dl.AwsError(op, 254)
+            return json.loads(json.dumps(self.oac))
+        if op == "get-web-acl":
+            assert args[0] == "wafv2"
+            if opts != {"--name": WAF_NAME, "--scope": "CLOUDFRONT", "--id": WAF_ID}:
+                raise dl.AwsError(op, 254)  # 名前・scope・IDが違えば実際のAWSでも取得に失敗する想定
+            return json.loads(json.dumps(self.acl))
         if op == "get-layer-version-by-arn":
             return dict(self.layer)
         if op == "get-alias":
@@ -218,6 +433,9 @@ class DeployTestCase(unittest.TestCase):
             run_attempt="1",
             function_name=FUNCTION,
             base_url=BASE_URL,
+            distribution_id=DIST_ID,
+            oac_id=OAC_ID,
+            web_acl_arn=WAF_ARN,
             layer_code_sha256=LAYER_SHA,
             result_file=self.result_file,
             aws=self.aws,
@@ -233,6 +451,7 @@ class DeployTestCase(unittest.TestCase):
         text = self.result_file.read_text(encoding="utf-8")
         self.assertNotIn(SECRET, text)
         self.assertNotIn(self.tmp.name, text)
+        self.assertNotIn(ACCOUNT, text)  # アカウントを含むARNの全文・IDは結果に残さない
 
 
 class NormalUpdate(DeployTestCase):
@@ -261,6 +480,9 @@ class NormalUpdate(DeployTestCase):
             [(sha, label) for _, sha, label in self.smoke.calls],
             [(OLD_SHA, "previous"), (NEW_SHA, "new")],
         )
+        # スモーク確認は公開URL（CloudFront）だけで行う。関数URLへのフォールバックはない
+        self.assertEqual({url for url, _, _ in self.smoke.calls}, {BASE_URL})
+        self.assertEqual(result["publicPath"], "passed")
         self.assert_no_leak()
 
 
@@ -376,13 +598,15 @@ class FailClosedBeforeMutation(DeployTestCase):
         self.aws.layer = {"Content": {"CodeSha256": "B" * 43 + "="}}
         self.assert_untouched(self.deploy())
 
-    def test_function_url_mismatch_blocks(self):
+    def test_function_url_not_matching_the_cloudfront_origin_blocks(self):
+        # 実際の関数URLが、CloudFrontのオリジンのホストと違う
         self.aws.url["FunctionUrl"] = "https://zzzzzzzz12345678.lambda-url.ap-northeast-1.on.aws/"
         self.assert_untouched(self.deploy())
 
-    def test_function_url_auth_must_be_none(self):
-        self.aws.url["AuthType"] = "AWS_IAM"
+    def test_function_url_auth_must_be_aws_iam(self):
+        self.aws.url["AuthType"] = "NONE"  # 直接公開（旧方式）は許さない
         self.assert_untouched(self.deploy())
+        self.assertNotIn("get-distribution", self.aws.ops())
 
     def test_weighted_alias_rejected(self):
         self.aws.alias["RoutingConfig"] = {"AdditionalVersionWeights": {"1": 0.1}}
@@ -771,6 +995,471 @@ class PublishedVersionActivation(DeployTestCase):
         self.assertIn("wait", self.aws.ops())
 
 
+def rate(aws, index):
+    return aws.rules[index]["Statement"]["RateBasedStatement"]
+
+
+def byte_match(aws):
+    return rate(aws, 1)["ScopeDownStatement"]["ByteMatchStatement"]
+
+
+def oac_config(aws):
+    return aws.oac["OriginAccessControl"]["OriginAccessControlConfig"]
+
+
+def set_conditions(aws, condition):
+    for statement in aws.policy_doc["Statement"]:
+        statement["Condition"] = json.loads(json.dumps(condition))
+
+
+def statement_condition(aws, index):
+    return aws.policy_doc["Statement"][index]["Condition"]
+
+
+def duplicate_ip_rule(aws):
+    aws.rules[1] = json.loads(json.dumps(aws.rules[0]))
+
+
+def extra_rule(aws):
+    aws.rules.append({**json.loads(json.dumps(aws.rules[0])), "Priority": 2})
+
+
+def second_origin(aws):
+    aws.dist_config["Origins"].update(
+        Quantity=2, Items=[aws.origin, {**aws.origin, "Id": "second"}]
+    )
+
+
+OTHER_DIST_ARN = f"arn:aws:cloudfront::{ACCOUNT}:distribution/E9ZZZZZZZZZZZZ"
+OTHER_LAMBDA_HOST = "zzzzzzzz12345678.lambda-url.ap-northeast-1.on.aws"
+EDGE_ITEM = {"Quantity": 1, "Items": [{"EventType": "viewer-request"}]}
+
+
+def other_allow(principal):
+    return {
+        "Sid": "other",
+        "Effect": "Allow",
+        "Principal": principal,
+        "Action": "lambda:InvokeFunctionUrl",
+        "Resource": ALIAS_ARN,
+        "Condition": {"ArnLike": {"AWS:SourceArn": DIST_ARN}},
+    }
+
+
+# (名前, 基準の偽AWSを壊す関数, エラーメッセージに含まれるべき文字列)
+BOUNDARY_CASES = [
+    # 関数URL（実値からオリジンを導く）
+    ("url-auth-none", lambda a: a.url.update(AuthType="NONE"), "AWS_IAM"),
+    ("url-streaming", lambda a: a.url.update(InvokeMode="RESPONSE_STREAM"), "BUFFERED"),
+    ("url-not-lambda-domain", lambda a: a.url.update(FunctionUrl="https://example.com/"), "AWS_IAM"),
+    ("url-no-function-arn", lambda a: a.url.pop("FunctionArn"), "AWS_IAM"),
+    (
+        "url-other-function-arn",
+        lambda a: a.url.update(FunctionArn=f"arn:aws:lambda:ap-northeast-1:{ACCOUNT}:function:another:demo"),
+        "AWS_IAM",
+    ),
+    (
+        "url-other-account",
+        lambda a: a.url.update(FunctionArn=f"arn:aws:lambda:ap-northeast-1:{OTHER_ACCOUNT}:function:{FUNCTION}:demo"),
+        "アカウント",
+    ),
+    ("url-host-differs-from-origin", lambda a: a.url.update(FunctionUrl=f"https://{OTHER_LAMBDA_HOST}/"), "originDomain"),
+    # CloudFront: 識別・状態
+    ("wrong-domain", lambda a: a.dist["Distribution"].update(DomainName="dzzzzzzzzzzzz.cloudfront.net"), "domainName"),
+    ("distribution-id", lambda a: a.dist["Distribution"].update(Id="E9ZZZZZZZZZZZZ"), "distributionIdentity"),
+    (
+        "distribution-other-account",
+        lambda a: a.dist["Distribution"].update(ARN=f"arn:aws:cloudfront::{OTHER_ACCOUNT}:distribution/{DIST_ID}"),
+        "distributionIdentity",
+    ),
+    ("undeployed", lambda a: a.dist["Distribution"].update(Status="InProgress"), "distributionStatus"),
+    ("disabled", lambda a: a.dist_config.update(Enabled=False), "distributionEnabled"),
+    ("waf-association-other", lambda a: a.dist_config.update(WebACLId=WAF_ARN + "x"), "webAclAssociation"),
+    ("waf-association-missing", lambda a: a.dist_config.pop("WebACLId"), "webAclAssociation"),
+    # CloudFront: オリジン
+    ("origin-host", lambda a: a.origin.update(DomainName=OTHER_LAMBDA_HOST), "originDomain"),
+    ("origin-path", lambda a: a.origin.update(OriginPath="/app"), "originPath"),
+    ("origin-http", lambda a: a.origin["CustomOriginConfig"].update(OriginProtocolPolicy="http-only"), "originProtocol"),
+    ("origin-match-viewer", lambda a: a.origin["CustomOriginConfig"].update(OriginProtocolPolicy="match-viewer"), "originProtocol"),
+    ("origin-oac-other", lambda a: a.origin.update(OriginAccessControlId="E9ZZZZZZZZZZZZ"), "originAccessControl"),
+    ("origin-oac-empty", lambda a: a.origin.update(OriginAccessControlId=""), "originAccessControl"),
+    ("two-origins", second_origin, "origins"),
+    ("origin-count-mismatch", lambda a: a.dist_config["Origins"].update(Quantity=2), "origins"),
+    ("target-origin", lambda a: a.behavior.update(TargetOriginId="other"), "targetOrigin"),
+    # OAC
+    ("oac-never", lambda a: oac_config(a).update(SigningBehavior="never"), "oacSigningBehavior"),
+    ("oac-no-override", lambda a: oac_config(a).update(SigningBehavior="no-override"), "oacSigningBehavior"),
+    ("oac-protocol", lambda a: oac_config(a).update(SigningProtocol="other"), "oacSigningProtocol"),
+    ("oac-s3", lambda a: oac_config(a).update(OriginAccessControlOriginType="s3"), "oacOriginType"),
+    ("oac-id", lambda a: a.oac["OriginAccessControl"].update(Id="E9ZZZZZZZZZZZZ"), "oacIdentity"),
+    # キャッシュ・ビヘイビア（初期版はキャッシュ無効のManagedポリシーだけ）
+    ("cache-policy-optimized", lambda a: a.behavior.update(CachePolicyId="658327ea-f89d-4fab-a63d-7e88639e58f6"), "cachePolicy"),
+    ("cache-policy-missing", lambda a: a.behavior.pop("CachePolicyId"), "cachePolicy"),
+    ("origin-request-policy", lambda a: a.behavior.update(OriginRequestPolicyId="216adef6-5c7f-47e4-b989-5492eafa07d3"), "originRequestPolicy"),
+    (
+        "extra-cache-behavior",
+        lambda a: a.dist_config.update(CacheBehaviors={"Quantity": 1, "Items": [{"PathPattern": "/assets/*"}]}),
+        "cacheBehaviors",
+    ),
+    ("viewer-allow-all", lambda a: a.behavior.update(ViewerProtocolPolicy="allow-all"), "viewerProtocol"),
+    (
+        "methods-with-post",
+        lambda a: a.behavior["AllowedMethods"].update(Quantity=4, Items=["GET", "HEAD", "OPTIONS", "POST"]),
+        "allowedMethods",
+    ),
+    ("methods-get-head-only", lambda a: a.behavior["AllowedMethods"].update(Quantity=2, Items=["GET", "HEAD"]), "allowedMethods"),
+    (
+        "cached-methods-post",
+        lambda a: a.behavior["AllowedMethods"].update(CachedMethods={"Quantity": 1, "Items": ["POST"]}),
+        "cachedMethods",
+    ),
+    ("lambda-edge", lambda a: a.behavior.update(LambdaFunctionAssociations=EDGE_ITEM), "lambdaEdge"),
+    ("edge-function", lambda a: a.behavior.update(FunctionAssociations=EDGE_ITEM), "edgeFunctions"),
+    (
+        "error-response-rewrite",
+        lambda a: a.dist_config.update(
+            CustomErrorResponses={
+                "Quantity": 1,
+                "Items": [{"ErrorCode": 404, "ResponsePagePath": "/index.html", "ResponseCode": "200"}],
+            }
+        ),
+        "errorResponses",
+    ),
+    ("origin-group", lambda a: a.dist_config.update(OriginGroups={"Quantity": 1, "Items": [{"Id": "g"}]}), "originGroups"),
+    ("default-root-object", lambda a: a.dist_config.update(DefaultRootObject="index.html"), "defaultRootObject"),
+    # WAF
+    ("waf-weak-ip-limit", lambda a: rate(a, 0).update(Limit=3000), "webAclRules"),
+    ("waf-weak-global-limit", lambda a: rate(a, 1).update(Limit=100000), "webAclRules"),
+    ("waf-window", lambda a: rate(a, 0).update(EvaluationWindowSec=600), "webAclRules"),
+    ("waf-count-action", lambda a: a.rules[0].update(Action={"Count": {}}), "webAclRules"),
+    ("waf-allow-action", lambda a: a.rules[1].update(Action={"Allow": {}}), "webAclRules"),
+    ("waf-custom-response", lambda a: a.rules[0].update(Action={"Block": {"CustomResponse": {"ResponseCode": 429}}}), "webAclRules"),
+    ("waf-override-action", lambda a: a.rules[0].update(OverrideAction={"Count": {}}), "webAclRules"),
+    ("waf-ip-scope-down", lambda a: rate(a, 0).update(ScopeDownStatement={"NotStatement": {}}), "webAclRules"),
+    (
+        "waf-forwarded-ip",
+        lambda a: rate(a, 0).update(AggregateKeyType="FORWARDED_IP", ForwardedIPConfig={"HeaderName": "X-Forwarded-For"}),
+        "webAclRules",
+    ),
+    ("waf-global-scope-removed", lambda a: rate(a, 1).pop("ScopeDownStatement"), "webAclRules"),
+    (
+        "waf-global-scope-exclusion",
+        lambda a: rate(a, 1).update(ScopeDownStatement={"NotStatement": {"Statement": {"ByteMatchStatement": {}}}}),
+        "webAclRules",
+    ),
+    ("waf-global-not-starts-with", lambda a: byte_match(a).update(PositionalConstraint="EXACTLY"), "webAclRules"),
+    ("waf-global-other-path", lambda a: byte_match(a).update(SearchString="/api"), "webAclRules"),
+    ("waf-global-transform", lambda a: byte_match(a).update(TextTransformations=[{"Priority": 0, "Type": "LOWERCASE"}]), "webAclRules"),
+    ("waf-global-other-field", lambda a: byte_match(a).update(FieldToMatch={"QueryString": {}}), "webAclRules"),
+    ("waf-extra-rule", extra_rule, "webAclRules"),
+    ("waf-single-rule", lambda a: a.rules.pop(), "webAclRules"),
+    ("waf-duplicate-ip-rule", duplicate_ip_rule, "webAclRules"),
+    # Firewall Managerの前処理・後処理の規則グループ、管理下のACLは、期待の2規則より前に迂回し得るため拒否
+    ("waf-firewall-manager-managed", lambda a: a.acl["WebACL"].update(ManagedByFirewallManager=True), "webAclFirewallManager"),
+    (
+        "waf-firewall-manager-pre-process",
+        lambda a: a.acl["WebACL"].update(PreProcessFirewallManagerRuleGroups=[{"Name": "fm-group", "FirewallManagerStatement": {}}]),
+        "webAclFirewallManager",
+    ),
+    (
+        "waf-firewall-manager-post-process",
+        lambda a: a.acl["WebACL"].update(PostProcessFirewallManagerRuleGroups=[{"Name": "fm-group", "FirewallManagerStatement": {}}]),
+        "webAclFirewallManager",
+    ),
+    ("waf-firewall-manager-groups-not-a-list", lambda a: a.acl["WebACL"].update(PreProcessFirewallManagerRuleGroups="unexpected"), "webAclFirewallManager"),
+    # CloudFrontの継続的デプロイ（ステージング）の経路は初期構成では使わない
+    ("cf-continuous-deployment-policy", lambda a: a.dist_config.update(ContinuousDeploymentPolicyId="policy-id"), "continuousDeployment"),
+    ("cf-staging-distribution", lambda a: a.dist_config.update(Staging=True), "stagingDistribution"),
+    ("waf-default-block", lambda a: a.acl["WebACL"].update(DefaultAction={"Block": {}}), "webAclDefaultAction"),
+    ("waf-response-other-arn", lambda a: a.acl["WebACL"].update(ARN=WAF_ARN + "x"), "webAclIdentity"),
+    # 関数のリソースポリシー（エイリアス demo）
+    ("policy-public-principal", lambda a: a.policy_doc["Statement"][0].update(Principal="*"), "policyPrincipal"),
+    ("policy-aws-wildcard", lambda a: a.policy_doc["Statement"][0].update(Principal={"AWS": "*"}), "policyPrincipal"),
+    ("policy-other-service", lambda a: a.policy_doc["Statement"][1].update(Principal={"Service": "events.amazonaws.com"}), "policyPrincipal"),
+    (
+        "policy-other-allow",
+        lambda a: a.policy_doc["Statement"].append(other_allow({"AWS": f"arn:aws:iam::{OTHER_ACCOUNT}:root"})),
+        "policyPrincipal",
+    ),
+    ("policy-wildcard-source", lambda a: set_conditions(a, {"ArnLike": {"AWS:SourceArn": f"arn:aws:cloudfront::{ACCOUNT}:distribution/*"}}), "policyCondition"),
+    ("policy-other-distribution", lambda a: set_conditions(a, {"ArnLike": {"AWS:SourceArn": OTHER_DIST_ARN}}), "policyCondition"),
+    ("policy-string-like", lambda a: set_conditions(a, {"StringLike": {"AWS:SourceArn": DIST_ARN}}), "policyCondition"),
+    ("policy-no-condition", lambda a: a.policy_doc["Statement"][0].pop("Condition"), "policyCondition"),
+    ("policy-missing-invoke-function", lambda a: a.policy_doc["Statement"].pop(), "policyActions"),
+    ("policy-wildcard-action", lambda a: a.policy_doc["Statement"][0].update(Action=["lambda:InvokeFunctionUrl", "lambda:*"]), "policyAction"),
+    ("policy-unqualified-resource", lambda a: a.policy_doc["Statement"][0].update(Resource=FUNCTION_ARN), "policyResource"),
+    ("policy-not-principal", lambda a: a.policy_doc["Statement"][0].update(NotPrincipal={"AWS": "*"}), "policyNegation"),
+    # 認証方式の限定は AWS_IAM だけ。NONE・複数値・ワイルドカード・別の演算子・未知の条件は拒否
+    ("policy-auth-type-none", lambda a: statement_condition(a, 0)["StringEquals"].update({"lambda:FunctionUrlAuthType": "NONE"}), "policyCondition"),
+    ("policy-auth-type-list-with-none", lambda a: statement_condition(a, 0)["StringEquals"].update({"lambda:FunctionUrlAuthType": ["AWS_IAM", "NONE"]}), "policyCondition"),
+    ("policy-auth-type-wildcard", lambda a: statement_condition(a, 0)["StringEquals"].update({"lambda:FunctionUrlAuthType": "*"}), "policyCondition"),
+    ("policy-auth-type-lowercase", lambda a: statement_condition(a, 0)["StringEquals"].update({"lambda:FunctionUrlAuthType": "aws_iam"}), "policyCondition"),
+    (
+        "policy-auth-type-string-like",
+        lambda a: statement_condition(a, 0).update(
+            StringEquals={}, StringLike={"lambda:FunctionUrlAuthType": "AWS_IAM"}
+        ),
+        "policyCondition",
+    ),
+    (
+        "policy-auth-type-without-source-arn",
+        lambda a: a.policy_doc["Statement"][0].update(
+            Condition={"StringEquals": {"lambda:FunctionUrlAuthType": "AWS_IAM"}}
+        ),
+        "policyCondition",
+    ),
+    ("policy-unknown-key-in-string-equals", lambda a: statement_condition(a, 0)["StringEquals"].update({"aws:PrincipalOrgID": "o-example"}), "policyCondition"),
+    ("policy-unknown-operator", lambda a: statement_condition(a, 0).update(IpAddress={"aws:SourceIp": "0.0.0.0/0"}), "policyCondition"),
+    ("policy-unknown-key-in-bool", lambda a: statement_condition(a, 1)["Bool"].update({"aws:SecureTransport": "true"}), "policyCondition"),
+    ("policy-bool-false", lambda a: statement_condition(a, 1).update(Bool={"lambda:InvokedViaFunctionUrl": "false"}), "policyCondition"),
+    ("policy-source-arn-extra-value", lambda a: statement_condition(a, 0).update(ArnLike={"AWS:SourceArn": [DIST_ARN, OTHER_DIST_ARN]}), "policyCondition"),
+    (
+        "policy-source-arn-in-string-equals-wildcard",
+        lambda a: statement_condition(a, 0).update(
+            ArnLike={"AWS:SourceArn": DIST_ARN},
+            StringEquals={"AWS:SourceArn": f"arn:aws:cloudfront::{ACCOUNT}:distribution/*"},
+        ),
+        "policyCondition",
+    ),
+    ("policy-empty-operator-body", lambda a: statement_condition(a, 0).update(StringEquals={}), "policyCondition"),
+    ("policy-not-a-document", lambda a: setattr(a, "policy_doc", "not-a-policy"), "policyStatements"),
+    ("policy-empty", lambda a: a.policy_doc.update(Statement=[]), "policyStatements"),
+]
+
+
+class PublicPathBoundaries(DeployTestCase):
+    """公開経路（CloudFront → OAC → AWS_IAMの関数URL）の検証。
+
+    どれか1つでも期待と違えば、AWSの変更を1件もせず、スモーク確認もせず、失敗で止まる。
+    """
+
+    def fresh(self):
+        self.aws = FakeAws()
+        self.smoke = FakeSmoke()
+        self.result_file.unlink(missing_ok=True)
+
+    def blocked(self, expect=None, **overrides):
+        self.assertEqual(self.deploy(**overrides), 1)
+        self.assertEqual(self.aws.mutating(), [])
+        result = self.result()
+        self.assertEqual(result["overall"], "failed")
+        self.assertEqual(result["validation"], "failed")
+        self.assertEqual(result["publicPath"], "failed")
+        self.assertEqual(result["deployment"], "not-started")
+        self.assertFalse(result["mutationStarted"])
+        self.assertEqual(self.smoke.calls, [])  # 公開経路を確認できない間は、スモーク確認もしない
+        self.assert_no_leak()
+        if expect is not None:
+            self.assertIn(expect, result["error"])
+
+    def test_each_boundary_blocks_with_zero_mutation(self):
+        for name, mutate, expect in BOUNDARY_CASES:
+            with self.subTest(name):
+                self.fresh()
+                mutate(self.aws)
+                self.blocked(expect)
+
+    def test_arguments_that_differ_from_the_real_resources_block(self):
+        other_acl_id = "99999999-2222-3333-4444-555555555555"
+        cases = [
+            ("base-url-is-the-function-url", {"base_url": f"https://{LAMBDA_HOST}"}, "CloudFront"),
+            ("base-url-trailing-slash", {"base_url": BASE_URL + "/"}, "CloudFront"),
+            ("base-url-http", {"base_url": "http://" + CF_HOST}, "CloudFront"),
+            ("base-url-other-host", {"base_url": "https://dzzzzzzzzzzzz.cloudfront.net"}, "domainName"),
+            ("waf-regional-scope", {"web_acl_arn": f"arn:aws:wafv2:us-east-1:{ACCOUNT}:regional/webacl/{WAF_NAME}/{WAF_ID}"}, "scope"),
+            ("waf-tokyo-region", {"web_acl_arn": f"arn:aws:wafv2:ap-northeast-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"}, "scope"),
+            ("waf-other-account", {"web_acl_arn": f"arn:aws:wafv2:us-east-1:{OTHER_ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"}, "アカウント"),
+            ("waf-other-id", {"web_acl_arn": f"arn:aws:wafv2:us-east-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{other_acl_id}"}, "AWS操作に失敗"),
+            ("distribution-other-id", {"distribution_id": "E9ZZZZZZZZZZZZ"}, "AWS操作に失敗"),
+            ("oac-other-id", {"oac_id": "E9ZZZZZZZZZZZZ"}, "AWS操作に失敗"),
+        ]
+        for name, overrides, expect in cases:
+            with self.subTest(name):
+                self.fresh()
+                self.blocked(expect, **overrides)
+        # 誤ったscope・リージョンのARNでは、WAFのAPIを呼ばない
+        self.fresh()
+        self.blocked("scope", web_acl_arn=cases[4][1]["web_acl_arn"])
+        self.assertNotIn("get-web-acl", self.aws.ops())
+
+    def test_api_access_denied_blocks_with_zero_mutation(self):
+        for op in ("get-distribution", "get-origin-access-control", "get-web-acl", "get-policy"):
+            with self.subTest(op):
+                self.fresh()
+                self.aws.fail[op] = dl.AwsError(op, 254)  # AccessDenied等
+                self.blocked("AWS操作に失敗")
+
+    def test_equivalent_forms_are_accepted(self):
+        def arn_equals(aws):
+            set_conditions(aws, {"ArnEquals": {"AWS:SourceArn": DIST_ARN}})
+
+        def deny_statement(aws):
+            aws.policy_doc["Statement"].append(
+                {**other_allow("*"), "Sid": "deny", "Effect": "Deny"}
+            )
+
+        variants = [
+            ("plain-slash", lambda a: byte_match(a).update(SearchString="/")),
+            ("https-only-viewer", lambda a: a.behavior.update(ViewerProtocolPolicy="https-only")),
+            ("method-order", lambda a: a.behavior["AllowedMethods"].update(Items=["OPTIONS", "HEAD", "GET"])),
+            (
+                "cached-with-options",
+                lambda a: a.behavior["AllowedMethods"].update(
+                    CachedMethods={"Quantity": 3, "Items": ["GET", "HEAD", "OPTIONS"]}
+                ),
+            ),
+            ("arn-equals", arn_equals),
+            ("string-equals-list", lambda a: set_conditions(a, {"StringEquals": {"AWS:SourceArn": [DIST_ARN]}})),
+            # 実CLIの形（ArnLike + StringEquals の認証方式）。認証方式は AWS_IAM だけ許す
+            ("real-cli-shape-is-the-baseline", lambda a: None),
+            ("auth-type-in-list", lambda a: statement_condition(a, 0)["StringEquals"].update({"lambda:FunctionUrlAuthType": ["AWS_IAM"]})),
+            (
+                "auth-type-and-source-arn-both-in-string-equals",
+                lambda a: statement_condition(a, 0).update(
+                    StringEquals={"AWS:SourceArn": DIST_ARN, "lambda:FunctionUrlAuthType": "AWS_IAM"}
+                ),
+            ),
+            ("auth-type-condition-absent", lambda a: statement_condition(a, 0).pop("StringEquals")),
+            # 実APIの空・偽の値（キーがない場合と同じ意味）は正常
+            (
+                "firewall-manager-absent-or-empty",
+                lambda a: a.acl["WebACL"].update(
+                    ManagedByFirewallManager=False,
+                    PreProcessFirewallManagerRuleGroups=[],
+                    PostProcessFirewallManagerRuleGroups=[],
+                ),
+            ),
+            (
+                "no-staging-or-continuous-deployment",
+                lambda a: a.dist_config.update(ContinuousDeploymentPolicyId="", Staging=False),
+            ),
+            ("deny-is-ignored", deny_statement),
+            ("rule-order", lambda a: a.rules.reverse()),
+            ("url-without-slash", lambda a: a.url.update(FunctionUrl=f"https://{LAMBDA_HOST}")),
+            ("unqualified-function-arn", lambda a: a.url.update(FunctionArn=FUNCTION_ARN)),
+        ]
+        for name, mutate in variants:
+            with self.subTest(name):
+                self.fresh()
+                mutate(self.aws)
+                self.assertEqual(self.deploy(), 0)
+                self.assertEqual(self.result()["overall"], "success")
+
+    def test_reads_use_real_api_shapes_and_happen_before_any_mutation(self):
+        self.assertEqual(self.deploy(), 0)
+        calls = self.aws.calls
+        self.assertEqual(
+            [c for c in calls if c[0] in ("cloudfront", "wafv2")],
+            [
+                ["cloudfront", "get-distribution", "--id", DIST_ID],
+                ["cloudfront", "get-origin-access-control", "--id", OAC_ID],
+                ["wafv2", "get-web-acl", "--name", WAF_NAME, "--scope", "CLOUDFRONT", "--id", WAF_ID],
+            ],
+        )
+        self.assertEqual(
+            [c for c in calls if c[1] == "get-policy"],
+            [["lambda", "get-policy", "--function-name", FUNCTION, "--qualifier", "demo"]],
+        )
+        ops = self.aws.ops()
+        first_mutation = ops.index("update-function-code")
+        for op in ("get-distribution", "get-origin-access-control", "get-web-acl", "get-policy"):
+            self.assertLess(ops.index(op), first_mutation)
+        # CloudFront・WAFには書き込みの呼び出しがない。リージョンの指定はrun_awsだけで行う
+        for call in calls:
+            if call[0] in ("cloudfront", "wafv2"):
+                self.assertTrue(call[1].startswith("get-"))
+            self.assertNotIn("--region", call)
+        self.assertEqual(self.result()["publicPath"], "passed")
+
+    def test_failed_previous_smoke_still_checked_through_cloudfront_url(self):
+        self.smoke.outcomes["previous"] = False
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual({url for url, _, _ in self.smoke.calls}, {BASE_URL})
+        self.assertEqual(self.aws.mutating(), [])
+
+
+class RunAwsRegions(unittest.TestCase):
+    """実コマンドのリージョン。CloudFront・WAFはus-east-1、Lambdaは東京で、--regionは1回だけ。"""
+
+    def command(self, args):
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return mock.Mock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch.object(dl.subprocess, "run", fake_run):
+            dl.run_aws(args)
+        return captured["command"]
+
+    def region_of(self, command):
+        self.assertEqual(command.count("--region"), 1)
+        return command[command.index("--region") + 1]
+
+    def test_cloudfront_and_wafv2_use_us_east_1(self):
+        for args in (
+            ["cloudfront", "get-distribution", "--id", DIST_ID],
+            ["cloudfront", "get-origin-access-control", "--id", OAC_ID],
+            ["wafv2", "get-web-acl", "--name", WAF_NAME, "--scope", "CLOUDFRONT", "--id", WAF_ID],
+        ):
+            with self.subTest(args[1]):
+                command = self.command(args)
+                self.assertEqual(self.region_of(command), "us-east-1")
+                self.assertEqual(command[:2], ["aws", args[0]])
+
+    def test_lambda_uses_tokyo(self):
+        command = self.command(["lambda", "get-policy", "--function-name", FUNCTION, "--qualifier", "demo"])
+        self.assertEqual(self.region_of(command), "ap-northeast-1")
+
+    def test_caller_cannot_add_a_second_region(self):
+        with mock.patch.object(dl.subprocess, "run", side_effect=AssertionError("実行しない")):
+            with self.assertRaises(dl.AwsError):
+                dl.run_aws(["lambda", "get-alias", "--region", "us-west-2"])
+
+
+class TemplatesMatchTheCode(unittest.TestCase):
+    def load(self, name):
+        return json.loads((ROOT / "infra" / "cd" / name).read_text(encoding="utf-8"))
+
+    def test_waf_template_satisfies_the_validator(self):
+        response = make_web_acl()
+        response["WebACL"]["Rules"] = self.load("waf-rules.json")["Rules"]
+        self.assertEqual(dl.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
+
+    def test_waf_template_thresholds_match_the_code(self):
+        rules = self.load("waf-rules.json")["Rules"]
+        limits = sorted(r["Statement"]["RateBasedStatement"]["Limit"] for r in rules)
+        self.assertEqual(limits, sorted([dl.IP_RATE_LIMIT, dl.GLOBAL_RATE_LIMIT]))
+        self.assertEqual((dl.IP_RATE_LIMIT, dl.GLOBAL_RATE_LIMIT, dl.RATE_WINDOW_SEC), (300, 1500, 300))
+
+    def test_deploy_policy_adds_only_the_read_permissions(self):
+        text = (ROOT / "infra" / "cd" / "deploy-policy.json").read_text(encoding="utf-8")
+        statements = json.loads(text)["Statement"]
+        by_sid = {s["Sid"]: s for s in statements}
+        actions = {}
+        for statement in statements:
+            value = statement["Action"]
+            for action in [value] if isinstance(value, str) else value:
+                actions.setdefault(action.split(":")[0], set()).add(action)
+        self.assertEqual(actions["cloudfront"], {"cloudfront:GetDistribution", "cloudfront:GetOriginAccessControl"})
+        self.assertEqual(actions["wafv2"], {"wafv2:GetWebACL"})
+        self.assertNotIn("iam", actions)
+        self.assertNotIn("PassRole", text)
+        # ResourceがワイルドカードなのはOAC（リソース指定が未対応の読み取り）だけ
+        wildcard = {sid for sid, s in by_sid.items() if s["Resource"] == "*"}
+        self.assertEqual(wildcard, {"ReadOriginAccessControlsResourceScopingUnsupported"})
+        self.assertEqual(by_sid["ReadTheTargetDistributionOnly"]["Resource"].count("<DISTRIBUTION_ID>"), 1)
+        self.assertEqual(by_sid["ReadTheTargetWebAclOnly"]["Resource"], "<WEB_ACL_ARN>")
+        policy = by_sid["ReadTheDemoAliasResourcePolicyOnly"]
+        self.assertEqual(policy["Action"], "lambda:GetPolicy")
+        self.assertTrue(policy["Resource"].endswith(":function:<FUNCTION_NAME>:demo"))
+        # 従来のLambda更新権限と固定レイヤーの読み取りは維持
+        deploy = set(by_sid["DeployToTheDemoFunctionOnly"]["Action"])
+        for action in ("lambda:UpdateFunctionCode", "lambda:PublishVersion", "lambda:UpdateAlias", "lambda:GetFunction"):
+            self.assertIn(action, deploy)
+        self.assertEqual(by_sid["ReadThePinnedPublicLayerVersionOnly"]["Resource"], dl.PINNED_LAYER_ARN)
+
+
 class SummaryFlags(DeployTestCase):
     def test_mutation_not_started_when_validation_fails(self):
         self.aws.function["Runtime"] = "python3.13"
@@ -840,6 +1529,36 @@ class VerifyArtifactOnly(DeployTestCase):
                 dl.main(["--artifact-dir", str(self.artifact), "--source-sha", NEW_SHA,
                          "--zip-sha256", self.zip_hex])
 
+    def test_deploy_mode_requires_each_cloudfront_argument(self):
+        full = {
+            "--ci-run-url": "https://github.com/example/repo/actions/runs/1",
+            "--run-id": "1",
+            "--run-attempt": "1",
+            "--function-name": FUNCTION,
+            "--base-url": BASE_URL,
+            "--distribution-id": DIST_ID,
+            "--oac-id": OAC_ID,
+            "--web-acl-arn": WAF_ARN,
+            "--layer-code-sha256": LAYER_SHA,
+            "--result-file": str(self.dir / "r.json"),
+        }
+        for missing in ("--distribution-id", "--oac-id", "--web-acl-arn"):
+            with self.subTest(missing):
+                argv = ["--artifact-dir", str(self.artifact), "--source-sha", NEW_SHA,
+                        "--zip-sha256", self.zip_hex]
+                for name, value in full.items():
+                    if name != missing:
+                        argv += [name, value]
+                with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}), \
+                        mock.patch.object(dl, "run_aws", side_effect=AssertionError("AWS呼び出し")):
+                    with self.assertRaises(SystemExit) as raised:
+                        dl.main(argv)
+                self.assertIn(missing.removeprefix("--").replace("-", "_"), str(raised.exception))
+
+    def test_verify_only_ignores_cloudfront_arguments_and_never_calls_aws(self):
+        code, _ = self.run_cli()  # 新しい引数なし
+        self.assertEqual(code, 0)
+
 
 class InputValidation(unittest.TestCase):
     def args(self, **overrides):
@@ -851,6 +1570,9 @@ class InputValidation(unittest.TestCase):
             run_attempt="1",
             function_name=FUNCTION,
             base_url=BASE_URL,
+            distribution_id=DIST_ID,
+            oac_id=OAC_ID,
+            web_acl_arn=WAF_ARN,
             layer_code_sha256=LAYER_SHA,
             ci_run_url="https://github.com/example/repo/actions/runs/1",
         )
@@ -861,15 +1583,47 @@ class InputValidation(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}):
             dl.validate_inputs(self.args())
 
-    def test_rejects_non_function_url_endpoint(self):
-        for url in ("https://example.com", BASE_URL + "/path", "http://x.lambda-url.ap-northeast-1.on.aws"):
-            with self.assertRaises(SystemExit):
+    def test_rejects_anything_but_a_bare_cloudfront_origin(self):
+        urls = (
+            "https://example.com",
+            f"https://{LAMBDA_HOST}",  # 関数URLは公開URLにできない（フォールバック禁止）
+            BASE_URL + "/",
+            BASE_URL + "/path",
+            BASE_URL + "?x=1",
+            BASE_URL + ":443",
+            "https://user@" + CF_HOST,
+            "http://" + CF_HOST,
+            "https://D1234ABCD5678.cloudfront.net",
+            "https://d1234abcd5678.cloudfront.net.example.com",
+            "https://short.cloudfront.net",
+            BASE_URL + "\n",
+        )
+        for url in urls:
+            with self.subTest(url), self.assertRaises(SystemExit):
                 dl.validate_inputs(self.args(base_url=url))
+
+    def test_rejects_bad_distribution_oac_and_web_acl(self):
+        bad = (
+            {"distribution_id": "e2abcdefghijkl"},
+            {"distribution_id": "E2/ABC"},
+            {"oac_id": ""},
+            {"web_acl_arn": f"arn:aws:wafv2:us-east-1:{ACCOUNT}:regional/webacl/{WAF_NAME}/{WAF_ID}"},
+            {"web_acl_arn": f"arn:aws:wafv2:ap-northeast-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"},
+            {"web_acl_arn": WAF_ARN + "/extra"},
+        )
+        for overrides in bad:
+            with self.subTest(overrides), self.assertRaises(SystemExit):
+                dl.validate_inputs(self.args(**overrides))
 
     def test_rejects_short_sha_and_blank_values(self):
         for overrides in ({"source_sha": "abc"}, {"layer_code_sha256": ""}, {"function_name": ""}):
             with self.assertRaises(SystemExit):
                 dl.validate_inputs(self.args(**overrides))
+
+    def test_non_string_values_exit_safely_instead_of_type_error(self):
+        for name in ("distribution_id", "oac_id", "web_acl_arn", "base_url"):
+            with self.subTest(name), self.assertRaises(SystemExit):
+                dl.validate_inputs(self.args(**{name: 123}))
 
     def test_cd_allow_local_is_never_accepted(self):
         with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "true"}):
