@@ -1,0 +1,17 @@
+# infra/cd/Dockerfile 専用。COPYする入力だけをビルドコンテキストに入れる。
+*
+!backend/requirements.txt
+!backend/app
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/tsconfig.json
+!frontend/vite.config.ts
+!frontend/src
+!infra/cd/run.sh
+!scripts/package-lambda.py
+**/__pycache__
+**/*.pyc
+**/.env*
+**/*.pem
+**/*.key

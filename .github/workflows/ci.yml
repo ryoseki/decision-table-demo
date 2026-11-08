@@ -78,3 +78,23 @@ jobs:
             e2e/test-results/
           if-no-files-found: warn
           retention-days: 14
+
+  # CDの配布ヘルパー・事前確認のオフラインテスト（偽のAWS・偽のGitHub APIを使う）。
+  # 実際のAWS・GitHubの検証ではない。資格情報とトークンは渡さず、通信もしない。
+  # backendと同じ固定済みのPython 3.14イメージに、リポジトリを読み取り専用でマウントして実行する。
+  # python -B -I で .pyc を作らない（読み取り専用のマウントにも書かない）。
+  cd-offline:
+    name: cd-offline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: CDのオフラインテスト
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -v "$PWD:/work:ro" -w /work \
+            python:3.14.10-slim-trixie@sha256:af8a5aa14780025dbfbcfbc81bd8a91ebd87711dd5b0f48ed71090949dd7cb1d \
+            python -B -I -m unittest discover -s tests/cd
