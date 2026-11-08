@@ -1,6 +1,6 @@
 # 初回構築と運用手順（人が確認して実行する。未実行）
 
-このファイルのコマンドは**一度も実行していません**。AWSでのリソース作成・設定・配布、GitHubの設定は、まだ許可されていません。実行前に人が内容を読み、承認してから行います。アカウントIDなどは `<…>` のプレースホルダーで、実在の値は書きません。
+このファイルのコマンドは**一度も実行していません**。AWSでのリソース作成・設定・配布は、まだ許可されていません。GitHubについては、Environment `demo` と `CD_APPROVER_LOGIN` の設定と読み取りでの確認が、下の表のとおり記録済みです（AWS関連の変数は未設定）。実行前に人が内容を読み、承認してから行います。アカウントIDなどは `REPLACE_*` の引用符つきの目印で、実在の値は書きません。実在のアカウントID・認証情報・セッショントークンは、この文書にも出力の貼り付けにも書きません。
 
 ## 位置づけ
 
@@ -9,41 +9,94 @@
 | 合意済みの設計 | 東京（ap-northeast-1）、既存のAWSアカウント、DBなし、公開は架空データのみ、常時公開を目指す。配布は人が起動し、同じ1人が承認する（Environmentの自己承認禁止は意図して無効）。費用アラート300・500・800円、500円で人が手動で公開停止。1,000円の厳密な上限は請求データの反映遅れのため作れない |
 | 仮定 | 古いアカウントのため従量課金・無料利用枠の旧来アカウントと仮定する。実際の種別・無料枠は未確認 |
 | GitHub側の設定（Codex設定、2026-11-08） | Environment `demo`（必須レビュー担当者1人、自己承認の禁止は無効、デプロイブランチは `main`（type=branch）のみ）とリポジトリ変数 `CD_APPROVER_LOGIN` を設定済み。管理者による迂回の無効化は要求したが、APIの応答にそのフィールドがなく**未確認**（無効と確認したわけではない）。AWS関連の変数（`AWS_ROLE_ARN`・`LAMBDA_FUNCTION_NAME`・`CD_BASE_URL`・`LAMBDA_LAYER_CODE_SHA256`）は**未設定** |
-| 未実施・未確認 | 以下のすべてのAWSコマンド、AWS認証・実際のAWS操作、アダプタのレイヤーとPython 3.14の互換性、AWS上のスモーク確認、実際のCD（配布・ロールバック）の実行（動作は未検証）、予算アラートの宛先（本人が非公開で入力する。作り話の宛先は置かない） |
+| 未実施・未確認 | 以下のすべてのAWSコマンド、AWS認証・実際のAWS操作、アダプタのレイヤーとPython 3.14の互換性、AWS上のスモーク確認、実際のCD（配布・ロールバック）の実行（動作は未検証）、予算アラートの宛先（本人が非公開で入力する。作り話の宛先は置かない）。なお、この文書に掲載したBashブロック21件は、2026-11-08に `bash -n` で構文確認し成功した（構文のみの確認で、AWSでの実行は未実施） |
 | 実行前に必要な承認（未取得） | AWSリソースの作成・課金を伴う操作の許可、支払い方法の状態確認。これらは内部の確認事項で、公開の主張ではない |
 
 CDワークフロー（`.github/workflows/cd.yml`）は、**ここで作る既存の正常なエイリアス `demo` を更新するだけ**です。IAM・関数URL・同時実行数・ログの操作は含みません。
 
 ## 1. 準備
 
+### 実行のルール（最初に読む）
+
+- 以下の手順は、この作業専用の新しい端末で、**1ブロックずつ**貼り付けます。出力を人が確認してから次のブロックへ進みます。複数のブロックをまとめて貼らないでください。
+- 専用のセッションは `exec bash --noprofile --norc` で始めます（現在のシェルを置き換えるため、エラーでセッションが終了しても、貼り付けの残りが元のシェルで実行されません）。ここで `set -euo pipefail` を有効にするので、**コマンドが1つでも失敗するとセッションが終了します**。
+- セッションが終了したら、**以降のブロックを貼り付けません**。端末を閉じ、人が読み取り専用のコマンドで現状（作成済みのリソース）を確認してから、再開するかを判断します。既存の名前などで作成が失敗した場合も同様で、既存のリソースの再利用・上書き・削除は自動で行いません（人が判断します）。
+- 変数は引用符つきの `REPLACE_*` を実際の値に書き換えて使います（`<…>` はシェルでリダイレクトと解釈されるため使いません）。書き換え忘れは次の検証で止まります。
+- AWSの認証は、この端末の環境変数だけで行います。`aws configure` などで共通のプロファイルや設定ファイルを変更しません。実在のアカウントIDや認証情報を、出力・チャット・文書に貼りません。
+
 ```bash
+exec bash --noprofile --norc
+```
+
+新しいセッションで、次のブロックを貼ります（値の書き換えだけを人が行う）。
+
+```bash
+set -euo pipefail
+die() { echo "停止: $*" >&2; exit 1; }
+
 export AWS_REGION=ap-northeast-1
-export ACCOUNT_ID=<ACCOUNT_ID>             # 対象アカウントを人が確認する
-export FN=<FUNCTION_NAME>                  # 例: 自分で決めた関数名
-export EXEC_ROLE=<FUNCTION_NAME>-exec
-export LAYER_ARN=arn:aws:lambda:ap-northeast-1:753240598075:layer:LambdaAdapterLayerX86:28
-export SHA=<初回に承認する40桁のmainのSHA>    # クリーンなソースとCI成功・人の承認が必要
+export AWS_PAGER=""                                  # このセッションだけ。ページャで止まらないため
+ACCOUNT_ID='REPLACE_ACCOUNT_ID'                      # 対象の12桁のアカウントID。人が確認する
+FN='REPLACE_FUNCTION_NAME'                           # 自分で決めた関数名
+SHA='REPLACE_SHA40'                                  # 初回に承認する40桁のmainのSHA（小文字16進）
+REPO_SLUG='REPLACE_OWNER/REPLACE_REPO'               # 対象のGitHubリポジトリ（人が入力）
+LAYER_ARN='arn:aws:lambda:ap-northeast-1:753240598075:layer:LambdaAdapterLayerX86:28'
+
+# AWSの変更の前に、すべて検証する（どれかに失敗すればセッションが終了する）
+[[ "$AWS_REGION" == ap-northeast-1 ]]           || die "リージョンは ap-northeast-1 固定"
+[[ "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]]              || die "ACCOUNT_ID は12桁の数字（REPLACE_ACCOUNT_ID のままではないか）"
+[[ "$FN" != REPLACE_* ]]                        || die "FN が目印のまま"
+[[ "$FN" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,56}$ ]] || die "FN は英数字・-・_ の1〜57文字で先頭は - 不可（-deploy を付けてもロール名が64文字以内）"
+[[ "$SHA" =~ ^[0-9a-f]{40}$ ]]                  || die "SHA は小文字16進の40桁"
+[[ "$REPO_SLUG" != *REPLACE_* ]]                || die "REPO_SLUG が目印のまま"
+[[ "$REPO_SLUG" =~ ^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$ ]] || die "REPO_SLUG は owner/repo の形式"
+[[ "${REPO_SLUG#*/}" != . && "${REPO_SLUG#*/}" != .. ]]          || die "REPO_SLUG のリポジトリ名が不正"
+
+EXEC_ROLE="${FN}-exec"          # 検証済みの FN から作る
+DEPLOY_ROLE="${FN}-deploy"
+[[ ${#EXEC_ROLE} -le 64 && ${#DEPLOY_ROLE} -le 64 ]] || die "ロール名が64文字を超える"
+echo "入力の検証: 合格"
+```
+
+AWSへの最初の書き込みの前に、呼び出し元のアカウントが宣言した `ACCOUNT_ID` と一致することを確認します（値は表示しない。読み取りのみ）。
+
+```bash
+CALLER_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+[[ "$CALLER_ACCOUNT" == "$ACCOUNT_ID" ]] || die "認証中のアカウントが宣言した ACCOUNT_ID と異なる。AWSの変更をしない"
+unset CALLER_ACCOUNT
+echo "呼び出し元アカウント: 一致"
 ```
 
 初回のZIPは、承認したSHAをクリーンにチェックアウトして作ります（`--allow-dirty` のZIPは使わない）。以前のローカルZIPのソースSHAのラベルは過去の検証用で、承認されたものではありません。
 
 ```bash
 bash scripts/build-lambda.sh "$SHA" "dist/cd/$SHA"
-jq '{sourceSHA, releaseEligible, dirty, bytes: .zip.bytes, hex: .zip.sha256Hex, code: .zip.codeSha256}' "dist/cd/$SHA/manifest.json"
+MANIFEST="dist/cd/$SHA/manifest.json"
+jq '{sourceSHA, releaseEligible, dirty, bytes: .zip.bytes, hex: .zip.sha256Hex, code: .zip.codeSha256}' "$MANIFEST"
 ```
 
-`releaseEligible` が `true`、`dirty` が `false`、`bytes` が50MB（52,428,800）未満（直接アップロードできる）であることを確認します。
+`sourceSHA` が承認したSHAと一致、`releaseEligible` が `true`、`dirty` が `false`、`bytes` が50MB（52,428,800）未満（直接アップロードできる）であることを、次で検査します。1つでも満たさなければ止まります。
 
 ```bash
-export ZIP="dist/cd/$SHA/lambda-$SHA.zip"
-export ZIP_HEX="$(jq -r .zip.sha256Hex "dist/cd/$SHA/manifest.json")"
-export ZIP_CODE="$(jq -r .zip.codeSha256 "dist/cd/$SHA/manifest.json")"
-[ "$(sha256sum "$ZIP" | cut -d' ' -f1)" = "$ZIP_HEX" ] && echo OK
+jq -e --arg sha "$SHA" '.sourceSHA == $sha and .releaseEligible == true and .dirty == false and .zip.bytes < 52428800' "$MANIFEST" >/dev/null \
+  || die "マニフェストが条件を満たさない"
+
+ZIP="dist/cd/$SHA/lambda-$SHA.zip"
+ZIP_HEX="$(jq -r .zip.sha256Hex "$MANIFEST")"       # export と同時に代入しない（失敗が隠れるため）
+ZIP_CODE="$(jq -r .zip.codeSha256 "$MANIFEST")"
+[[ "$ZIP_HEX" =~ ^[0-9a-f]{64}$ ]]                  || die "ZIPのSHA-256（16進）が不正"
+[[ "$ZIP_CODE" =~ ^[A-Za-z0-9+/]{43}=$ ]]           || die "CodeSha256（base64）が不正"
+[[ -f "$ZIP" ]]                                     || die "ZIPがない"
+ZIP_ACTUAL="$(sha256sum "$ZIP" | cut -d' ' -f1)"
+[[ "$ZIP_ACTUAL" == "$ZIP_HEX" ]]                   || die "ZIPの実体のSHA-256がマニフェストと不一致"
+echo "ZIPのハッシュ: 一致"
 ```
 
 ## 2. 実行ロールとログ（7日保持）
 
 ログのグループを先に作り、実行ロールには作成権限を与えず、そのグループへの書き込みだけを許します。
+
+同名のロールやログのグループが既にあると `create-*` が失敗してセッションが終了します。その場合は**止まり**、既存のものを再利用・上書きしません（特に、既存のロールに `put-role-policy` を書き込まないため、`create-role` が成功したときだけ次へ進む構造にしています）。作成済みの分は削除せず、人が読み取りで確認して判断します。
 
 ```bash
 aws logs create-log-group --log-group-name "/aws/lambda/$FN" --region "$AWS_REGION"
@@ -56,7 +109,7 @@ JSON
 aws iam create-role --role-name "$EXEC_ROLE" --assume-role-policy-document "file://$work/exec-trust.json"
 
 cat > "$work/exec-logs.json" <<JSON
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"arn:aws:logs:$AWS_REGION:$ACCOUNT_ID:log-group:/aws/lambda/$FN:*"}]}
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/${FN}:*"}]}
 JSON
 aws iam put-role-policy --role-name "$EXEC_ROLE" --policy-name logs-only --policy-document "file://$work/exec-logs.json"
 ```
@@ -78,7 +131,7 @@ aws lambda wait function-active-v2 --function-name "$FN" --region "$AWS_REGION"
 aws lambda put-function-concurrency --function-name "$FN" --reserved-concurrent-executions 0 --region "$AWS_REGION"
 ```
 
-プロビジョニング済み同時実行、DB、NAT、ECR、S3、CloudFrontは作りません。ロールの作成直後は反映待ちで `create-function` が失敗することがあるため、その場合は少し待って再実行します。アカウントの同時実行数の上限が低く予約できない場合は、そこで止めて人が判断します。
+プロビジョニング済み同時実行、DB、NAT、ECR、S3、CloudFrontは作りません。ロールの作成直後は反映待ちで `create-function` が失敗することがあります。その場合もセッションが終了して止まります。人が `aws lambda get-function --function-name "$FN" --region "$AWS_REGION"` で関数が未作成であることを読み取りで確認し、少し待ってから、新しいセッションで「1. 準備」の設定・検証・呼び出し元アカウントの確認をやり直し（ビルドは再実行せず、`MANIFEST="dist/cd/$SHA/manifest.json"` を設定してマニフェスト・ZIPの検査のブロックだけ実行）、`create-function` 以降だけを実行します（ロールとログは再作成しない）。関数が既にある場合は再利用・上書きせず、人が判断します。アカウントの同時実行数の上限が低く予約できない場合も、そこで止めて人が判断します。
 
 ### レイヤーのハッシュを記録する
 
@@ -92,14 +145,21 @@ aws lambda get-layer-version-by-arn --arn "$LAYER_ARN" --region "$AWS_REGION" --
 
 版番号は1とは限らない（作成の再試行などで変わる）ため、固定せず、発行の応答から取得して使います。
 
+次のブロックは、ハッシュの不一致・版番号の取得失敗・Activeにならない場合に、エイリアスを作る前に止まります（`die` と `set -e` による。版が発行済みでも削除せず、人が確認する）。
+
 ```bash
 actual="$(aws lambda get-function-configuration --function-name "$FN" --region "$AWS_REGION" --query CodeSha256 --output text)"
-if [ "$actual" = "$ZIP_CODE" ]; then echo "コードのハッシュ: 一致"; else echo "コードのハッシュが不一致。ここで止める" >&2; false; fi
+[[ "$actual" == "$ZIP_CODE" ]] || die "コードのハッシュが不一致。エイリアスを作らない"
+echo "コードのハッシュ: 一致"
 
 FIRST_VERSION="$(aws lambda publish-version --function-name "$FN" --code-sha256 "$ZIP_CODE" \
   --description "source=$SHA;zip=$ZIP_HEX;run=0" --region "$AWS_REGION" --query Version --output text)"
-case "$FIRST_VERSION" in ''|*[!0-9]*|0*) echo "版番号を取得できない: 止める" >&2; false;; esac
+[[ "$FIRST_VERSION" =~ ^[1-9][0-9]*$ ]] || die "版番号を取得できない。エイリアスを作らない"
 echo "最初の版: $FIRST_VERSION"
+
+# 発行した版が Active になるまで待つ（AWS CLIの上限つきのwaiter。タイムアウトは失敗で止まる）
+aws lambda wait function-active-v2 --function-name "$FN" --qualifier "$FIRST_VERSION" --region "$AWS_REGION"
+
 aws lambda create-alias --function-name "$FN" --name demo --function-version "$FIRST_VERSION" --region "$AWS_REGION"
 ```
 
@@ -112,7 +172,7 @@ Lambdaは、コードも設定も最後の版から変わらないと新しい�
 - エイリアスが既に今回と同じソースSHA・ZIPの版を指し、その版の現行スモーク確認が合格した場合: **変更なしの成功**（`overall=no-change-success`、`deployment=already-current`、新しい版は発行せず、新しい配布のスモーク確認もしない）。新しい配布の成功とは扱いません。
 - 前回の試行が版を発行した後に止まり、エイリアスが旧版のまま残った場合: 再実行で返された既存の版を、**descriptionのソースSHA・ZIPのハッシュ、コードのハッシュ、検査対象の設定がすべて今回と一致すると証明できたときだけ**再利用します（`versions.reused=true`）。証明できなければ、エイリアスを動かさず止まります。設定を変えて版を作らせることはしません。
 - 発行直後（または再利用）の版は、`aws lambda wait function-active-v2 --qualifier <版>`（AWS CLIの上限つき）で Active を待ってから確認し、その後にエイリアスを切り替えます。待機の失敗・タイムアウトはエイリアスを動かさず止まります（`stage=wait-published`）。Pending のまま確認する緩和はしません。更新後のRevisionId・CodeSha256・設定の確認も緩めておらず、更新後のRevisionIdの扱いは実際のAWSでの確認項目です（未確認）。
-- 止まった場合の手動確認（読み取りのみ）: `aws lambda list-versions-by-function --function-name "$FN" --region "$AWS_REGION"` で版を見つけ、`get-function-configuration --qualifier <版>` の `Description`・`CodeSha256`・Layers・Runtime などが今回の想定と一致するか確認する。一致すると人が判断した場合に限り、`update-alias`（現在の `RevisionId` 指定）で切り替える。一致しない版は使わず、削除もしない。
+- 止まった場合の手動確認（読み取りのみ）: `aws lambda list-versions-by-function --function-name "$FN" --region "$AWS_REGION"` で版を見つけ、`get-function-configuration --qualifier "$VERSION"`（「7.」の `VERSION` の書き方）の `Description`・`CodeSha256`・Layers・Runtime などが今回の想定と一致するか確認する。一致すると人が判断した場合に限り、`update-alias`（現在の `RevisionId` 指定）で切り替える。一致しない版は使わず、削除もしない。
 
 ### 関数URLと公開の許可
 
@@ -134,11 +194,17 @@ aws lambda add-permission --function-name "$FN" --qualifier demo \
 予約済み同時実行数を1にすると、公開URLが有効になります。**承認した初回デモを公開してよいと人が判断したときだけ**行います。この確認の間は公開されます（0のままではスモーク確認ができません）。
 
 ```bash
+CD_BASE_URL_VALUE='REPLACE_FUNCTION_URL_ORIGIN'   # 末尾の / を除いたオリジン
+[[ "$CD_BASE_URL_VALUE" =~ ^https://[a-z0-9]+\.lambda-url\.ap-northeast-1\.on\.aws$ ]] || die "関数URLのオリジンの形式が不正"
 aws lambda put-function-concurrency --function-name "$FN" --reserved-concurrent-executions 1 --region "$AWS_REGION"
-CD_BASE_URL=<上のオリジン> CD_EXPECTED_SHA="$SHA" CD_REPORT_ID="bootstrap-$SHA" bash scripts/cd-smoke.sh
+
+# スモーク確認の失敗ではセッションを終了させない（直後に公開停止を実行できるようにするため）
+smoke_rc=0
+CD_BASE_URL="$CD_BASE_URL_VALUE" CD_EXPECTED_SHA="$SHA" CD_REPORT_ID="bootstrap-$SHA" bash scripts/cd-smoke.sh || smoke_rc=$?
+if [ "$smoke_rc" -ne 0 ]; then echo "スモーク確認が失敗。直ちに下の公開停止のブロックを実行する" >&2; fi
 ```
 
-失敗したら**直ちに**手動停止します（初回は戻す先の正常版がない）。
+失敗したら**直ちに**手動停止します（初回は戻す先の正常版がない）。これが唯一、失敗後に続けて貼ってよいブロックです。セッションが終了していた場合は、「1. 準備」の設定と検証だけをやり直してから実行します。
 
 ```bash
 aws lambda put-function-concurrency --function-name "$FN" --reserved-concurrent-executions 0 --region "$AWS_REGION"
@@ -148,25 +214,40 @@ aws lambda put-function-concurrency --function-name "$FN" --reserved-concurrent-
 
 ## 5. 配布用のOIDCロール（IAM管理者の別操作）
 
-GitHubのOIDCプロバイダーが既にあれば再利用します。
+この節も、「1. 準備」の設定・検証・呼び出し元アカウントの確認を済ませたセッションで行います（`DEPLOY_ROLE`・`REPO_SLUG` などを使うため）。
+
+GitHubのOIDCプロバイダーが既にあれば再利用します。まず読み取りで確認します。
 
 ```bash
-aws iam list-open-id-connect-providers   # token.actions.githubusercontent.com があるか確認
-# なければ作成（--thumbprint-list の要否は `aws iam create-open-id-connect-provider help` で確認）
+aws iam list-open-id-connect-providers   # ARNの末尾が token.actions.githubusercontent.com のものがあるか、人が目で確認する
+```
+
+一覧に**無いと人が確認したときだけ**、次の作成を実行します（`--thumbprint-list` の要否は `aws iam create-open-id-connect-provider help` で確認）。既にある場合は実行せず、既存のものを再利用します。
+
+```bash
 aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
 ```
 
 信頼ポリシー（`infra/cd/oidc-trust-policy.json`）は `aud` が `sts.amazonaws.com`、`sub` が `repo:<OWNER>/<REPO>:environment:demo` の完全一致だけです（ワイルドカードなし）。権限（`infra/cd/deploy-policy.json`）は、対象関数（修飾子なし）とその版・エイリアス（修飾子つき）に限った、設定・関数の参照（`GetFunction` は更新完了の待機 `aws lambda wait function-updated-v2` と、発行した版の有効化の待機 `aws lambda wait function-active-v2 --qualifier <版>` が使う。追加の権限は不要）、コード更新、版の発行、エイリアスの参照と更新と、固定のレイヤー版の読み取りだけです。`iam:PassRole`、管理者権限、実行時の権限、関数URL・同時実行数・ログ・IAMの操作は含めません。
 
+`REPO_SLUG`・`ACCOUNT_ID`・`FN` は「1. 準備」で検証済みで、`sed` の区切り文字 `|` や `&` を含みません。まず、置換した内容を作って確認します（AWSへの書き込みなし）。
+
 ```bash
 work="$(mktemp -d)"
-export REPO_SLUG=<OWNER>/<REPO>   # 対象のGitHubリポジトリ（人が入力）
-sed -e "s|<ACCOUNT_ID>|$ACCOUNT_ID|g" -e "s|<OWNER>/<REPO>|$REPO_SLUG|g" infra/cd/oidc-trust-policy.json > "$work/trust.json"
-sed -e "s|<ACCOUNT_ID>|$ACCOUNT_ID|g" -e "s|<FUNCTION_NAME>|$FN|g" infra/cd/deploy-policy.json > "$work/policy.json"
-# 置換後の内容（subが repo:<実際のリポジトリ>:environment:demo の完全一致になっているか）を目で確認する
+sed -e "s|<ACCOUNT_ID>|${ACCOUNT_ID}|g" -e "s|<OWNER>/<REPO>|${REPO_SLUG}|g" infra/cd/oidc-trust-policy.json > "$work/trust.json"
+sed -e "s|<ACCOUNT_ID>|${ACCOUNT_ID}|g" -e "s|<FUNCTION_NAME>|${FN}|g" infra/cd/deploy-policy.json > "$work/policy.json"
+if grep -nE '<(ACCOUNT_ID|FUNCTION_NAME|OWNER|REPO)>' "$work/trust.json" "$work/policy.json"; then die "未置換の目印が残っている"; fi
+jq -e . "$work/trust.json" "$work/policy.json" >/dev/null || die "JSONとして不正"
+grep -qF "\"repo:${REPO_SLUG}:environment:demo\"" "$work/trust.json" || die "sub が repo:<リポジトリ>:environment:demo の完全一致になっていない"
+# 置換後の内容を人が目で確認する（実在のアカウントIDが出るため、出力はチャット・文書に貼らない）
 cat "$work/trust.json" "$work/policy.json"
-aws iam create-role --role-name <FUNCTION_NAME>-deploy --assume-role-policy-document "file://$work/trust.json" --max-session-duration 3600
-aws iam put-role-policy --role-name <FUNCTION_NAME>-deploy --policy-name deploy-demo-only --policy-document "file://$work/policy.json"
+```
+
+内容を人が確認し、問題がなければ、次のブロックで作成します。`create-role` が既存のロール名で失敗した場合はセッションが終了し、`put-role-policy` は実行されません。既存のロールを再利用・上書きせず、人が判断します。
+
+```bash
+aws iam create-role --role-name "$DEPLOY_ROLE" --assume-role-policy-document "file://$work/trust.json" --max-session-duration 3600
+aws iam put-role-policy --role-name "$DEPLOY_ROLE" --policy-name deploy-demo-only --policy-document "file://$work/policy.json"
 ```
 
 ロールのARNがリポジトリ変数 `AWS_ROLE_ARN` です。固定レイヤーの読み取りが実際のAWSで必要か・足りるかは未確認です（`AccessDenied` なら、固定ARNの読み取りだけを足りない操作に限って見直す）。
@@ -190,14 +271,24 @@ Environment `demo`（名前は運用上の選択）。設定済みですが、CD
 - 管理者による保護の迂回の許可: 無効にする設定を要求したが、APIの応答にフィールドがなく無効とは**確認できていない**（事前確認は「未確認」の注意を出す）
 - デプロイブランチ: 「選択したブランチ」のカスタムポリシーで `main`（ブランチ）の1件だけ。ワイルドカード・タグは不可
 
-設定は既に行われています。再現・修正が必要な場合の `gh` の案（`<USER_ID>` は承認者のGitHubの数値ID。`PUT` は既存のEnvironmentの設定を置き換えます。**現在の設定には実行不要**）:
+設定は既に行われています。まず**読み取りで現状を確認**します（書き込みなし。「1. 準備」で検証済みの `REPO_SLUG` を使う。出力に人名・数値IDが出るため、チャット・文書に貼らない）。
 
 ```bash
-gh api -X PUT repos/<OWNER>/<REPO>/environments/demo --input - <<'JSON'
-{"reviewers":[{"type":"User","id":<USER_ID>}],"prevent_self_review":false,"can_admins_bypass":false,
+gh api "repos/${REPO_SLUG}/environments/demo"
+gh api "repos/${REPO_SLUG}/environments/demo/deployment-branch-policies"
+gh variable list --repo "$REPO_SLUG"
+```
+
+次の `PUT` は、**新しい環境を作る場合、または人が承認した変更のときだけ**の手動の例です。`PUT` は既存のEnvironmentの設定を**置き換える**ため、現在の設定（設定済み）には実行しません。実行する場合は、上の読み取りの結果と照らして置換後の設定を人が確認してから行います。`APPROVER_ID` は承認者のGitHubの数値IDです（人が確認して入力）。
+
+```bash
+APPROVER_ID='REPLACE_APPROVER_NUMERIC_ID'
+[[ "$APPROVER_ID" =~ ^[0-9]+$ ]] || die "APPROVER_ID は数値"
+gh api -X PUT "repos/${REPO_SLUG}/environments/demo" --input - <<JSON
+{"reviewers":[{"type":"User","id":${APPROVER_ID}}],"prevent_self_review":false,"can_admins_bypass":false,
  "deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
 JSON
-gh api -X POST repos/<OWNER>/<REPO>/environments/demo/deployment-branch-policies -f name=main -f type=branch
+gh api -X POST "repos/${REPO_SLUG}/environments/demo/deployment-branch-policies" -f name=main -f type=branch
 ```
 
 ## 7. 配布（CD）の流れと、止まったときの確認
@@ -206,16 +297,24 @@ Actionsの「CD」を `main` から手動で起動し、`source_sha` に承認�
 
 結果JSONの見方: `deployment`（配布処理）・`smoke`（新しい版）・`rollback` は別々に記録されます。`overall` が `success`（新しい版を配布し、スモーク確認に合格）または `no-change-success`（既に同じソース・ZIPの版が現行で、変更も新しい版の発行もしていない。新しい配布の成功ではない）以外なら失敗です。ロールバックが成功しても全体は失敗として終了します。`mutationStarted` が `true` なら、AWSの変更操作を始めており（成功を意味しない）、結果ファイルが無い場合もAWSの操作の有無は**未確認**で、人が確認します。`alias.state` が `unknown-outcome` / `conflict-not-switched` の場合、エイリアスの実際の版は不明（`unknown-outcome` の値は読み直しの観測値）で、自動の戻しはしていません。観測した版が今回の版でも、人が確認するまで上書きしません。`overall` が `in-progress` のまま残っている場合は、処理が強制終了した可能性があるため、`recoveryNote` に従って次を人が確認します。
 
+以下のコマンドも、「1. 準備」の設定・検証・呼び出し元アカウントの確認を済ませたセッションで実行します。`<版>` のような `<…>` は貼り付けるとリダイレクトと解釈されるため、引用符つきの `REPLACE_*` を書き換えて使います。
+
 ```bash
 aws lambda get-alias --function-name "$FN" --name demo --region "$AWS_REGION"   # 指す版と RevisionId
-aws lambda get-function-configuration --function-name "$FN" --qualifier <版> --query '{d:Description,c:CodeSha256}' --region "$AWS_REGION"
+VERSION='REPLACE_VERSION'                                                        # 確認したい版
+[[ "$VERSION" =~ ^[1-9][0-9]*$ ]] || die "VERSION は版番号（数字）"
+aws lambda get-function-configuration --function-name "$FN" --qualifier "$VERSION" --query '{d:Description,c:CodeSha256}' --region "$AWS_REGION"
 ```
 
-直前の正常版へ戻す場合は、現在の `RevisionId` を指定して競合を避けます（版・成果物は削除しない）。
+直前の正常版へ戻す場合は、現在の `RevisionId` を指定して競合を避けます（版・成果物は削除しない）。書き込みなので、`get-alias` の結果を人が確認してから実行します。
 
 ```bash
-aws lambda update-alias --function-name "$FN" --name demo --function-version <直前の正常版> \
-  --revision-id <get-aliasで確認したRevisionId> --routing-config '{"AdditionalVersionWeights":{}}' --region "$AWS_REGION"
+PREV_VERSION='REPLACE_PREVIOUS_GOOD_VERSION'
+REVISION_ID='REPLACE_REVISION_ID_FROM_GET_ALIAS'
+[[ "$PREV_VERSION" =~ ^[1-9][0-9]*$ ]] || die "PREV_VERSION は版番号（数字）"
+[[ "$REVISION_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die "REVISION_ID の形式が不正"
+aws lambda update-alias --function-name "$FN" --name demo --function-version "$PREV_VERSION" \
+  --revision-id "$REVISION_ID" --routing-config '{"AdditionalVersionWeights":{}}' --region "$AWS_REGION"
 ```
 
 公開を止めるとき（500円のアラート時、初回の失敗時、原因不明の異常時）は、予約済み同時実行数を0にします（関数URLは429を返す。データベースはないため削除するデータはない）。再開は原因を修正し、人が承認してからです。
@@ -237,7 +336,9 @@ aws lambda update-alias --function-name "$FN" --name demo --function-version <�
 GitHub Actionsの成果物の保管は最長90日で、期限後は消えます。Lambdaでは、現在の版と直前の版を、より新しい版がスモーク確認に合格するまで削除しません。成果物が期限切れでも、各版の description の `zip=<SHA-256>` と照合すれば正確なZIPを取り戻せます（IAM管理者などの権限で）。
 
 ```bash
-aws lambda get-function --function-name "$FN" --qualifier <版> --query Code.Location --output text --region "$AWS_REGION"
+VERSION='REPLACE_VERSION'
+[[ "$VERSION" =~ ^[1-9][0-9]*$ ]] || die "VERSION は版番号（数字）"
+aws lambda get-function --function-name "$FN" --qualifier "$VERSION" --query Code.Location --output text --region "$AWS_REGION"
 # 出力されるURLは短時間だけ有効な署名つきなので、文書やチャットに貼らない。ダウンロード後に sha256sum で zip= と照合する
 ```
 
