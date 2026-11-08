@@ -12,3 +12,6 @@
 !scripts/package-lambda.py
 **/__pycache__
 **/*.pyc
+**/.env*
+**/*.pem
+**/*.key
