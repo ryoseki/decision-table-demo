@@ -17,6 +17,8 @@ export type ReviewCase = {
   /** 問い合わせ（申告内容）の架空の本文 */
   inquiry: string;
   answers: Partial<Record<QuestionId, Answer>>;
+  /** 表示用フィクスチャ: 「自動」タグを付ける設問。自動回答の対象設問の割り当ては未合意で、業務ルールではない。 */
+  autoQuestions?: readonly QuestionId[];
   /** 確認待ちの理由（架空） */
   pendingReasons?: Partial<Record<QuestionId, string>>;
   /** 登録済みの結果。未登録は undefined */
@@ -34,6 +36,7 @@ export const cases: readonly ReviewCase[] = [
       A01: "yes", A02: "yes", A03: "yes", A04: "yes", A05: "yes", A06: "no",
       A07: "yes", A08: "yes", A09: "yes", A10: "no", A11: "yes", A12: "yes",
     },
+    autoQuestions: ["A01", "A03", "A09"],
   },
   {
     caseId: "CASE-B",
@@ -55,6 +58,7 @@ export const cases: readonly ReviewCase[] = [
     summary: "APIキー発行の通知に心当たりがない",
     inquiry: "新しいAPIキーが発行されたという通知が届いたが、自分では発行していない。",
     answers: { A01: "yes", A03: "no", A05: "no", A07: "yes", A09: "pending" },
+    autoQuestions: ["A01", "A03", "A09"],
     pendingReasons: { A09: "APIキー発行履歴の自動回答を取得できませんでした（通信エラー）。" },
   },
   {

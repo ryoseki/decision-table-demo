@@ -23,8 +23,8 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>不正審査デモ</h1>
-        <span className="tag">架空の案件・画面案（未承認）</span>
+        <h1><span className="sr-only">不正審査デモ </span>審査台</h1>
+        <span className="tag">画面案（未承認） ／ 架空案件</span>
       </header>
       <main ref={mainRef}>
         {route.name === "list" ? (

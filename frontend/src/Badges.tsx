@@ -11,16 +11,20 @@ export function StatusBadge({ status }: { status: CaseStatus }) {
   return <span className={`badge ${statusClass[status]}`}>{status}</span>;
 }
 
-// 色だけに頼らず、記号と文言で Yes / No / 確認待ち / 未回答 を区別する。
-export function AnswerBadge({ answer }: { answer: Answer | undefined }) {
-  switch (answer) {
-    case "yes":
-      return <span className="badge ans-yes"><span aria-hidden="true">●</span> Yes</span>;
-    case "no":
-      return <span className="badge ans-no"><span aria-hidden="true">○</span> No</span>;
-    case "pending":
-      return <span className="badge ans-pending"><span aria-hidden="true">▲</span> 確認待ち</span>;
-    default:
-      return <span className="badge ans-none"><span aria-hidden="true">―</span> 未回答</span>;
-  }
+// 読み取り専用の Yes / No 表示。ボタンに見えないよう枠を持たせず、選択側だけを ✓ 付きで塗る。
+// 確認待ち・未回答は、どちらも塗らず、記号と文言の札を添えて区別する。
+export function AnswerView({ answer }: { answer: Answer | undefined }) {
+  const label =
+    answer === "yes" ? "Yes" : answer === "no" ? "No" : answer === "pending" ? "確認待ち" : "未回答";
+  return (
+    <div className="answer-view">
+      <span className="sr-only">回答: {label}</span>
+      <div className="choices" aria-hidden="true">
+        <span className={`choice${answer === "yes" ? " on" : ""}`}>{answer === "yes" ? "✓ " : ""}Yes</span>
+        <span className={`choice${answer === "no" ? " on" : ""}`}>{answer === "no" ? "✓ " : ""}No</span>
+      </div>
+      {answer === "pending" && <span className="badge ans-pending" aria-hidden="true">▲ 確認待ち</span>}
+      {answer === undefined && <span className="badge ans-none" aria-hidden="true">― 未回答</span>}
+    </div>
+  );
 }

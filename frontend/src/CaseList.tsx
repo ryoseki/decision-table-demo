@@ -91,7 +91,7 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
                 <div className="case-side">
                   <StatusBadge status={statusOf(c)} />
                   <AnswerCounts c={c} />
-                  <span className="open">審査を開く <span aria-hidden="true">→</span></span>
+                  <span className="btn open">審査を開く</span>
                 </div>
               </a>
             </li>
