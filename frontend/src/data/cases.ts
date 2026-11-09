@@ -87,8 +87,8 @@ export const cases: readonly ReviewCase[] = [
   },
 ];
 
-export type CaseStatus = "未着手" | "回答中" | "確認待ちあり" | "登録済み";
-export const caseStatuses: readonly CaseStatus[] = ["未着手", "回答中", "確認待ちあり", "登録済み"];
+export type CaseStatus = "未審査" | "情報取得失敗あり" | "登録済み";
+export const caseStatuses: readonly CaseStatus[] = ["未審査", "情報取得失敗あり", "登録済み"];
 
 export type Tally = { yes: number; no: number; pending: number; unanswered: number };
 
@@ -108,7 +108,6 @@ export function tally(c: ReviewCase): Tally {
 export function statusOf(c: ReviewCase): CaseStatus {
   if (c.result !== undefined) return "登録済み";
   const t = tally(c);
-  if (t.pending > 0) return "確認待ちあり";
-  if (t.yes + t.no === 0) return "未着手";
-  return "回答中";
+  if (t.pending > 0) return "情報取得失敗あり";
+  return "未審査";
 }

@@ -1,9 +1,8 @@
 import type { CaseStatus } from "./data/cases";
 
 const statusClass: Record<CaseStatus, string> = {
-  未着手: "st-todo",
-  回答中: "st-doing",
-  確認待ちあり: "st-pending",
+  未審査: "st-todo",
+  情報取得失敗あり: "st-pending",
   登録済み: "st-done",
 };
 
