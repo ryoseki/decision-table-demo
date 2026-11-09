@@ -308,7 +308,7 @@ def scope_down_ok(statement: object) -> bool:
 
 
 def classify_rule(rule: object) -> str | None:
-    """期待する2規則のどちらか（"ip" / "global"）。少しでも違えば None（迂回の余地を残さない）。"""
+    """必須の2規則のどちらか（"ip" / "global"）。少しでも違えば None（迂回の余地を残さない）。"""
     if not isinstance(rule, dict) or not set(rule) <= RULE_KEYS:
         return None
     # ActionはBlockだけ（通常の403。Count・Allow・Captcha・Challenge・独自応答は不可）。OverrideActionも不可
@@ -333,6 +333,69 @@ def classify_rule(rule: object) -> str | None:
     return None
 
 
+# 必須の2規則に加えて、観測専用として残してよいAWSのマネージド規則グループ（プロジェクト独自の判断）。
+# コンソールがWeb ACLの自動作成時に付け得るもので、OverrideActionのCountだけで残す。
+# Countは終端しない（一致しても評価が続く）ため、優先順位に関係なく必須の2規則のBlockを迂回しない
+# （https://docs.aws.amazon.com/waf/latest/developerguide/web-acl-rule-group-override-options.html）
+OBSERVER_VENDOR = "AWS"
+OBSERVER_GROUPS = frozenset(
+    {
+        "AWSManagedRulesAmazonIpReputationList",
+        "AWSManagedRulesCommonRuleSet",
+        "AWSManagedRulesKnownBadInputsRuleSet",
+    }
+)
+OBSERVER_RULE_KEYS = {"Name", "Priority", "Statement", "OverrideAction", "VisibilityConfig", "RuleLabels"}
+# 規則グループ内の除外・動作の上書き・設定。APIが空の配列で返すことがあるため、空なら許す
+OBSERVER_OPTIONAL_LISTS = ("ExcludedRules", "RuleActionOverrides", "ManagedRuleGroupConfigs")
+# Web ACLの規則の上限（必須2件＋観測3件。CloudFrontのFreeプランの規則5件までに合わせた独自の上限）
+WEB_ACL_MAX_RULES = 5
+
+
+def classify_observer(rule: object) -> str | None:
+    """観測専用のマネージド規則グループならその名前。少しでも違えば None。
+
+    VendorNameはAWS、名前は OBSERVER_GROUPS のどれか、OverrideActionはちょうど {"Count": {}}。
+    Action・別のOverrideAction（None＝グループ内の動作のまま）・ScopeDownStatement・Version・
+    空でない除外や動作の上書きは不可（BlockやAllowを持ち込まない・対象を絞らない）。
+    """
+    if not isinstance(rule, dict) or not set(rule) <= OBSERVER_RULE_KEYS:
+        return None
+    if rule.get("OverrideAction") != {"Count": {}} or rule.get("RuleLabels"):
+        return None
+    statement = rule.get("Statement")
+    if not isinstance(statement, dict) or set(statement) != {"ManagedRuleGroupStatement"}:
+        return None
+    group = statement["ManagedRuleGroupStatement"]
+    if not isinstance(group, dict) or not set(group) <= {"VendorName", "Name", *OBSERVER_OPTIONAL_LISTS}:
+        return None
+    if any(group.get(key, []) != [] for key in OBSERVER_OPTIONAL_LISTS):
+        return None
+    name = group.get("Name")
+    # 名前が文字列でないと、frozensetの所属確認がTypeError（unhashable）になり、問題名を出せない
+    if group.get("VendorName") != OBSERVER_VENDOR or not isinstance(name, str) or name not in OBSERVER_GROUPS:
+        return None
+    return name
+
+
+def web_acl_rules_ok(rules: object) -> bool:
+    """必須の2規則（IPごと・全体のBlock）がちょうど1件ずつ、ほかは重複のない観測専用グループ0〜3件。"""
+    if not isinstance(rules, list) or len(rules) > WEB_ACL_MAX_RULES:
+        return False
+    rates: list[str] = []
+    observers: list[str] = []
+    for rule in rules:
+        kind = classify_rule(rule)
+        if kind is not None:
+            rates.append(kind)
+            continue
+        group = classify_observer(rule)
+        if group is None:
+            return False  # 未知の規則・未知のベンダー・Count以外のグループは拒否
+        observers.append(group)
+    return sorted(rates) == ["global", "ip"] and len(set(observers)) == len(observers)
+
+
 def web_acl_problems(response: dict, arn: str, name: str, acl_id: str) -> list[str]:
     acl = response.get("WebACL")
     if not isinstance(acl, dict):
@@ -342,18 +405,14 @@ def web_acl_problems(response: dict, arn: str, name: str, acl_id: str) -> list[s
         problems.append("webAclIdentity")
     if acl.get("DefaultAction") != {"Allow": {}}:
         problems.append("webAclDefaultAction")
-    # Firewall Managerが管理・前後に差し込む規則グループは、期待の2規則より先に評価されてAllowなどで
+    # Firewall Managerが管理・前後に差し込む規則グループは、必須の2規則より先に評価されてAllowなどで
     # 迂回し得る。初期構成では使わないので、有効・非空なら拒否する（キーがない・空・falseは正常）
     if acl.get("ManagedByFirewallManager") not in (None, False) or any(
         acl.get(key) not in (None, [])
         for key in ("PreProcessFirewallManagerRuleGroups", "PostProcessFirewallManagerRuleGroups")
     ):
         problems.append("webAclFirewallManager")
-    rules = acl.get("Rules")
-    if not isinstance(rules, list) or sorted(map(str, (classify_rule(r) for r in rules))) != [
-        "global",
-        "ip",
-    ]:
+    if not web_acl_rules_ok(acl.get("Rules")):
         problems.append("webAclRules")
     return problems
 

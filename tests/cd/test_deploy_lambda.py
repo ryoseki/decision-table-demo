@@ -1024,6 +1024,49 @@ def extra_rule(aws):
     aws.rules.append({**json.loads(json.dumps(aws.rules[0])), "Priority": 2})
 
 
+OBSERVER_GROUPS = (
+    "AWSManagedRulesAmazonIpReputationList",
+    "AWSManagedRulesCommonRuleSet",
+    "AWSManagedRulesKnownBadInputsRuleSet",
+)
+
+
+def observer(group: str, priority: int, vendor: str = "AWS") -> dict:
+    """コンソールの自動作成で付き得る、Countで観測だけするAWSのマネージド規則グループ（get-web-aclの形）。"""
+    return {
+        "Name": f"{vendor}-{group}",
+        "Priority": priority,
+        "Statement": {"ManagedRuleGroupStatement": {"VendorName": vendor, "Name": group}},
+        "OverrideAction": {"Count": {}},
+        "VisibilityConfig": visibility(f"{vendor}-{group}"),
+    }
+
+
+def add_observers(aws, groups=OBSERVER_GROUPS, first=True):
+    """観測グループを足す。first=True なら必須の2規則より前の優先順位（Countは終端しないので可）。"""
+    if first:
+        for rule in aws.rules:
+            rule["Priority"] += len(groups)
+        aws.rules[:0] = [observer(g, i) for i, g in enumerate(groups)]
+    else:
+        start = len(aws.rules)
+        aws.rules.extend(observer(g, start + i) for i, g in enumerate(groups))
+
+
+def with_observers(change):
+    """3つの観測グループを足したうえで、そのうち1つ（先頭）を change で変える。"""
+
+    def mutate(aws):
+        add_observers(aws)
+        change(aws.rules[0])
+
+    return mutate
+
+
+def observer_group(rule):
+    return rule["Statement"]["ManagedRuleGroupStatement"]
+
+
 def second_origin(aws):
     aws.dist_config["Origins"].update(
         Quantity=2, Items=[aws.origin, {**aws.origin, "Id": "second"}]
@@ -1154,6 +1197,51 @@ BOUNDARY_CASES = [
     ("waf-extra-rule", extra_rule, "webAclRules"),
     ("waf-single-rule", lambda a: a.rules.pop(), "webAclRules"),
     ("waf-duplicate-ip-rule", duplicate_ip_rule, "webAclRules"),
+    # 観測専用のマネージド規則グループ（Count）。既知の3つ以外・Count以外・絞り込みや上書きは拒否
+    ("waf-observer-unknown-group", with_observers(lambda r: observer_group(r).update(Name="AWSManagedRulesBotControlRuleSet")), "webAclRules"),
+    ("waf-observer-unknown-group-alone", lambda a: a.rules.append(observer("AWSManagedRulesAdminProtectionRuleSet", 2)), "webAclRules"),
+    ("waf-observer-other-vendor", lambda a: a.rules.append(observer("AWSManagedRulesCommonRuleSet", 2, vendor="ExampleVendor")), "webAclRules"),
+    ("waf-observer-vendor-lowercase", with_observers(lambda r: observer_group(r).update(VendorName="aws")), "webAclRules"),
+    # 名前が文字列でない（unhashable）でもTypeErrorにせず、問題名 webAclRules を出して閉じる
+    ("waf-observer-name-list", with_observers(lambda r: observer_group(r).update(Name=["AWSManagedRulesCommonRuleSet"])), "webAclRules"),
+    ("waf-observer-name-dict", with_observers(lambda r: observer_group(r).update(Name={"x": 1})), "webAclRules"),
+    ("waf-observer-name-null", with_observers(lambda r: observer_group(r).update(Name=None)), "webAclRules"),
+    ("waf-observer-name-number", with_observers(lambda r: observer_group(r).update(Name=1)), "webAclRules"),
+    ("waf-observer-vendor-list", with_observers(lambda r: observer_group(r).update(VendorName=["AWS"])), "webAclRules"),
+    ("waf-observer-duplicate", lambda a: add_observers(a, (OBSERVER_GROUPS[1], OBSERVER_GROUPS[1])), "webAclRules"),
+    ("waf-more-than-five-rules", lambda a: add_observers(a, (*OBSERVER_GROUPS, OBSERVER_GROUPS[0])), "webAclRules"),
+    ("waf-observer-override-none", with_observers(lambda r: r.update(OverrideAction={"None": {}})), "webAclRules"),
+    ("waf-observer-override-missing", with_observers(lambda r: r.pop("OverrideAction")), "webAclRules"),
+    (
+        "waf-observer-count-with-custom-request",
+        with_observers(lambda r: r.update(OverrideAction={"Count": {"CustomRequestHandling": {"InsertHeaders": [{"Name": "x", "Value": "y"}]}}})),
+        "webAclRules",
+    ),
+    ("waf-observer-action-and-override", with_observers(lambda r: r.update(Action={"Block": {}})), "webAclRules"),
+    ("waf-observer-action-instead-of-override", with_observers(lambda r: (r.pop("OverrideAction"), r.update(Action={"Count": {}}))), "webAclRules"),
+    ("waf-observer-scope-down", with_observers(lambda r: observer_group(r).update(ScopeDownStatement={"NotStatement": {}})), "webAclRules"),
+    (
+        "waf-observer-rule-action-override",
+        with_observers(lambda r: observer_group(r).update(RuleActionOverrides=[{"Name": "NoUserAgent_HEADER", "ActionToUse": {"Allow": {}}}])),
+        "webAclRules",
+    ),
+    ("waf-observer-excluded-rules", with_observers(lambda r: observer_group(r).update(ExcludedRules=[{"Name": "SizeRestrictions_BODY"}])), "webAclRules"),
+    ("waf-observer-optional-list-null", with_observers(lambda r: observer_group(r).update(ExcludedRules=None)), "webAclRules"),
+    ("waf-observer-version", with_observers(lambda r: observer_group(r).update(Version="Version_1.0")), "webAclRules"),
+    ("waf-observer-rule-labels", with_observers(lambda r: r.update(RuleLabels=[{"Name": "demo:label"}])), "webAclRules"),
+    ("waf-observer-other-statement", with_observers(lambda r: r.update(Statement={"RuleGroupReferenceStatement": {"ARN": "arn:example"}})), "webAclRules"),
+    # 観測グループがあっても、必須の2規則が欠けた・変わったら拒否（観測グループで代わりにはならない）
+    ("waf-observers-without-ip-rate", lambda a: (add_observers(a, first=False), a.rules.pop(0)), "webAclRules"),
+    ("waf-observers-without-global-rate", lambda a: (add_observers(a, first=False), a.rules.pop(1)), "webAclRules"),
+    ("waf-observers-only", lambda a: (add_observers(a), a.rules.__delitem__(slice(3, None))), "webAclRules"),
+    ("waf-observers-with-weak-ip-limit", lambda a: (add_observers(a, first=False), rate(a, 0).update(Limit=3000)), "webAclRules"),
+    ("waf-observers-with-global-window", lambda a: (add_observers(a, first=False), rate(a, 1).update(EvaluationWindowSec=600)), "webAclRules"),
+    ("waf-observers-with-count-global", lambda a: (add_observers(a, first=False), a.rules[1].update(Action={"Count": {}})), "webAclRules"),
+    (
+        "waf-rate-rule-as-count-override",
+        lambda a: (add_observers(a, first=False), a.rules[0].pop("Action"), a.rules[0].update(OverrideAction={"Count": {}})),
+        "webAclRules",
+    ),
     # Firewall Managerの前処理・後処理の規則グループ、管理下のACLは、期待の2規則より前に迂回し得るため拒否
     ("waf-firewall-manager-managed", lambda a: a.acl["WebACL"].update(ManagedByFirewallManager=True), "webAclFirewallManager"),
     (
@@ -1335,6 +1423,26 @@ class PublicPathBoundaries(DeployTestCase):
             ),
             ("deny-is-ignored", deny_statement),
             ("rule-order", lambda a: a.rules.reverse()),
+            # 必須の2規則＋既知の観測グループ（Count）0〜3件。優先順位は前でも後でもよい（Countは終端しない）
+            ("observers-all-three-before-rates", add_observers),
+            ("observers-all-three-after-rates", lambda a: add_observers(a, first=False)),
+            ("observer-ip-reputation-only", lambda a: add_observers(a, OBSERVER_GROUPS[:1])),
+            ("observer-common-only", lambda a: add_observers(a, OBSERVER_GROUPS[1:2])),
+            ("observer-known-bad-inputs-only", lambda a: add_observers(a, OBSERVER_GROUPS[2:])),
+            ("observers-two", lambda a: add_observers(a, OBSERVER_GROUPS[1:])),
+            (
+                "observers-shuffled-with-rates",
+                lambda a: (add_observers(a), a.rules.insert(1, a.rules.pop(4))),
+            ),
+            (
+                "observer-empty-optional-lists",
+                with_observers(
+                    lambda r: observer_group(r).update(
+                        ExcludedRules=[], RuleActionOverrides=[], ManagedRuleGroupConfigs=[]
+                    )
+                ),
+            ),
+            ("observer-empty-rule-labels", with_observers(lambda r: r.update(RuleLabels=[]))),
             ("url-without-slash", lambda a: a.url.update(FunctionUrl=f"https://{LAMBDA_HOST}")),
             ("unqualified-function-arn", lambda a: a.url.update(FunctionArn=FUNCTION_ARN)),
         ]
@@ -1415,6 +1523,48 @@ class RunAwsRegions(unittest.TestCase):
         with mock.patch.object(dl.subprocess, "run", side_effect=AssertionError("実行しない")):
             with self.assertRaises(dl.AwsError):
                 dl.run_aws(["lambda", "get-alias", "--region", "us-west-2"])
+
+
+class WebAclRuleClassification(unittest.TestCase):
+    """必須の2規則（classify_rule）と観測グループ（classify_observer）は互いの形を受け入れない。"""
+
+    def setUp(self):
+        self.ip, self.global_rule = make_web_acl()["WebACL"]["Rules"]
+
+    def test_mandatory_rate_rules_are_still_classified_by_rate(self):
+        self.assertEqual(dl.classify_rule(self.ip), "ip")
+        self.assertEqual(dl.classify_rule(self.global_rule), "global")
+        self.assertIsNone(dl.classify_observer(self.ip))
+        self.assertIsNone(dl.classify_observer(self.global_rule))
+
+    def test_known_observers_are_not_rate_rules(self):
+        for group in OBSERVER_GROUPS:
+            with self.subTest(group):
+                rule = observer(group, 2)
+                self.assertEqual(dl.classify_observer(rule), group)
+                self.assertIsNone(dl.classify_rule(rule))
+
+    def test_allowed_observers_are_exactly_the_three_known_groups(self):
+        self.assertEqual(dl.OBSERVER_GROUPS, frozenset(OBSERVER_GROUPS))
+        self.assertEqual(dl.WEB_ACL_MAX_RULES, 2 + len(OBSERVER_GROUPS))
+
+    def test_malformed_group_names_are_rejected_without_raising(self):
+        for bad in (["AWSManagedRulesCommonRuleSet"], {"a": 1}, None, 1, True):
+            with self.subTest(repr(bad)):
+                rule = observer(OBSERVER_GROUPS[1], 2)
+                rule["Statement"]["ManagedRuleGroupStatement"]["Name"] = bad
+                self.assertIsNone(dl.classify_observer(rule))
+                self.assertFalse(dl.web_acl_rules_ok([self.ip, self.global_rule, rule]))
+
+    def test_rule_list_bounds(self):
+        observers = [observer(g, 2 + i) for i, g in enumerate(OBSERVER_GROUPS)]
+        self.assertTrue(dl.web_acl_rules_ok([self.ip, self.global_rule]))
+        self.assertTrue(dl.web_acl_rules_ok([self.ip, self.global_rule, *observers]))
+        self.assertFalse(dl.web_acl_rules_ok([self.ip, self.global_rule, *observers, observers[0]]))
+        self.assertFalse(dl.web_acl_rules_ok(observers))
+        self.assertFalse(dl.web_acl_rules_ok([self.ip, self.ip, self.global_rule]))
+        self.assertFalse(dl.web_acl_rules_ok([]))
+        self.assertFalse(dl.web_acl_rules_ok(None))
 
 
 class TemplatesMatchTheCode(unittest.TestCase):
