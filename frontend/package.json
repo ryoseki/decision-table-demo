@@ -10,6 +10,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "node --test src/matching.test.ts",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

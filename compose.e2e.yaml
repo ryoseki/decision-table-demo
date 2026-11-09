@@ -14,6 +14,7 @@ services:
         condition: service_healthy
     environment:
       CI: "${CI:-}"
+      SHOTS: "${SHOTS:-}"
       E2E_EXPECTED_HEALTH_STATUS: "${E2E_EXPECTED_HEALTH_STATUS:-ok}"
     volumes:
       - ./e2e/test-results:/e2e/test-results
