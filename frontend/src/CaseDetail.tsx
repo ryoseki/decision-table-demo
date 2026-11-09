@@ -1,26 +1,18 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { AnswerCounts } from "./AnswerCounts";
-import { AnswerView, StatusBadge } from "./Badges";
-import { cases, statusOf, tally, type Answer } from "./data/cases";
-import { questions } from "./data/questions";
+import { StatusBadge } from "./Badges";
+import { cases, statusOf, type Answer, type ResultName } from "./data/cases";
+import { questions, type QuestionId } from "./data/questions";
+import { RESULTS, canSkipQuestion, matchRules, type AnswerMap } from "./matching";
 
-type Filter = "all" | "yes" | "no" | "pending" | "none";
-const filters: readonly { key: Filter; label: string }[] = [
-  { key: "all", label: "すべて" },
-  { key: "yes", label: "Yes" },
-  { key: "no", label: "No" },
-  { key: "pending", label: "確認待ち" },
-  { key: "none", label: "未回答" },
-];
+// 状態はこのコンポーネントのメモリ上だけに持つ。保存・永続化・通信は行わない（契約は未合意）。
+// ページを開き直すと初期状態に戻る。
 
-function matches(f: Filter, a: Answer | undefined): boolean {
-  if (f === "all") return true;
-  if (f === "none") return a === undefined;
-  return a === f;
+function openState(answers: AnswerMap): Record<string, boolean> {
+  return Object.fromEntries(matchRules(answers).map((r) => [r.rule.id, !r.gray]));
 }
 
 export default function CaseDetail({ caseId }: { caseId: string }) {
-  const [filter, setFilter] = useState<Filter>("all");
   const c = cases.find((x) => x.caseId === caseId);
 
   if (c === undefined) {
@@ -35,10 +27,34 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
       </section>
     );
   }
+  return <Review c={c} />;
+}
 
-  const t = tally(c);
-  const answeredCount = t.yes + t.no;
-  const visible = questions.filter((q) => matches(filter, c.answers[q.id]));
+function Review({ c }: { c: (typeof cases)[number] }) {
+  const [answers, setAnswers] = useState<AnswerMap>(c.answers);
+  const [edited, setEdited] = useState<ReadonlySet<QuestionId>>(new Set());
+  // 行の開閉。初期は食い違わない行を開く。回答が変わったときだけ同じ規則で更新し、手動の開閉はそれまで保つ。
+  const [open, setOpen] = useState<Record<string, boolean>>(() => openState(c.answers));
+  const [outcome, setOutcome] = useState<ResultName | "">(c.result ?? "");
+  const [registered, setRegistered] = useState<ResultName | "">("");
+
+  const rows = matchRules(answers);
+  const matchingCount = rows.filter((r) => !r.gray).length;
+  const answeredCount = questions.filter((q) => answers[q.id] === "yes" || answers[q.id] === "no").length;
+  const current = { ...c, answers };
+
+  const choose = (id: QuestionId, value: "yes" | "no") => {
+    const changed = answers[id] !== value;
+    const next = { ...answers, [id]: value };
+    setAnswers(next);
+    setEdited(new Set(edited).add(id));
+    if (changed) setOpen(openState(next));
+  };
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    if (outcome !== "") setRegistered(outcome);
+  };
 
   return (
     <section aria-labelledby="detail-title">
@@ -50,7 +66,7 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
           <p className="sub-row">{c.caseId} ／ user_id {c.userId}</p>
         </div>
         <div className="detail-status">
-          <StatusBadge status={statusOf(c)} />
+          <StatusBadge status={statusOf(current)} />
           {c.result !== undefined && <span className="result">登録済みの結果: {c.result}</span>}
         </div>
       </div>
@@ -60,77 +76,105 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
         <p>{c.inquiry}</p>
       </div>
 
-      <div className="panel">
-        <div className="panel-head">
-          <h3 id="q-title">設問と回答</h3>
-          <span className="panel-meta">
-            {answeredCount}／{questions.length}問 入力済み
-          </span>
-        </div>
+      <p className="note note-top" data-testid="preview-note">
+        画面案：保存はまだ行いません。回答と結果の選択は、このページを開いている間だけの表示用で、開き直すと初期状態に戻ります。
+      </p>
 
-        <div className="panel-counts"><AnswerCounts c={c} /></div>
-        <div className="chips panel-filter" role="group" aria-label="設問の表示を絞り込む">
-          {filters.map((f) => (
-            <button
-              key={f.key}
-              type="button"
-              className="chip"
-              aria-pressed={filter === f.key}
-              onClick={() => setFilter(f.key)}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-
-        {visible.length === 0 ? (
-          <div className="empty" data-testid="empty-questions">
-            <p className="empty-title">この条件に当てはまる設問はありません</p>
-            <button type="button" className="btn" onClick={() => setFilter("all")}>すべて表示</button>
+      <div className="columns">
+        <section className="pane" aria-labelledby="q-title">
+          <div className="pane-head">
+            <h3 id="q-title">設問と回答</h3>
+            <span role="status" data-testid="progress">{answeredCount}／{questions.length}問 入力済み</span>
           </div>
-        ) : (
-          <ol className="questions" aria-labelledby="q-title">
-            {visible.map((q) => {
-              const a = c.answers[q.id];
+          <div className="pane-counts"><AnswerCounts c={current} /></div>
+          <ol className="question-list">
+            {questions.map((q) => {
+              const a: Answer | undefined = answers[q.id];
+              const optional = a === undefined && canSkipQuestion(q.id, answers);
+              const auto = c.autoQuestions?.includes(q.id) === true && !edited.has(q.id);
               return (
-                <li key={q.id} className={`question q-${a ?? "none"}`}>
-                  <div className="q-head">
-                    <span className="q-id">{q.id}</span>
-                    <p className="q-prompt">
-                      {q.prompt}
-                      {c.autoQuestions?.includes(q.id) === true && <span className="auto-tag"><span className="sr-only"> </span>自動</span>}
-                    </p>
-                    <AnswerView answer={a} />
+                <li key={q.id} className={`question${optional ? " gray" : ""}${a === "pending" ? " is-pending" : ""}`} data-testid={`q-${q.id}`}>
+                  <strong className="q-id">{q.id}</strong>
+                  <span className="q-text">
+                    {q.prompt}
+                    {auto && <span className="origin"><span className="sr-only"> </span>自動</span>}
+                    {a === "pending" && <span className="badge ans-pending"><span aria-hidden="true">▲ </span>確認待ち</span>}
+                    {a === undefined && <span className="sr-only"> 未回答</span>}
+                    {optional && <span className="sr-only">（照合結果を絞り込むための回答は省略できます）</span>}
+                  </span>
+                  <div className="answers" role="group" aria-label={`${q.id} ${q.prompt}`}>
+                    <button type="button" aria-pressed={a === "yes"} onClick={() => choose(q.id, "yes")}>Yes</button>
+                    <button type="button" aria-pressed={a === "no"} onClick={() => choose(q.id, "no")}>No</button>
                   </div>
                   {a === "pending" && (
                     <p className="warn">
                       {c.pendingReasons?.[q.id] ?? "資料を確認できていません。"}
-                      Yes・Noのどちらにも数えません。
+                      Yes・Noのどちらにも数えません。資料で確認できたらYes／Noを選んでください。
                     </p>
                   )}
-                  <details className="material">
-                    <summary>資料を見る</summary>
-                    <dl>
-                      <dt>資料と確認する欄</dt>
-                      <dd>{q.source}</dd>
-                      <dt>資料の記載（架空の記入例）</dt>
-                      <dd>
-                        {a === "yes" && q.yes}
-                        {a === "no" && q.no}
-                        {a === "pending" && <span className="muted">確認できていません。</span>}
-                        {a === undefined && <span className="muted">まだ回答していません。</span>}
-                      </dd>
-                    </dl>
-                  </details>
                 </li>
               );
             })}
           </ol>
-        )}
+        </section>
+
+        <section className="pane" aria-labelledby="r-title">
+          <div className="pane-head">
+            <h3 id="r-title">照合結果</h3>
+            <span role="status" data-testid="rule-count">照合 {matchingCount}／{rows.length}件</span>
+          </div>
+          <div className="rule-list">
+            {rows.map(({ rule, gray, states }) => (
+              <details
+                key={rule.id}
+                className={`rule${gray ? " gray" : ""}`}
+                open={open[rule.id] ?? false}
+                onToggle={(e) => {
+                  const isOpen = e.currentTarget.open;
+                  setOpen((prev) => (prev[rule.id] === isOpen ? prev : { ...prev, [rule.id]: isOpen }));
+                }}
+                data-testid={`rule-${rule.id}`}
+                data-display={gray ? "gray" : "normal"}
+              >
+                <summary>
+                  <strong>{rule.id}</strong>{rule.result}
+                  {gray && <span className="sr-only">（入力済みの回答と異なる条件があります）</span>}
+                </summary>
+                <dl className="conditions">
+                  {questions.map((q) => (
+                    <div key={q.id} className={states[q.id] === "match" ? "matched" : undefined} data-testid={`cond-${rule.id}-${q.id}`}>
+                      <dt>{q.id}</dt>
+                      <dd>{rule.expected[q.id] === "yes" ? "Yes" : "No"}{states[q.id] === "match" && <span className="sr-only">（入力済みの回答と一致）</span>}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </details>
+            ))}
+          </div>
+        </section>
       </div>
 
+      <form className="decision" aria-label="判定結果登録" onSubmit={submit}>
+        <fieldset>
+          <legend>判定結果</legend>
+          <div className="outcomes">
+            {RESULTS.map((r) => (
+              <label key={r}>
+                <input type="radio" name="outcome" value={r} required checked={outcome === r} onChange={() => setOutcome(r)} />
+                {r}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        <button className="btn action" type="submit">判定する</button>
+        {registered !== "" && <p className="saved" role="status" data-testid="registered">登録結果（画面例） {registered}</p>}
+        <p className="note note-inline">
+          結果は照合にかかわらず、未回答・確認待ちが残っていても選べます。［判定する］は画面に結果例を出すだけで、保存・実際の処置は行いません（未実装）。
+        </p>
+      </form>
+
       <p className="note">
-        この画面は表示のみです（画面案は未承認）。回答の入力・保存、判定ルールとの照合、結果の登録は行いません。「自動」は表示用の架空データの印で、自動回答の対象設問を確定するものではありません。
+        「自動」は表示用の架空データの印で、自動回答の対象設問を確定するものではありません。R01〜R03は受入例用の架空の組み合わせで、業務上の認定ルールではありません。
       </p>
     </section>
   );
