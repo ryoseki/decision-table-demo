@@ -174,9 +174,12 @@ jobs:
           AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
           LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
           CD_BASE_URL: ${{ vars.CD_BASE_URL }}
+          CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+          CLOUDFRONT_OAC_ID: ${{ vars.CLOUDFRONT_OAC_ID }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
           LAMBDA_LAYER_CODE_SHA256: ${{ vars.LAMBDA_LAYER_CODE_SHA256 }}
         run: |
-          for name in AWS_ROLE_ARN LAMBDA_FUNCTION_NAME CD_BASE_URL LAMBDA_LAYER_CODE_SHA256 CD_APPROVER_LOGIN; do
+          for name in AWS_ROLE_ARN LAMBDA_FUNCTION_NAME CD_BASE_URL CLOUDFRONT_DISTRIBUTION_ID CLOUDFRONT_OAC_ID WAF_WEB_ACL_ARN LAMBDA_LAYER_CODE_SHA256 CD_APPROVER_LOGIN; do
             value="${!name}"
             if [ -z "${value//[[:space:]]/}" ]; then
               echo "変数 $name が未設定または空です。" >&2
@@ -185,6 +188,19 @@ jobs:
           done
           if ! [[ "$AWS_ROLE_ARN" =~ ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$ ]]; then
             echo "AWS_ROLE_ARN の形式が不正です。" >&2
+            exit 1
+          fi
+          # 公開URLはCloudFrontのオリジンだけ（関数URLへの直接の公開はフォールバックにもしない）
+          if ! [[ "$CD_BASE_URL" =~ ^https://[a-z0-9]{8,64}\.cloudfront\.net$ ]]; then
+            echo "CD_BASE_URL は https://<id>.cloudfront.net のオリジンのみです。" >&2
+            exit 1
+          fi
+          if ! [[ "$CLOUDFRONT_DISTRIBUTION_ID" =~ ^[A-Z0-9]{8,32}$ ]] || ! [[ "$CLOUDFRONT_OAC_ID" =~ ^[A-Z0-9]{8,32}$ ]]; then
+            echo "CLOUDFRONT_DISTRIBUTION_ID または CLOUDFRONT_OAC_ID の形式が不正です。" >&2
+            exit 1
+          fi
+          if ! [[ "$WAF_WEB_ACL_ARN" =~ ^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]{1,128}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            echo "WAF_WEB_ACL_ARN の形式が不正です（us-east-1のglobal scopeのWeb ACL）。" >&2
             exit 1
           fi
           if ! [[ "$ZIP_SHA256" =~ ^[0-9a-f]{64}$ ]] || ! [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
@@ -217,6 +233,9 @@ jobs:
         env:
           LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_FUNCTION_NAME }}
           CD_BASE_URL: ${{ vars.CD_BASE_URL }}
+          CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+          CLOUDFRONT_OAC_ID: ${{ vars.CLOUDFRONT_OAC_ID }}
+          WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
           LAMBDA_LAYER_CODE_SHA256: ${{ vars.LAMBDA_LAYER_CODE_SHA256 }}
         run: |
           python3 -B -I scripts/deploy-lambda.py \
@@ -228,6 +247,9 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --function-name "$LAMBDA_FUNCTION_NAME" \
             --base-url "$CD_BASE_URL" \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --oac-id "$CLOUDFRONT_OAC_ID" \
+            --web-acl-arn "$WAF_WEB_ACL_ARN" \
             --layer-code-sha256 "$LAMBDA_LAYER_CODE_SHA256" \
             --result-file cd-result/result.json
 
