@@ -31,42 +31,34 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
     <section aria-labelledby="list-title">
       <div className="page-head">
         <h2 id="list-title" tabIndex={-1}>審査対象一覧</h2>
-        <p className="lead">
-          架空の案件です。案件ID・ユーザーID・申告内容で検索し、状態で絞り込めます。
-        </p>
+        <p className="lead">受領したアカウント乗っ取りの申告を確認します。</p>
       </div>
 
       <div className="toolbar" role="search">
-        <label className="field search">
-          <span className="field-label">検索</span>
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="案件ID・ユーザーID・申告内容（例: CASE-A、456、ログイン）"
-          />
-        </label>
-        <div className="field">
-          <span className="field-label" id="status-label">状態</span>
-          <div className="chips" role="group" aria-labelledby="status-label">
-            {(["all", ...caseStatuses] as const).map((s) => (
-              <button
-                key={s}
-                type="button"
-                className="chip"
-                aria-pressed={status === s}
-                onClick={() => setStatus(s)}
-              >
-                {s === "all" ? "すべて" : s}
-              </button>
-            ))}
-          </div>
-        </div>
+        <label className="sr-only" htmlFor="case-search">案件ID・ユーザーID・申告内容で検索</label>
+        <input
+          id="case-search"
+          className="search"
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="案件ID・ユーザーID・申告内容"
+        />
+        <label className="sr-only" htmlFor="case-status">状態</label>
+        <select
+          id="case-status"
+          value={status}
+          onChange={(e) => setStatus(e.target.value as CaseStatus | "all")}
+        >
+          <option value="all">すべての状態</option>
+          {caseStatuses.map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+        <p className="count" role="status">
+          {filtered.length}件を表示（全{cases.length}件）
+        </p>
       </div>
-
-      <p className="count" role="status" aria-live="polite">
-        {filtered.length}件を表示（全{cases.length}件）
-      </p>
 
       {filtered.length === 0 ? (
         <div className="empty" data-testid="empty-list">
@@ -77,26 +69,37 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
           )}
         </div>
       ) : (
-        <ul className="case-list">
-          {filtered.map((c) => (
-            <li key={c.caseId}>
-              <a className="case-row" href={detailHref(c.caseId)}>
-                <div className="case-main">
-                  <div className="case-ids">
-                    <span className="case-id">{c.caseId}</span>
-                    <span className="user-id">user_id {c.userId}</span>
-                  </div>
-                  <p className="case-summary">{c.summary}</p>
-                </div>
-                <div className="case-side">
-                  <StatusBadge status={statusOf(c)} />
-                  <AnswerCounts c={c} />
-                  <span className="btn open">審査を開く</span>
-                </div>
-              </a>
-            </li>
-          ))}
-        </ul>
+        <div className="table-wrap">
+          <table className="case-table" role="table">
+            <thead role="rowgroup">
+              <tr role="row">
+                <th scope="col" role="columnheader">案件</th>
+                <th scope="col" role="columnheader">対象</th>
+                <th scope="col" role="columnheader">申告内容</th>
+                <th scope="col" role="columnheader">状態</th>
+                <th scope="col" role="columnheader">操作</th>
+              </tr>
+            </thead>
+            <tbody role="rowgroup">
+              {filtered.map((c) => (
+                <tr key={c.caseId} className="case-row" role="row">
+                  <th scope="row" role="rowheader" className="case-id" data-label="案件">{c.caseId}</th>
+                  <td role="cell" data-label="対象">user_id {c.userId}</td>
+                  <td role="cell" data-label="申告内容">
+                    <span className="case-summary">{c.summary}</span>
+                    <AnswerCounts c={c} />
+                  </td>
+                  <td role="cell" data-label="状態"><StatusBadge status={statusOf(c)} /></td>
+                  <td role="cell" className="op">
+                    <a className="btn open" href={detailHref(c.caseId)}>
+                      審査を開く<span className="sr-only">（{c.caseId}）</span>
+                    </a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );
