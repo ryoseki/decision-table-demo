@@ -2,7 +2,7 @@ import type { CaseStatus } from "./data/cases";
 
 const statusClass: Record<CaseStatus, string> = {
   未審査: "st-todo",
-  情報取得失敗あり: "st-pending",
+  取得エラー: "st-pending",
   登録済み: "st-done",
 };
 
