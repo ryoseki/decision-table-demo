@@ -127,8 +127,8 @@ TABLES_REVERSE = ["case_checks", "case_results", "case_questions", "decision_rul
 
 def main() -> int:
     if SCHEMA:
-        if not re.fullmatch(r"dec18_verify_[0-9a-f]{8}", SCHEMA):
-            print("DB_SCHEMAは dec18_verify_<8桁の16進> の形式だけ受け付ける。", file=sys.stderr)
+        if not re.fullmatch(r"dsql_verify_[0-9a-f]{8}", SCHEMA):
+            print("DB_SCHEMAは dsql_verify_<8桁の16進> の形式だけ受け付ける。", file=sys.stderr)
             return 2
         admin = psycopg.connect(
             host=os.environ["DB_HOST"], port=os.environ.get("DB_PORT", "5432"), dbname=os.environ["DB_NAME"],

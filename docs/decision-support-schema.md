@@ -6,7 +6,7 @@
 
 東京リージョンの単一リージョンクラスターで **Amazon Aurora DSQL** を使う案です。PostgreSQL 16互換のサーバーレスDBで、毎月最初の100,000 DPUとストレージ1 GBが無料です。超過分や、利用したバックアップ・データ転送などは別途課金されます。少量の架空データを使うデモでは、実測したDPUと保存量を見て無料枠に収まるかを判断します。 [AWS料金](https://aws.amazon.com/rds/aurora/dsql/pricing/)・[対応リージョンと互換性](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/what-is-aurora-dsql.html)
 
-接続にはTLSと一時的なIAM認証トークンを使います。後続の実装では、ローカルのDockerとCIでPostgreSQLのスキーマ検証を行い、AWSでは認証と実DBへの接続を確認する構成を検討します。Kubernetesでのアプリ展開はデプロイ設計のレビューで扱います。 [AWSの接続仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/accessing.html)
+接続にはTLSと一時的なIAM認証トークンを使います。このスキーマ案は、ローカルのDockerのPostgreSQLと、実Aurora DSQL（専用スキーマ）の両方で適用・保存・再表示を検証済みです（結果は[DBの接続・スキーマ適用環境](database-environment.md)）。CIへの組み込みは未実施です。Kubernetesでのアプリ展開はデプロイ設計のレビューで扱います。 [AWSの接続仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/accessing.html)
 
 ## テーブルと関連
 
@@ -30,13 +30,12 @@
 
 ### 案件の受信データとの対応
 
-1案件の主対象は利用者1人（`user_id`1つ）で、外部から利用者情報`user`と問い合わせ`inquiry`を受け取る想定です。アプリ側で内部の`case_id`を発行し、受信データに元の案件IDがあれば`source_case_ref`に保存して内部IDと区別します。
+1案件の主対象は利用者1人（`user_id`1つ）で、外部から利用者情報`user`と問い合わせ`inquiry`を受け取る想定です。アプリ側で内部の`case_id`を発行します。元システムの案件IDを保存する列は、最小のスキーマには含めません（重複受信の扱いが未決のため）。必要になったときに列を追加します。
 
 | 受信データ | DB列 | 内容 |
 | --- | --- | --- |
 | `user` | `review_cases.user_data` | 主対象の`user_id`を1つ含む想定のjsonbオブジェクト。細かい項目は未決。 |
 | `inquiry` | `review_cases.inquiry_data` | 問い合わせ本文などのjsonbオブジェクト。細かい項目は未決。 |
-| 元の案件ID | `review_cases.source_case_ref` | 任意。内部の`case_id`とは別に保持する。 |
 
 他のユーザーIDを参照する場合も、主対象の判定に使う関連情報です。案件の主対象にはならず、必要なときに外部APIで参照して補い、画面に表示する設計案です。足りない情報を外部APIで補う案にしたため、以前の「受領後に資料を取得しない」という境界は見直しています。案件一覧は`user_data`の主対象`user_id`を表示します。DBのCHECKが検査するのはオブジェクト型だけで、両列は空オブジェクト`{}`で「情報が届いていない」ことを表せます。`user_data`に主対象の`user_id`が1つあることは、受付処理側で検査する案です。jsonb列とJSON関数はAurora DSQLの最新ドキュメントで対応を確認しています。 [Aurora DSQLの対応データ型](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-postgresql-compatibility-supported-data-types.html)
 
@@ -121,7 +120,7 @@ CREATE TABLE case_checks (
 
 ## モックAPIの入出力例
 
-案件の受付処理で、`auto_answer_key`を設定した設問のモックを呼ぶ案です。キーは設定済みのエンドポイントを指し、キーが空の設問ではオペレータが受領資料を確認します。`category`は設問を分類するために使います。`sample_number`は応答を再現するためのテスト用の整数です。
+案件の受付処理で、`auto_answer_key`を設定した設問のモックを呼ぶ案です。キーは設定済みのエンドポイントを指し、キーが空の設問ではオペレータが受領資料を確認します。`category`は設問を分類するために使います。`sample_number`は応答を再現するためのテスト用の整数です。`auto_answer_key`は設問マスターにだけあり、案件の設問のコピーには含めません。受付後にマスターのキーを変えると、その後に受け付ける案件から変わります。受付済みの案件で自動回答を呼び直すかは未決です。
 
 | 入力例 | 期待する応答 | ［判定する］で保存する`answer` |
 | --- | --- | --- |
@@ -172,5 +171,5 @@ CREATE TABLE case_checks (
 | 受信データの項目と保存 | `user_data`・`inquiry_data`の具体的な項目、必須項目、個人情報の保存範囲、受信後の更新の扱いをどう決めるか。 |
 | 不足情報の補完API | 補完用APIの接続先・認証・入出力、補完結果を保存するか表示だけにするか、取得失敗時のオペレータの操作をどう決めるか。他ユーザーIDの関連情報をどこまで参照するか。 |
 | 設問の自動判定 | `auto_answer_key`の自動Yes／Noを実業務でどう運用するか（対象設問、訂正の可否、失敗時の扱い）。 |
-| 案件IDの採番 | アプリ側`case_id`の採番形式と、`source_case_ref`の重複受信時の扱い（一意制約を設けるか）をどう決めるか。 |
+| 案件IDの採番 | アプリ側`case_id`の採番形式と、元システムの案件IDを保存するか、重複受信時の扱い（一意制約を設けるか）をどう決めるか。 |
 | 権限・履歴・保存期間 | 誰が閲覧・回答・訂正・公開できるか。登録済みの回答や判定結果をいつまで保存するか。 |

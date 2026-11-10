@@ -2,7 +2,7 @@
 # 実Aurora DSQLで、スキーマ案のDDL・制約・一括保存・再表示を専用スキーマの中だけで検証する。
 # CloudShellなど、AWSの資格情報があるシェルで実行する。認証トークンは表示・保存しない。
 #   DSQL_ENDPOINT=<クラスタID>.dsql.ap-northeast-1.on.aws DSQL_REGION=ap-northeast-1 bash scripts/dsql-verify.sh
-# 既存のテーブルには触れず、dec18_verify_<乱数> のスキーマだけを作って最後に削除する。
+# 既存のテーブルには触れず、dsql_verify_<乱数> のスキーマだけを作って最後に削除する。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,7 +30,7 @@ fi
   DB_PASSWORD="$(aws dsql generate-db-connect-admin-auth-token --hostname "$DSQL_ENDPOINT" --region "$DSQL_REGION")" || exit 1
   export DB_PASSWORD
   export DB_HOST="$DSQL_ENDPOINT" DB_PORT=5432 DB_NAME=postgres DB_USER=admin DB_SSLMODE=require
-  export DB_SCHEMA="dec18_verify_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
+  export DB_SCHEMA="dsql_verify_$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
   export DOCS_DIR="$PWD/docs"
   python3 db/verify_schema.py
 )
