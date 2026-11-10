@@ -1,22 +1,11 @@
 {
   "review_cases": [
     {
-      "case_id": "CASE-C",
-      "scenario": "credits",
-      "source_case_ref": "INBOX-C",
-      "summary": "主対象ユーザーの無料枠利用を確認する。",
-      "user_data": { "user_id": "123" },
-      "inquiry_data": {
-        "subject": "無料枠の利用について",
-        "body": "同じ学校の回線から無料枠が使われているとの連絡が届いた。（架空の問い合わせ）"
-      }
-    },
-    {
       "case_id": "CASE-A",
-      "scenario": "account_api",
-      "source_case_ref": "INBOX-A",
       "summary": "心当たりのないログインとクレジット消費について問い合わせが届いた。",
-      "user_data": { "user_id": "456" },
+      "user_data": {
+        "user_id": "456"
+      },
       "inquiry_data": {
         "subject": "心当たりのないログイン",
         "body": "身に覚えのないログインとクレジットの消費があった。（架空の問い合わせ）"
@@ -27,96 +16,257 @@
   ],
   "review_questions": [
     {
-      "question_code": "C01",
-      "scenario": "credits",
-      "category": "registration",
-      "prompt": "2つのアカウントの登録氏名は異なるか？",
-      "auto_answer_key": "mock_parity",
-      "source_kind": "アカウント登録情報",
-      "source_field": "氏名照合結果"
+      "question_code": "A01",
+      "category": "login",
+      "prompt": "問い合わせにあったログインは成功したか？",
+      "auto_answer_key": null,
+      "source_kind": "ログイン履歴",
+      "source_field": "対象ログインの結果",
+      "revision": 1
     },
     {
-      "question_code": "C06",
-      "scenario": "credits",
-      "category": "credit",
-      "prompt": "対象取引はキャンペーン付与か？",
-      "auto_answer_key": "mock_parity",
-      "source_kind": "クレジット台帳",
-      "source_field": "対象取引の種別"
+      "question_code": "A02",
+      "category": "login",
+      "prompt": "本人は「自分が行ったログインではない」と回答したか？",
+      "auto_answer_key": null,
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "ログインに関する回答",
+      "revision": 1
     },
     {
       "question_code": "A03",
-      "scenario": "account_api",
       "category": "account_changes",
-      "prompt": "対象期間に登録メールアドレスが変更されたか？",
+      "prompt": "対象期間に登録メールアドレスが変更されたか？（改訂例）",
       "auto_answer_key": null,
       "source_kind": "アカウント変更履歴",
-      "source_field": "登録メールアドレスの変更回数"
+      "source_field": "登録メールアドレスの変更回数",
+      "revision": 2
+    },
+    {
+      "question_code": "A04",
+      "category": "account_changes",
+      "prompt": "本人は「自分が行ったメールアドレス変更ではない」と回答したか？",
+      "auto_answer_key": null,
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "メールアドレス変更に関する回答",
+      "revision": 1
+    },
+    {
+      "question_code": "A05",
+      "category": "account_changes",
+      "prompt": "対象期間にパスワードが変更されたか？",
+      "auto_answer_key": null,
+      "source_kind": "アカウント変更履歴",
+      "source_field": "パスワードの変更回数",
+      "revision": 1
+    },
+    {
+      "question_code": "A06",
+      "category": "account_changes",
+      "prompt": "本人は「自分が行ったパスワード変更ではない」と回答したか？",
+      "auto_answer_key": null,
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "パスワード変更に関する回答",
+      "revision": 1
+    },
+    {
+      "question_code": "A07",
+      "category": "credit",
+      "prompt": "対象期間にクレジットが消費されたか？",
+      "auto_answer_key": null,
+      "source_kind": "クレジット利用履歴",
+      "source_field": "対象期間の消費量",
+      "revision": 1
+    },
+    {
+      "question_code": "A08",
+      "category": "credit",
+      "prompt": "本人は「その利用に心当たりがない」と回答したか？",
+      "auto_answer_key": null,
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "クレジット消費に関する回答",
+      "revision": 1
     },
     {
       "question_code": "A09",
-      "scenario": "account_api",
       "category": "api",
       "prompt": "対象期間にAPIキーが新しく発行されたか？",
       "auto_answer_key": "mock_parity",
       "source_kind": "APIキー発行履歴",
-      "source_field": "対象期間の新規発行数"
+      "source_field": "対象期間の新規発行数",
+      "revision": 1
+    },
+    {
+      "question_code": "A10",
+      "category": "api",
+      "prompt": "本人は「そのAPIキーは自分が発行したものではない」と回答したか？",
+      "auto_answer_key": null,
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "対象キーの発行に関する回答",
+      "revision": 1
+    },
+    {
+      "question_code": "A11",
+      "category": "api",
+      "prompt": "対象のAPIキーで成功した呼び出しがあったか？",
+      "auto_answer_key": null,
+      "source_kind": "API利用履歴",
+      "source_field": "対象キーによる呼び出しの成功件数",
+      "revision": 1
+    },
+    {
+      "question_code": "A12",
+      "category": "api",
+      "prompt": "本人は「そのAPI利用に心当たりがない」と回答したか？",
+      "auto_answer_key": null,
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "対象のAPI利用に関する回答",
+      "revision": 1
     }
   ],
   "decision_rules": [
     {
       "rule_id": "DEMO-RULE-1",
-      "scenario": "credits",
+      "revision": 1,
       "result_code": "demo_result",
-      "conditions": { "C01": "yes", "C06": "no" }
+      "conditions": {
+        "A03": "no",
+        "A09": "yes"
+      },
+      "created_at": "2026-10-01T09:00:00+09:00"
+    }
+  ],
+  "case_questions": [
+    {
+      "case_id": "CASE-A",
+      "question_code": "A01",
+      "revision": 1,
+      "category": "login",
+      "prompt": "問い合わせにあったログインは成功したか？",
+      "source_kind": "ログイン履歴",
+      "source_field": "対象ログインの結果"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A02",
+      "revision": 1,
+      "category": "login",
+      "prompt": "本人は「自分が行ったログインではない」と回答したか？",
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "ログインに関する回答"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A03",
+      "revision": 1,
+      "category": "account_changes",
+      "prompt": "対象期間に登録メールアドレスが変更されたか？",
+      "source_kind": "アカウント変更履歴",
+      "source_field": "登録メールアドレスの変更回数"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A04",
+      "revision": 1,
+      "category": "account_changes",
+      "prompt": "本人は「自分が行ったメールアドレス変更ではない」と回答したか？",
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "メールアドレス変更に関する回答"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A05",
+      "revision": 1,
+      "category": "account_changes",
+      "prompt": "対象期間にパスワードが変更されたか？",
+      "source_kind": "アカウント変更履歴",
+      "source_field": "パスワードの変更回数"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A06",
+      "revision": 1,
+      "category": "account_changes",
+      "prompt": "本人は「自分が行ったパスワード変更ではない」と回答したか？",
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "パスワード変更に関する回答"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A07",
+      "revision": 1,
+      "category": "credit",
+      "prompt": "対象期間にクレジットが消費されたか？",
+      "source_kind": "クレジット利用履歴",
+      "source_field": "対象期間の消費量"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A08",
+      "revision": 1,
+      "category": "credit",
+      "prompt": "本人は「その利用に心当たりがない」と回答したか？",
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "クレジット消費に関する回答"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A09",
+      "revision": 1,
+      "category": "api",
+      "prompt": "対象期間にAPIキーが新しく発行されたか？",
+      "source_kind": "APIキー発行履歴",
+      "source_field": "対象期間の新規発行数"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A10",
+      "revision": 1,
+      "category": "api",
+      "prompt": "本人は「そのAPIキーは自分が発行したものではない」と回答したか？",
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "対象キーの発行に関する回答"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A11",
+      "revision": 1,
+      "category": "api",
+      "prompt": "対象のAPIキーで成功した呼び出しがあったか？",
+      "source_kind": "API利用履歴",
+      "source_field": "対象キーによる呼び出しの成功件数"
+    },
+    {
+      "case_id": "CASE-A",
+      "question_code": "A12",
+      "revision": 1,
+      "category": "api",
+      "prompt": "本人は「そのAPI利用に心当たりがない」と回答したか？",
+      "source_kind": "本人確認済みの問い合わせ",
+      "source_field": "対象のAPI利用に関する回答"
     }
   ],
   "case_results": [
     {
-      "case_id": "CASE-C",
-      "scenario": "credits",
-      "result_code": "demo_result",
-      "rule_id": "DEMO-RULE-1",
-      "recorded_by": "OP-1",
-      "recorded_at": "2026-10-20T13:05:00+09:00"
-    },
-    {
       "case_id": "CASE-A",
-      "scenario": "account_api",
       "result_code": "demo_manual_result",
       "rule_id": null,
+      "rule_revision": null,
+      "supplement_data": {},
       "recorded_by": "OP-1",
       "recorded_at": "2026-10-20T13:05:00+09:00"
     }
   ],
   "case_checks": [
     {
-      "case_id": "CASE-C",
-      "question_code": "C01",
-      "answer": "yes",
-      "answered_by": "OP-1",
-      "answered_at": "2026-10-20T13:00:00+09:00"
-    },
-    {
-      "case_id": "CASE-C",
-      "question_code": "C06",
-      "answer": "no",
-      "answered_by": "OP-1",
-      "answered_at": "2026-10-20T13:00:00+09:00"
-    },
-    {
       "case_id": "CASE-A",
       "question_code": "A03",
-      "answer": "no",
-      "answered_by": "OP-1",
-      "answered_at": "2026-10-20T13:00:00+09:00"
+      "answer": "no"
     },
     {
       "case_id": "CASE-A",
       "question_code": "A09",
-      "answer": "pending",
-      "answered_by": "OP-1",
-      "answered_at": "2026-10-20T13:00:00+09:00"
+      "answer": "pending"
     }
   ]
 }

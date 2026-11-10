@@ -28,6 +28,7 @@ services:
       DB_NAME: "${DB_NAME:-decision_demo}"
       DB_USER: "${DB_USER:-demo_admin}"
       DB_PASSWORD: "${DB_PASSWORD}"
+      DB_SCHEMA: "${DB_SCHEMA:-}"
     volumes:
       - ./docs:/repo/docs:ro
 
