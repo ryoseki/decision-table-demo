@@ -7,6 +7,7 @@
 - 準備済み: Lambda関数、ログ保持7日のロググループ、実行ロール、配布ロール、OIDCプロバイダー、エイリアス `demo`（版1）、予約済み同時実行数1、関数URL（`AWS_IAM`・`BUFFERED`）。どのコマンドで作成したかは、この文書では確認していない。
 - 確認済み（Codex実測）: デプロイ済みのZIP本体が `main` の `526db5bb` のビルドと照合して一致。非公開の呼び出しで `health` が200・本文 `ok`、`release` が期待SHAと一致（真）、ルートのHTMLとそのJS参照が成功。未署名の匿名GETは関数URLで403。
 - 未検証・未作成: ブラウザでの表示、CloudFrontを通した実際のHTTP、CD（配布）、復旧（ロールバック・公開停止）。CloudFrontとWAFは未作成。OACは作成コマンドを利用者に案内済みだが結果は未受領で、作成済みかは未確認。
+- 更新（利用者の報告・確認、2026-11-09〜11-10。上の2026-11-09時点の記述より新しい）: CloudFrontのディストリビューション（無効のまま）・WAFのWeb ACL・OACは作成済み。Web ACLの規則は4件（接続元IPごとのレート制限のBlock 1件＋既知のAWSマネージド規則グループ3種の`Count`）で、全体のレート制限の規則は無い。2026-11-10に利用者の承認で、全体1,500件/5分の規則を要件から外した。詳細は[公開経路の計画](cloudfront-plan.md)。
 - GitHub: Environment `demo`、`CD_APPROVER_LOGIN`、`LAMBDA_FUNCTION_NAME`、`LAMBDA_LAYER_CODE_SHA256` は設定・読み戻し済み。`AWS_ROLE_ARN` とCloudFront関連の変数は未設定。
 
 **過去の経緯（2026-11-08時点。現況ではない）**: 当時は構築・配布が未実施で、利用者本人がCloudShellで読み取り専用の関数一覧（`list-functions`）を実行して成功し、同じアカウントに既存のAmplify用の関数が4件あることを確認したと報告を受けた（読み取りのみで、この文書のコマンドではない。既存の関数名は公開文書に書かない）。
@@ -25,9 +26,9 @@ Lambda関連の構築は、本人がAWS CloudShellで、ここに提示したコ
 | 未実施・未確認 | ブラウザでの表示、CloudFrontを通した実際のHTTP、実際のCD（配布・ロールバック）の実行と復旧（動作は未検証）、CloudFront・WAFの作成（未作成）、OACの作成状況（作成コマンドは案内済みで結果は未受領）、CloudFrontのFreeプランの契約・適用可否（Freeを選べるという報告は、契約・適用の成功ではない）、予算アラートの宛先（任意の監視案を採る場合。本人が非公開で入力し、作り話の宛先は置かない）、CloudShell以外の別環境や、将来のコミットでの `scripts/build-lambda.sh`（Dockerを使う）によるZIPビルドの一般的な再現（Dockerの可否・実行時間・ディスク容量はその環境ごとに未確認）。なお、利用者の報告では、CloudShellで `main` の `526db5bb` からDockerのZIPをビルドし、ZIPのSHA-256 `7610e36b9cc46a82f2496ee49c72b8310d06f817c7d8922cac656100ff075a62` と `verify-artifact-only` の成功まで確認済み（利用者の報告で、Codex・レビュー担当は再実行していない）。上の構文確認はAWSでの実行と同じではない |
 | 実行時に人が確認する事項 | 本人がCloudShellで各ブロックを実行する時点での、支払い方法の状態・認証・既存リソースの有無・データへの影響の確認。内部の確認事項で、公開の主張ではない。月額の目安を理由に止めることはしない |
 
-**公開経路（2026-11-09の更新）**: 関数URLを匿名で直接公開する旧手順は外しました。公開は、CloudFront + WAF + Lambda関数URL（`AWS_IAM`）+ OACだけで、手順と設定は[公開経路の計画](cloudfront-plan.md)にあります。利用者の環境では、関数URL（`AWS_IAM`・`BUFFERED`）、エイリアス `demo`・予約済み同時実行数1・ログ・OIDCプロバイダー・実行ロール・配布ロールが準備済みです（**再作成しない**。既存のものは読み取りで確認する）。CloudFrontとWAFは**未作成**です。OACは利用者に作成コマンドを案内済みですが、結果は未受領で**作成済みかは未確認**です（未作成とも断定しません。計画の手順0の2で読み取り確認）。匿名のGETが403になることはCodexが実測し、非公開の呼び出しでの `health`・`release`・ルートHTMLの成功も確認済みです。ブラウザでの表示とCloudFront経由の実際のHTTPは未検証です。CloudFrontのFreeプランを選べるという報告は契約・適用の成功ではなく、適用可否は未確認で、適合しない場合も自動では有料にしません。
+**公開経路（2026-11-09の更新）**: 関数URLを匿名で直接公開する旧手順は外しました。公開は、CloudFront + WAF + Lambda関数URL（`AWS_IAM`）+ OACだけで、手順と設定は[公開経路の計画](cloudfront-plan.md)にあります。利用者の環境では、関数URL（`AWS_IAM`・`BUFFERED`）、エイリアス `demo`・予約済み同時実行数1・ログ・OIDCプロバイダー・実行ロール・配布ロールが準備済みです（**再作成しない**。既存のものは読み取りで確認する）。CloudFront・WAF・OACは、その後の利用者の報告で**作成済み**です（ディストリビューションは無効のまま。Web ACLはIPごとの規則1件＋観測グループ3種の4件。計画の手順0の2・2・4で読み取り確認し、再作成しない）。匿名のGETが403になることはCodexが実測し、非公開の呼び出しでの `health`・`release`・ルートHTMLの成功も確認済みです。ブラウザでの表示とCloudFront経由の実際のHTTPは未検証です。CloudFrontのFreeプランを選べるという報告は契約・適用の成功ではなく、適用可否は未確認で、適合しない場合も自動では有料にしません。
 
-CDワークフロー（`.github/workflows/cd.yml`）は、**ここで作る既存の正常なエイリアス `demo` を更新するだけ**です。IAM・関数URL・同時実行数・ログ・CloudFront・WAFの操作は含みません（CloudFront・OAC・WAF・関数のリソースポリシーは読み取りで検証するだけ）。
+CDワークフロー（`.github/workflows/cd.yml`）は、**ここで作る既存の正常なエイリアス `demo` を更新するだけ**です。IAM・関数URL・同時実行数・ログ・CloudFront・WAFの変更は含みません（CloudFront・OAC・WAF・関数のリソースポリシーは読み取りで検証するだけ。予約済み同時実行数も読み取り（`get-function-concurrency`）でちょうど1であることを確認するだけで、1でなければ変更の前に止まり、自動では設定しない）。
 
 ## 1. 準備
 
@@ -223,7 +224,7 @@ aws lambda create-function-url-config --function-name "$FN" --qualifier demo \
 
 ## 4. 公開経路の作成・確認と、初回のスモーク確認
 
-CloudFrontとWAFは**未作成**で、OACは作成状況が**未確認**です（作成済みならそれを再利用し、重複して作りません）。[計画](cloudfront-plan.md)の手順0の2（OACの読み取り確認）と手順1〜5（Freeプランのコンソールでのディストリビューション・Web ACLの作成と、Lambdaの許可を付けないこと、専用Web ACLの確認、OAC・キャッシュなどの全設定の確認、設定の読み取り確認、最後の許可）を、その順序で行います。許可（手順5）の前に、公開経路の迂回がないこと（関数URLが匿名のGETを403で拒否し、許可が特定のディストリビューションだけであること）を確認します。Freeプランに適合しない場合は、自動で有料にせず、そこで止まって人が判断します（Web ACLを単独で作る有料の代替は計画の末尾）。
+CloudFront・WAF・OACは利用者の報告で**作成済み**です（再利用し、重複して作りません。Web ACLは現在の4件をそのまま使い、全体の規則は追加しません）。[計画](cloudfront-plan.md)の手順0の2（OACの読み取り確認）と手順1〜5（Freeプランのコンソールでのディストリビューション・Web ACLの作成と、Lambdaの許可を付けないこと、専用Web ACLの確認、OAC・キャッシュなどの全設定の確認、設定の読み取り確認、最後の許可）を、その順序で行います。許可（手順5）の前に、公開経路の迂回がないこと（関数URLが匿名のGETを403で拒否し、許可が特定のディストリビューションだけであること）を確認します。Freeプランに適合しない場合は、自動で有料にせず、そこで止まって人が判断します（Web ACLを単独で作る有料の代替は計画の末尾）。
 
 予約済み同時実行数は、作成後も1のままです（公開後の異常時は人が0にして止める）。0にしてある場合（初回構築の途中）は、**承認した初回デモを公開してよいと人が判断したときだけ**1にします。許可を作った時点から、公開されます。
 
@@ -262,7 +263,7 @@ aws iam list-open-id-connect-providers   # ARNの末尾が token.actions.githubu
 aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
 ```
 
-信頼ポリシー（`infra/cd/oidc-trust-policy.json`）は `aud` が `sts.amazonaws.com`、`sub` が `repo:<OWNER>/<REPO>:environment:demo` の完全一致だけです（ワイルドカードなし）。権限（`infra/cd/deploy-policy.json`）は、CloudFront・WAFの読み取り（対象のディストリビューションとWeb ACLの `Get` だけ。OACの読み取りはリソース指定ができないため `Resource: *`）、エイリアス `demo` のリソースポリシーの読み取り（`lambda:GetPolicy`）、対象関数（修飾子なし）とその版・エイリアス（修飾子つき）に限った、設定・関数の参照（`GetFunction` は更新完了の待機 `aws lambda wait function-updated-v2` と、発行した版の有効化の待機 `aws lambda wait function-active-v2 --qualifier <版>` が使う。追加の権限は不要）、コード更新、版の発行、エイリアスの参照と更新と、固定のレイヤー版の読み取りだけです。`iam:PassRole`、管理者権限、実行時の権限、関数URL・同時実行数・ログ・IAMの操作は含めません。
+信頼ポリシー（`infra/cd/oidc-trust-policy.json`）は `aud` が `sts.amazonaws.com`、`sub` が `repo:<OWNER>/<REPO>:environment:demo` の完全一致だけです（ワイルドカードなし）。権限（`infra/cd/deploy-policy.json`）は、CloudFront・WAFの読み取り（対象のディストリビューションとWeb ACLの `Get` だけ。OACの読み取りはリソース指定ができないため `Resource: *`）、エイリアス `demo` のリソースポリシーの読み取り（`lambda:GetPolicy`）、予約済み同時実行数の読み取り（`lambda:GetFunctionConcurrency`。修飾子なしの対象関数だけの別の文）、対象関数（修飾子なし）とその版・エイリアス（修飾子つき）に限った、設定・関数の参照（`GetFunction` は更新完了の待機 `aws lambda wait function-updated-v2` と、発行した版の有効化の待機 `aws lambda wait function-active-v2 --qualifier <版>` が使う。追加の権限は不要）、コード更新、版の発行、エイリアスの参照と更新と、固定のレイヤー版の読み取りだけです。`iam:PassRole`、管理者権限、実行時の権限、関数URL・ログ・IAMの操作、同時実行数の設定・削除（`PutFunctionConcurrency`・`DeleteFunctionConcurrency`）は含めません。既に作成済みの配布ロールを使う場合、`lambda:GetFunctionConcurrency` の追加は人が内容を確認して行う別の操作です（未実施。足りなければCDは取得失敗で変更の前に止まる）。
 
 このロールは、CloudFront・WAFを作って（「4.」）ディストリビューションIDとWeb ACLのARNが決まった**後**に作ります（権限が対象を指定するため）。`CF_DIST_ID`・`WAF_ARN` は、[計画](cloudfront-plan.md)で作成した実値を、引用符つきの目印を書き換えて設定します（CDのコードの形式検証と同じ正規表現で検証。作成後に実際に取得できることも確認する）。
 
@@ -368,7 +369,7 @@ aws lambda update-alias --function-name "$FN" --name demo --function-version "$P
 
 公開を止めるとき（初回の失敗時、原因不明の異常時、費用の通知などを見て人が必要と判断したとき。費用の通知は必須の停止条件ではない）は、予約済み同時実行数を0にします（関数URLは429を返す。この手順はDBを作らず、削除するデータはない）。再開は原因を修正し、人が承認してからです。
 
-公開停止中（予約済み同時実行数0）は、現行版のスモーク確認が失敗するため、配布ヘルパーは何も変更せずに止まります。これは意図した動作で、自動の迂回はありません。先に人が原因を確認し、公開してよいと判断してから予約済み同時実行数を戻します。新しい権限の要求や対応期限（SLA）はありません。
+公開停止中（予約済み同時実行数0）は、変更の前の読み取りで同時実行数が1でないため（結果JSONの `reservedConcurrency=zero`）、配布ヘルパーは何も変更せず、スモーク確認もせずに止まります。これは意図した動作で、自動の迂回はありません。先に人が原因を確認し、公開してよいと判断してから予約済み同時実行数を戻します。新しい権限の要求や対応期限（SLA）はありません。
 
 ## 8. 費用の設定と通知（保証ではない）
 
