@@ -1,13 +1,22 @@
-# 初回構築と運用手順（再現用。主要なAWSリソースは準備済み。公開経路・CD・復旧は未検証）
+# 初回構築と運用手順（再現用。主要なAWSリソースは準備済み。公開経路は確認済み。CDは試行2で停止し、修正後の実行は未実施。復旧は未検証）
 
 **最初に読む: この文書は、新しい環境で一から再現するための初回手順です。既に作成済みのリソース（関数・実行ロール・ロググループ・OIDCプロバイダー・配布ロール・エイリアス `demo`・関数URL・予約済み同時実行数）を再作成・上書きしません。** 既にあるものは読み取りで確認するだけで、「2.」「3.」「5.」の作成コマンドは実行しません（利用者の現在の環境では、下の現況のとおり準備済み）。
 
-**現況（2026-11-09。Codexの実測・報告の転記。アカウントID・URLの実値・秘密は書かない）**
+**現況（2026-11-10。利用者・Codexの報告の転記。実環境で、このレビューでは再実行していない。アカウントID・URLの実値・秘密は書かない）**
+
+- 公開経路: CloudFrontは有効。CloudFront経由の `/`・`/health`・`/release`・JSの参照が200、関数URLへの直接の匿名アクセスは403。先行して行ったブラウザ確認（Playwright）は4件成功。配布用ロールとGitHubのリポジトリ変数（`AWS_ROLE_ARN`・CloudFront関連を含む）は設定済み（値は書かない）。エイリアス `demo` の現在の版は版1（ソース `526db5bb`）。
+- CD（実際のAWS）: 試行1はOIDCの `sub` 不一致で認証に失敗し、利用者が信頼ポリシーの `sub` を不変のsubへ修正した。試行2は、変更前の検証を通ってコード更新まで進み、更新後の関数は、コードのハッシュが期待値と一致し、`State=Active`・`LastUpdateStatus=Successful`だった。しかし旧実装が「更新の応答のRevisionId＝完了後のRevisionId」を前提にしていたため、不一致で発行の前に止まった。エイリアスは版1のまま変更されていない。
+- 解釈の注意: 不一致の原因が、AWSの通常の遷移なのか、同時期の手動変更なのかは、利用者が手動の変更の有無を確認できておらず**未確定**。通常の遷移であるとは主張しない。現在のコードは、完了後に読み直した値を使うが、読み直しの前の操作を排除できるわけではない（下の「発行済みの版が既にある場合」）。
+- 未実施: 修正後のCDの実行（新しい版の発行・エイリアスの切り替え・ロールバック）。
+- 利用者の承認があったと報告を受けているが、内容・記録の所在はLinearで確認する（このレビューでは未確認）。
+
+**履歴の現況（2026-11-09時点。Codexの実測・報告の転記。以下の「未検証・未作成」「未設定」は、上の2026-11-10の現況が優先する履歴）**
 
 - 準備済み: Lambda関数、ログ保持7日のロググループ、実行ロール、配布ロール、OIDCプロバイダー、エイリアス `demo`（版1）、予約済み同時実行数1、関数URL（`AWS_IAM`・`BUFFERED`）。どのコマンドで作成したかは、この文書では確認していない。
 - 確認済み（Codex実測）: デプロイ済みのZIP本体が `main` の `526db5bb` のビルドと照合して一致。非公開の呼び出しで `health` が200・本文 `ok`、`release` が期待SHAと一致（真）、ルートのHTMLとそのJS参照が成功。未署名の匿名GETは関数URLで403。
 - 未検証・未作成: ブラウザでの表示、CloudFrontを通した実際のHTTP、CD（配布）、復旧（ロールバック・公開停止）。CloudFrontとWAFは未作成。OACは作成コマンドを利用者に案内済みだが結果は未受領で、作成済みかは未確認。
 - 更新（利用者の報告・確認、2026-11-09〜11-10。上の2026-11-09時点の記述より新しい）: CloudFrontのディストリビューション（無効のまま）・WAFのWeb ACL・OACは作成済み。Web ACLの規則は4件（接続元IPごとのレート制限のBlock 1件＋既知のAWSマネージド規則グループ3種の`Count`）で、全体のレート制限の規則は無い。2026-11-10に利用者の承認で、全体1,500件/5分の規則を要件から外した。詳細は[公開経路の計画](cloudfront-plan.md)。
+- OIDC（利用者の報告）: 配布ロールの信頼ポリシーの `sub` は、GitHubの応答に基づき不変のsub（所有者・リポジトリの数値IDを含む形式）へ、利用者がAWSで手動で修正した（`sub` だけ。Codex・レビュー担当は実環境で再確認していない）。雛形と手順は、確認した接頭辞を使う形に改めた（「5.」）。
 - GitHub: Environment `demo`、`CD_APPROVER_LOGIN`、`LAMBDA_FUNCTION_NAME`、`LAMBDA_LAYER_CODE_SHA256` は設定・読み戻し済み。`AWS_ROLE_ARN` とCloudFront関連の変数は未設定。
 
 **過去の経緯（2026-11-08時点。現況ではない）**: 当時は構築・配布が未実施で、利用者本人がCloudShellで読み取り専用の関数一覧（`list-functions`）を実行して成功し、同じアカウントに既存のAmplify用の関数が4件あることを確認したと報告を受けた（読み取りのみで、この文書のコマンドではない。既存の関数名は公開文書に書かない）。
@@ -23,10 +32,10 @@ Lambda関連の構築は、本人がAWS CloudShellで、ここに提示したコ
 | 仮定 | 古いアカウントのため従量課金・無料利用枠の旧来アカウントと仮定する。実際の種別・無料枠は未確認 |
 | GitHub側の設定（Codex設定、2026-11-08） | Environment `demo`（必須レビュー担当者1人、自己承認の禁止は無効、デプロイブランチは `main`（type=branch）のみ）とリポジトリ変数 `CD_APPROVER_LOGIN` を設定済み。管理者による迂回の無効化は要求したが、APIの応答にそのフィールドがなく**未確認**（無効と確認したわけではない）。その後、Codexが `LAMBDA_FUNCTION_NAME` と `LAMBDA_LAYER_CODE_SHA256` を設定し、読み戻しで確認した（報告の転記。値は書かない）。ほかのAWS関連の変数（`AWS_ROLE_ARN`・`CD_BASE_URL`・`CLOUDFRONT_DISTRIBUTION_ID`・`CLOUDFRONT_OAC_ID`・`WAF_WEB_ACL_ARN`）は**未設定** |
 | 現況の確認済み（2026-11-09、Codex実測） | 準備済みのAWSリソース（上の現況）、デプロイ済みZIP本体と `main` の `526db5bb` のビルドの照合一致、非公開の呼び出しでの `health`（200・本文 `ok`）・`release`（期待SHAと一致）・ルートHTMLとJS参照の成功、関数URLへの未署名の匿名GETが403。アダプタのレイヤーとPython 3.14の組み合わせは、この版・この構成の非公開の呼び出しが成功した範囲で動作を確認した（ほかの構成・負荷での動作は未確認）。文書の最終版の `bash -n` による構文確認は、この文書の24ブロックと[計画](cloudfront-plan.md)の6ブロックで成功し、`git diff --check` も成功した（Codex実測。構文のみで、AWSでの実行ではない。この文書の最終の文書修正は説明文だけで、ブロックは変えていない。最後の再確認はCodexが行う） |
-| 未実施・未確認 | ブラウザでの表示、CloudFrontを通した実際のHTTP、実際のCD（配布・ロールバック）の実行と復旧（動作は未検証）、CloudFront・WAFの作成（未作成）、OACの作成状況（作成コマンドは案内済みで結果は未受領）、CloudFrontのFreeプランの契約・適用可否（Freeを選べるという報告は、契約・適用の成功ではない）、予算アラートの宛先（任意の監視案を採る場合。本人が非公開で入力し、作り話の宛先は置かない）、CloudShell以外の別環境や、将来のコミットでの `scripts/build-lambda.sh`（Dockerを使う）によるZIPビルドの一般的な再現（Dockerの可否・実行時間・ディスク容量はその環境ごとに未確認）。なお、利用者の報告では、CloudShellで `main` の `526db5bb` からDockerのZIPをビルドし、ZIPのSHA-256 `7610e36b9cc46a82f2496ee49c72b8310d06f817c7d8922cac656100ff075a62` と `verify-artifact-only` の成功まで確認済み（利用者の報告で、Codex・レビュー担当は再実行していない）。上の構文確認はAWSでの実行と同じではない |
+| 未実施・未確認（2026-11-09時点の履歴。2026-11-10の現況が優先） | ブラウザでの表示、CloudFrontを通した実際のHTTP、実際のCD（配布・ロールバック）の実行と復旧（動作は未検証）、CloudFront・WAFの作成（未作成）、OACの作成状況（作成コマンドは案内済みで結果は未受領）、CloudFrontのFreeプランの契約・適用可否（Freeを選べるという報告は、契約・適用の成功ではない）、予算アラートの宛先（任意の監視案を採る場合。本人が非公開で入力し、作り話の宛先は置かない）、CloudShell以外の別環境や、将来のコミットでの `scripts/build-lambda.sh`（Dockerを使う）によるZIPビルドの一般的な再現（Dockerの可否・実行時間・ディスク容量はその環境ごとに未確認）。なお、利用者の報告では、CloudShellで `main` の `526db5bb` からDockerのZIPをビルドし、ZIPのSHA-256 `7610e36b9cc46a82f2496ee49c72b8310d06f817c7d8922cac656100ff075a62` と `verify-artifact-only` の成功まで確認済み（利用者の報告で、Codex・レビュー担当は再実行していない）。上の構文確認はAWSでの実行と同じではない |
 | 実行時に人が確認する事項 | 本人がCloudShellで各ブロックを実行する時点での、支払い方法の状態・認証・既存リソースの有無・データへの影響の確認。内部の確認事項で、公開の主張ではない。月額の目安を理由に止めることはしない |
 
-**公開経路（2026-11-09の更新）**: 関数URLを匿名で直接公開する旧手順は外しました。公開は、CloudFront + WAF + Lambda関数URL（`AWS_IAM`）+ OACだけで、手順と設定は[公開経路の計画](cloudfront-plan.md)にあります。利用者の環境では、関数URL（`AWS_IAM`・`BUFFERED`）、エイリアス `demo`・予約済み同時実行数1・ログ・OIDCプロバイダー・実行ロール・配布ロールが準備済みです（**再作成しない**。既存のものは読み取りで確認する）。CloudFront・WAF・OACは、その後の利用者の報告で**作成済み**です（ディストリビューションは無効のまま。Web ACLはIPごとの規則1件＋観測グループ3種の4件。計画の手順0の2・2・4で読み取り確認し、再作成しない）。匿名のGETが403になることはCodexが実測し、非公開の呼び出しでの `health`・`release`・ルートHTMLの成功も確認済みです。ブラウザでの表示とCloudFront経由の実際のHTTPは未検証です。CloudFrontのFreeプランを選べるという報告は契約・適用の成功ではなく、適用可否は未確認で、適合しない場合も自動では有料にしません。
+**公開経路（2026-11-09の更新。履歴で、2026-11-10の現況が優先）**: 関数URLを匿名で直接公開する旧手順は外しました。公開は、CloudFront + WAF + Lambda関数URL（`AWS_IAM`）+ OACだけで、手順と設定は[公開経路の計画](cloudfront-plan.md)にあります。利用者の環境では、関数URL（`AWS_IAM`・`BUFFERED`）、エイリアス `demo`・予約済み同時実行数1・ログ・OIDCプロバイダー・実行ロール・配布ロールが準備済みです（**再作成しない**。既存のものは読み取りで確認する）。CloudFront・WAF・OACは、その後の利用者の報告で**作成済み**です（ディストリビューションは無効のまま。Web ACLはIPごとの規則1件＋観測グループ3種の4件。計画の手順0の2・2・4で読み取り確認し、再作成しない）。匿名のGETが403になることはCodexが実測し、非公開の呼び出しでの `health`・`release`・ルートHTMLの成功も確認済みです。ブラウザでの表示とCloudFront経由の実際のHTTPは未検証です。CloudFrontのFreeプランを選べるという報告は契約・適用の成功ではなく、適用可否は未確認で、適合しない場合も自動では有料にしません。
 
 CDワークフロー（`.github/workflows/cd.yml`）は、**ここで作る既存の正常なエイリアス `demo` を更新するだけ**です。IAM・関数URL・同時実行数・ログ・CloudFront・WAFの変更は含みません（CloudFront・OAC・WAF・関数のリソースポリシーは読み取りで検証するだけ。予約済み同時実行数も読み取り（`get-function-concurrency`）でちょうど1であることを確認するだけで、1でなければ変更の前に止まり、自動では設定しない）。
 
@@ -199,7 +208,7 @@ Lambdaは、コードも設定も最後の版から変わらないと新しい�
 
 - エイリアスが既に今回と同じソースSHA・ZIPの版を指し、その版の現行スモーク確認が合格した場合: **変更なしの成功**（`overall=no-change-success`、`deployment=already-current`、新しい版は発行せず、新しい配布のスモーク確認もしない）。新しい配布の成功とは扱いません。
 - 前回の試行が版を発行した後に止まり、エイリアスが旧版のまま残った場合: 再実行で返された既存の版を、**descriptionのソースSHA・ZIPのハッシュ、コードのハッシュ、検査対象の設定がすべて今回と一致すると証明できたときだけ**再利用します（`versions.reused=true`）。証明できなければ、エイリアスを動かさず止まります。設定を変えて版を作らせることはしません。
-- 発行直後（または再利用）の版は、`aws lambda wait function-active-v2 --qualifier <版>`（AWS CLIの上限つき）で Active を待ってから確認し、その後にエイリアスを切り替えます。待機の失敗・タイムアウトはエイリアスを動かさず止まります（`stage=wait-published`）。Pending のまま確認する緩和はしません。更新後のRevisionId・CodeSha256・設定の確認も緩めておらず、更新後のRevisionIdの扱いは実際のAWSでの確認項目です（未確認）。
+- 発行直後（または再利用）の版は、`aws lambda wait function-active-v2 --qualifier <版>`（AWS CLIの上限つき）で Active を待ってから確認し、その後にエイリアスを切り替えます。待機の失敗・タイムアウトはエイリアスを動かさず止まります（`stage=wait-published`）。Pending のまま確認する緩和はしません。コード更新の完了後に、CodeSha256、`State=Active`・`LastUpdateStatus=Successful`（どちらも明示的な値が必須。キーがない場合は止まる）、検証時に捕捉した設定の指紋（環境変数を含む版に固定される設定全体。値は保持せず、RevisionId・更新日時・コードサイズなどコード更新で変わるメタデータは除く）を確認し、完了後に読み直した空でないRevisionIdで版を発行します。更新の応答のRevisionIdは完了後と同じとは限らず、比較にも発行の条件にも使いません（利用者の報告では、実際のCD実行の試行2で、旧実装が「応答のRevisionId＝完了後のRevisionId」を前提に止まり、エイリアスは変わらなかった。この不一致が通常の遷移か、同時期の手動変更かは未確定で、通常の遷移であるとは主張しない。修正後の実行も未実施）。版に固定される設定・コードが検証時と**違えば検出して発行しません**（比較する）。一方、読み直しの前に別の操作があっても、設定・コードが検証時と同一（元に戻された変更を含む）なら区別できず、**他者の操作が無かったとは証明できません**（読み直しの後は、発行のRevisionIdの条件が拒否します）。除外するメタデータ以外の未知のAWSの差異（新しい設定項目など）では、閉じて止まる場合があります。修正後のCDの実行は未実施です。
 - 止まった場合の手動確認（読み取りのみ）: `aws lambda list-versions-by-function --function-name "$FN" --region "$AWS_REGION"` で版を見つけ、`get-function-configuration --qualifier "$VERSION"`（「7.」の `VERSION` の書き方）の `Description`・`CodeSha256`・Layers・Runtime などが今回の想定と一致するか確認する。一致すると人が判断した場合に限り、`update-alias`（現在の `RevisionId` 指定）で切り替える。一致しない版は使わず、削除もしない。
 
 ### 関数URL（非公開の `AWS_IAM`。匿名の公開許可は作らない）
@@ -263,7 +272,14 @@ aws iam list-open-id-connect-providers   # ARNの末尾が token.actions.githubu
 aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
 ```
 
-信頼ポリシー（`infra/cd/oidc-trust-policy.json`）は `aud` が `sts.amazonaws.com`、`sub` が `repo:<OWNER>/<REPO>:environment:demo` の完全一致だけです（ワイルドカードなし）。権限（`infra/cd/deploy-policy.json`）は、CloudFront・WAFの読み取り（対象のディストリビューションとWeb ACLの `Get` だけ。OACの読み取りはリソース指定ができないため `Resource: *`）、エイリアス `demo` のリソースポリシーの読み取り（`lambda:GetPolicy`）、予約済み同時実行数の読み取り（`lambda:GetFunctionConcurrency`。修飾子なしの対象関数だけの別の文）、対象関数（修飾子なし）とその版・エイリアス（修飾子つき）に限った、設定・関数の参照（`GetFunction` は更新完了の待機 `aws lambda wait function-updated-v2` と、発行した版の有効化の待機 `aws lambda wait function-active-v2 --qualifier <版>` が使う。追加の権限は不要）、コード更新、版の発行、エイリアスの参照と更新と、固定のレイヤー版の読み取りだけです。`iam:PassRole`、管理者権限、実行時の権限、関数URL・ログ・IAMの操作、同時実行数の設定・削除（`PutFunctionConcurrency`・`DeleteFunctionConcurrency`）は含めません。既に作成済みの配布ロールを使う場合、`lambda:GetFunctionConcurrency` の追加は人が内容を確認して行う別の操作です（未実施。足りなければCDは取得失敗で変更の前に止まる）。
+信頼ポリシー（`infra/cd/oidc-trust-policy.json`）は `aud` が `sts.amazonaws.com`、`sub` が `<OIDC_SUB_PREFIX>:environment:demo` の完全一致だけです（ワイルドカードなし）。`<OIDC_SUB_PREFIX>` は、リポジトリの実際のOIDCのsub接頭辞で、次の2つの形のどちらかです。**所有者名・リポジトリ名から推測・組み立てません**（下の「OIDCのsub接頭辞の確認」で、GitHubに認証済みの端末から取得して確認します）。
+
+| 形式 | 接頭辞の例（架空） | いつか |
+| --- | --- | --- |
+| 不変のsub（所有者とリポジトリの数値IDを含む） | `repo:example-owner@1000001/example-repo@2000002` | GitHubの応答が不変のsubを使うと示す場合（新しいリポジトリで必要になり得る） |
+| 旧形式 | `repo:example-owner/example-repo` | 確認した応答が旧形式のままと示す場合だけ |
+
+GitHubのOIDC subの仕様は[公式文書](https://docs.github.com/en/actions/reference/security/oidc)にあります（Codexが2026-11-10に本文を確認した。新しいリポジトリでは不変のsubの数値IDが必要になる旨）。どちらの形式かはGitHubの応答で決め、旧形式への黙った戻し・ワイルドカード（`*`）・`StringLike` への置き換えはしません。権限（`infra/cd/deploy-policy.json`）は、CloudFront・WAFの読み取り（対象のディストリビューションとWeb ACLの `Get` だけ。OACの読み取りはリソース指定ができないため `Resource: *`）、エイリアス `demo` のリソースポリシーの読み取り（`lambda:GetPolicy`）、予約済み同時実行数の読み取り（`lambda:GetFunctionConcurrency`。修飾子なしの対象関数だけの別の文）、対象関数（修飾子なし）とその版・エイリアス（修飾子つき）に限った、設定・関数の参照（`GetFunction` は更新完了の待機 `aws lambda wait function-updated-v2` と、発行した版の有効化の待機 `aws lambda wait function-active-v2 --qualifier <版>` が使う。追加の権限は不要）、コード更新、版の発行、エイリアスの参照と更新と、固定のレイヤー版の読み取りだけです。`iam:PassRole`、管理者権限、実行時の権限、関数URL・ログ・IAMの操作、同時実行数の設定・削除（`PutFunctionConcurrency`・`DeleteFunctionConcurrency`）は含めません。既に作成済みの配布ロールを使う場合、`lambda:GetFunctionConcurrency` の追加は人が内容を確認して行う別の操作です（未実施。足りなければCDは取得失敗で変更の前に止まる）。
 
 このロールは、CloudFront・WAFを作って（「4.」）ディストリビューションIDとWeb ACLのARNが決まった**後**に作ります（権限が対象を指定するため）。`CF_DIST_ID`・`WAF_ARN` は、[計画](cloudfront-plan.md)で作成した実値を、引用符つきの目印を書き換えて設定します（CDのコードの形式検証と同じ正規表現で検証。作成後に実際に取得できることも確認する）。
 
@@ -276,16 +292,47 @@ WAF_ARN='REPLACE_WEB_ACL_ARN'      # arn:aws:wafv2:us-east-1:<アカウント>:g
 aws cloudfront get-distribution --id "$CF_DIST_ID" --region us-east-1 --query Distribution.Id --output text >/dev/null   # 実在の確認（読み取り）
 ```
 
-`REPO_SLUG`・`ACCOUNT_ID`・`FN`・`CF_DIST_ID`・`WAF_ARN` は検証済みで、`sed` の区切り文字 `|` や `&` を含みません。まず、置換した内容を作って確認します（AWSへの書き込みなし）。
+### OIDCのsub接頭辞の確認（GitHubに認証済みの端末で取得し、CloudShellへは値だけ貼る）
+
+CloudShellにはGitHubの認証がなく、トークンを置きません。次の2つのコマンドは、**GitHubに認証済みの利用者自身の端末**（`gh` が使える環境）で実行します（読み取りのみ。出力に数値IDが出るため、チャット・文書・Linearに貼りません）。`REPO_SLUG` は「1. 準備」と同じ値を、その端末で設定してから使います。
+
+```bash
+gh api "repos/${REPO_SLUG}/actions/oidc/customization/sub"
+gh api "repos/${REPO_SLUG}" --jq '"所有者ID=\(.owner.id) リポジトリID=\(.id)"'
+```
+
+1つ目の応答で、不変のsubを使うこと（`use_immutable_subject` が `true`）と、sub接頭辞の値（項目 `sub_claim_prefix`）を人が読み取ります。項目名は、Codexが実際のGitHubの応答（2026-11-10。利用者が応答を読んで確認したものではない）で確認しました: `use_default` が `true`、`use_immutable_subject` が `true`、接頭辞の項目が `sub_claim_prefix` です（値は書かない。応答のほかの項目の形は固定しない）。不変のsubなら、接頭辞は `repo:<所有者>@<所有者ID>/<リポジトリ>@<リポジトリID>` の形で、2つ目の応答の所有者ID・リポジトリIDと数値が一致することを人が目で照合します。一致しない・取得できない場合は、推測せず止まります。確認した接頭辞（`:environment:demo` は含めない）だけを、CloudShellの次のブロックの `OIDC_SUB_PREFIX` に貼ります。
+
+```bash
+OIDC_SUB_PREFIX='REPLACE_OIDC_SUB_PREFIX'   # 上で確認した接頭辞。例（架空）: repo:example-owner@1000001/example-repo@2000002
+OIDC_IMMUTABLE_RE='^repo:([A-Za-z0-9-]{1,39})@([0-9]{1,20})/([A-Za-z0-9._-]{1,100})@([0-9]{1,20})$'
+OIDC_LEGACY_RE='^repo:([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})$'
+[[ "$OIDC_SUB_PREFIX" != *REPLACE_* ]] || die "OIDC_SUB_PREFIX が目印のまま"
+if [[ "$OIDC_SUB_PREFIX" =~ $OIDC_IMMUTABLE_RE ]]; then
+  [[ "${BASH_REMATCH[1]}/${BASH_REMATCH[3]}" == "$REPO_SLUG" ]] || die "sub接頭辞の所有者/リポジトリが REPO_SLUG と一致しない"
+elif [[ "$OIDC_SUB_PREFIX" =~ $OIDC_LEGACY_RE ]]; then
+  [[ "${BASH_REMATCH[1]}/${BASH_REMATCH[2]}" == "$REPO_SLUG" ]] || die "sub接頭辞の所有者/リポジトリが REPO_SLUG と一致しない"
+else
+  die "OIDC_SUB_PREFIX は不変（repo:所有者@ID/リポジトリ@ID）か旧形式（repo:所有者/リポジトリ）の完全一致のみ。ワイルドカード・接尾辞は不可"
+fi
+echo "OIDC sub接頭辞の形式: 合格（形式・REPO_SLUGとの一致のみ。GitHubの実値との一致は上の人による照合）"
+```
+
+この検証は形式と `REPO_SLUG` との一致だけを確認します。ワイルドカード・形式外の値・接尾辞つきの値・片方のIDがない値は止まります（旧形式への黙った戻しもしません。旧形式は、GitHubの応答で旧形式と確認できた場合に、その接頭辞を貼ったときだけ通ります）。
+
+`OIDC_SUB_PREFIX`・`ACCOUNT_ID`・`FN`・`CF_DIST_ID`・`WAF_ARN` は検証済みで、`sed` の区切り文字 `|` や `&` を含みません（接頭辞は英数字・`-`・`.`・`_`・`@`・`/`・`:` だけ）。まず、置換した内容を作って確認します（AWSへの書き込みなし）。
 
 ```bash
 work="$(mktemp -d)"
-sed -e "s|<ACCOUNT_ID>|${ACCOUNT_ID}|g" -e "s|<OWNER>/<REPO>|${REPO_SLUG}|g" infra/cd/oidc-trust-policy.json > "$work/trust.json"
+sed -e "s|<ACCOUNT_ID>|${ACCOUNT_ID}|g" -e "s|<OIDC_SUB_PREFIX>|${OIDC_SUB_PREFIX}|g" infra/cd/oidc-trust-policy.json > "$work/trust.json"
 sed -e "s|<ACCOUNT_ID>|${ACCOUNT_ID}|g" -e "s|<FUNCTION_NAME>|${FN}|g" \
     -e "s|<DISTRIBUTION_ID>|${CF_DIST_ID}|g" -e "s|<WEB_ACL_ARN>|${WAF_ARN}|g" infra/cd/deploy-policy.json > "$work/policy.json"
-if grep -nE '<(ACCOUNT_ID|FUNCTION_NAME|DISTRIBUTION_ID|WEB_ACL_ARN|OWNER|REPO)>' "$work/trust.json" "$work/policy.json"; then die "未置換の目印が残っている"; fi
+if grep -nE '<(ACCOUNT_ID|FUNCTION_NAME|DISTRIBUTION_ID|WEB_ACL_ARN|OIDC_SUB_PREFIX|OWNER|REPO)>' "$work/trust.json" "$work/policy.json"; then die "未置換の目印が残っている"; fi
 jq -e . "$work/trust.json" "$work/policy.json" >/dev/null || die "JSONとして不正"
-grep -qF "\"repo:${REPO_SLUG}:environment:demo\"" "$work/trust.json" || die "sub が repo:<リポジトリ>:environment:demo の完全一致になっていない"
+jq -e --arg sub "${OIDC_SUB_PREFIX}:environment:demo" \
+  '.Statement | length == 1 and (.[0].Condition | keys == ["StringEquals"]) and .[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == $sub' \
+  "$work/trust.json" >/dev/null || die "sub が確認した接頭辞＋:environment:demo の完全一致になっていない"
+if grep -qF '*' "$work/trust.json"; then die "信頼ポリシーにワイルドカードが含まれている"; fi
 # 置換後の内容を人が目で確認する（実在のアカウントIDが出るため、出力はチャット・文書に貼らない）
 cat "$work/trust.json" "$work/policy.json"
 ```
@@ -299,19 +346,19 @@ aws iam put-role-policy --role-name "$DEPLOY_ROLE" --policy-name deploy-demo-onl
 
 ロールのARNがリポジトリ変数 `AWS_ROLE_ARN` です。固定レイヤーの読み取りが実際のAWSで必要か・足りるかは未確認です（`AccessDenied` なら、固定ARNの読み取りだけを足りない操作に限って見直す）。
 
-## 6. GitHubの設定（Environment・`CD_APPROVER_LOGIN`・`LAMBDA_FUNCTION_NAME`・`LAMBDA_LAYER_CODE_SHA256` は設定済み。`AWS_ROLE_ARN` とCloudFront関連は未設定）
+## 6. GitHubの設定（Environment・リポジトリ変数は設定済み。2026-11-10の報告。`AWS_ROLE_ARN`・CloudFront関連も設定済みで、値の読み戻しはこのレビューでは未実施）
 
 リポジトリ変数（Settings → Secrets and variables → Actions → Variables）。いずれも秘密ではありません。人名は公開文書に書かず、ここへだけ入力します。
 
 | 名前 | 値 | 状態 |
 | --- | --- | --- |
 | `CD_APPROVER_LOGIN` | 起動・承認する唯一の人のGitHubログイン。**リポジトリ変数**にする（buildジョブも参照する） | 設定済み |
-| `AWS_ROLE_ARN` | 上のデプロイ用ロールのARN | 未設定（AWSの作成後） |
+| `AWS_ROLE_ARN` | 上のデプロイ用ロールのARN | 設定済み（利用者の報告、2026-11-10。値は書かない） |
 | `LAMBDA_FUNCTION_NAME` | `$FN` | 設定・読み戻し済み（Codex。値は書かない） |
-| `CD_BASE_URL` | 公開URL。**CloudFrontのオリジン**（`https://<id>.cloudfront.net`、末尾の`/`なし）。関数URLは設定しない（コードも拒否する） | 未設定（CloudFront作成後） |
-| `CLOUDFRONT_DISTRIBUTION_ID` | CloudFrontのディストリビューションID（`$CF_DIST_ID`） | 未設定（CloudFront作成後） |
-| `CLOUDFRONT_OAC_ID` | Origin Access ControlのID（作成済みなら、そのIDを読み取りで確認して設定する） | 未設定（OACの作成状況は未確認） |
-| `WAF_WEB_ACL_ARN` | Web ACLのARN（us-east-1・CLOUDFRONT scope、`$WAF_ARN`） | 未設定（WAF作成後） |
+| `CD_BASE_URL` | 公開URL。**CloudFrontのオリジン**（`https://<id>.cloudfront.net`、末尾の`/`なし）。関数URLは設定しない（コードも拒否する） | 設定済み（利用者の報告、2026-11-10。値は書かない） |
+| `CLOUDFRONT_DISTRIBUTION_ID` | CloudFrontのディストリビューションID（`$CF_DIST_ID`） | 設定済み（同上） |
+| `CLOUDFRONT_OAC_ID` | Origin Access ControlのID（作成済みなら、そのIDを読み取りで確認して設定する） | 設定済み（同上） |
+| `WAF_WEB_ACL_ARN` | Web ACLのARN（us-east-1・CLOUDFRONT scope、`$WAF_ARN`） | 設定済み（同上） |
 | `LAMBDA_LAYER_CODE_SHA256` | 上で記録したレイヤーのCodeSha256（base64） | 設定・読み戻し済み（Codex。値は書かない） |
 
 Environment `demo`（名前は運用上の選択）。設定済みですが、CDは自動作成に頼らず、既存のEnvironmentが次の設定であることを確認できないと、AWSの資格情報の前に止まります。

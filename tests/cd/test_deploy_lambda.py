@@ -12,6 +12,9 @@ import importlib.util
 import io
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -278,11 +281,25 @@ class FakeAws:
                     "API_TOKEN": SECRET,
                 }
             },
+            # 版に固定される設定（比較の対象）と、コード更新で変わるメタデータ
+            "Role": f"arn:aws:iam::{ACCOUNT}:role/demo-fn-exec",
+            "MemorySize": 512,
+            "Timeout": 10,
+            "Description": "",
+            "PackageType": "Zip",
+            "TracingConfig": {"Mode": "PassThrough"},
+            "EphemeralStorage": {"Size": 512},
             "State": "Active",
             "LastUpdateStatus": "Successful",
+            "LastModified": "2026-01-01T00:00:00.000+0000",
+            "CodeSize": 100,
             "RevisionId": "f-1",
             "CodeSha256": code_sha(OLD_ZIP),
         }
+        # 実際のCDで、update-function-code の応答のRevisionIdと完了後の値が不一致だった観測を再現する仮定
+        # （AWSの通常の遷移か、同時期の手動変更かは未確定）。wait function-updated-v2 で別の値になる
+        self.in_progress_revision = None
+        self.final_revision = None
         self.dedupe_publish = False  # True: コード・設定が同じなら既存の版を返す（AWSの仕様どおり）
         self.versions = {"1": self._snapshot("1", dl.make_description(OLD_SHA, OLD_ZIP, "100"))}
         self.alias = {"FunctionVersion": "1", "RevisionId": "a-1", "RoutingConfig": {}}
@@ -343,6 +360,16 @@ class FakeAws:
                 raise self.wait_fail[waiter]
             if waiter == "function-active-v2" and "--qualifier" in wait_opts:
                 self.versions[wait_opts["--qualifier"]]["State"] = "Active"
+            if waiter == "function-updated-v2" and self.in_progress_revision is not None:
+                # 完了: 別のRevisionId・更新日時・コードサイズ・状態の遷移（内容の設定は同じ）
+                self.final_revision = self._rev("ffinal")
+                self.function.update(
+                    RevisionId=self.final_revision,
+                    LastUpdateStatus="Successful",
+                    LastModified="2026-01-02T00:00:00.000+0000",
+                    CodeSize=200,
+                )
+                self.in_progress_revision = None
             return {}
         op = args[1]
         opts = dict(zip(args[2::2], args[3::2]))
@@ -388,8 +415,9 @@ class FakeAws:
                 raise conflict
             data = Path(opts["--zip-file"].removeprefix("fileb://")).read_bytes()
             self.function["CodeSha256"] = base64.b64encode(hashlib.sha256(data).digest()).decode()
-            self.function["RevisionId"] = self._rev("f")
-            return {"CodeSha256": self.function["CodeSha256"], "RevisionId": self.function["RevisionId"]}
+            self.in_progress_revision = self._rev("fprogress")
+            self.function.update(RevisionId=self.in_progress_revision, LastUpdateStatus="InProgress")
+            return {"CodeSha256": self.function["CodeSha256"], "RevisionId": self.in_progress_revision}
         if op == "publish-version":
             if (
                 opts["--revision-id"] != self.function["RevisionId"]
@@ -934,9 +962,11 @@ class RevisionCapture(DeployTestCase):
         original = self.aws.__call__
 
         def wrapped(args):
-            if args[1] == "wait":
+            response = original(args)
+            if args[1] == "wait" and args[2] == "function-updated-v2":
+                # 更新の完了の直後（完了後の読み直しの前）に、別の者が変更した
                 self.aws.function.update(changes)
-            return original(args)
+            return response
 
         return wrapped
 
@@ -947,12 +977,207 @@ class RevisionCapture(DeployTestCase):
         self.assertNotIn("update-alias", self.aws.ops())
         self.assertEqual(self.aws.alias["FunctionVersion"], "1")
 
-    def test_foreign_revision_between_update_and_publish_stops_before_publish(self):
+    def test_revision_only_change_before_the_completed_read_is_indistinguishable(self):
+        """完了後に読んだRevisionIdが何であれ、設定・コードが検証時と同一なら、それを条件に発行する。
+
+        読む前に別の操作があっても、版に固定される設定・コードが同一（元に戻された変更を含む）なら
+        区別できず、他者の操作が無かったとは証明できない。異なる設定・コードは比較して発行しない
+        （EveryVersionableSettingIsCompared などのテスト）。
+        """
         wrapped = self.tamper_after_update(RevisionId="f-ext")
-        self.assertEqual(self.deploy(aws=wrapped), 1)
-        self.assertIn("revisionId", self.result()["error"])
-        self.assertNotIn("publish-version", self.aws.ops())
-        self.assertNotIn("update-alias", self.aws.ops())
+        self.assertEqual(self.deploy(aws=wrapped), 0)
+        publish = next(call for call in self.aws.calls if call[1] == "publish-version")
+        self.assertEqual(publish[publish.index("--revision-id") + 1], "f-ext")
+
+    def test_change_after_the_completed_read_is_rejected_by_publish(self):
+        # 完了後の読み直しの後・発行の前に関数が変わると、発行のRevisionIdの条件が拒否する
+        self.aws.before["publish-version"] = lambda: self.aws.function.update(RevisionId="f-late")
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.aws.mutating(), ["update-function-code", "publish-version"])
+        self.assertEqual(self.aws.versions.keys(), {"1"})
+        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
+        self.assertEqual(self.result()["alias"]["state"], "untouched")
+
+
+class InProgressAndCompletedRevisions(DeployTestCase):
+    """更新の応答のRevisionIdと完了後の値が不一致でも、完了後に読み直した値で発行する。
+
+    実際のCDで不一致を観測した（原因が通常の遷移か同時期の手動変更かは未確定）。ここは偽のAWSでの
+    再現で、AWSの通常の遷移の証明ではない。
+    """
+
+    def test_publishes_with_the_completed_revision_not_the_update_response(self):
+        self.assertEqual(self.deploy(), 0)
+        self.assertIsNotNone(self.aws.final_revision)
+        update = next(call for call in self.aws.calls if call[1] == "update-function-code")
+        publish = next(call for call in self.aws.calls if call[1] == "publish-version")
+        # 更新は検証時に捕捉したRevisionId、発行は完了後に読み直したRevisionId（更新の応答の値ではない）
+        self.assertEqual(update[update.index("--revision-id") + 1], "f-1")
+        revision = publish[publish.index("--revision-id") + 1]
+        self.assertEqual(revision, self.aws.final_revision)
+        self.assertTrue(self.aws.final_revision.startswith("ffinal-"))
+        self.assertEqual(publish[publish.index("--code-sha256") + 1], code_sha(self.zip_hex))
+        result = self.result()
+        self.assertEqual((result["overall"], result["deployment"]), ("success", "completed"))
+        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
+        self.assert_no_leak()
+
+    def test_metadata_may_change_but_content_must_not(self):
+        self.assertEqual(self.deploy(), 0)
+        # 揮発性のメタデータ（更新日時・コードサイズ）は完了で変わった
+        self.assertEqual(self.aws.function["CodeSize"], 200)
+        self.assertEqual(self.aws.function["LastModified"], "2026-01-02T00:00:00.000+0000")
+
+    def changed_case(self, name, change, expect):
+        self.setUp()
+        original = self.aws.__call__
+
+        def wrapped(args):
+            response = original(args)
+            if args[1] == "wait" and args[2] == "function-updated-v2":
+                change(self.aws.function)
+            return response
+
+        self.assertEqual(self.deploy(aws=wrapped), 1, name)
+        self.assertNotIn("publish-version", self.aws.ops(), name)
+        self.assertNotIn("update-alias", self.aws.ops(), name)
+        self.assertEqual(self.aws.mutating(), ["update-function-code"], name)
+        self.assertEqual(self.aws.alias["FunctionVersion"], "1", name)
+        result = self.result()
+        self.assertEqual(result["alias"]["state"], "untouched", name)
+        self.assertEqual(result["rollback"], "not-needed", name)
+        self.assertTrue(result["mutationStarted"], name)
+        self.assertIn(expect, result["error"], name)
+        self.assertNotIn("SECRET-2", self.result_file.read_text(encoding="utf-8"), name)
+        self.assertNotIn(SECRET, self.result_file.read_text(encoding="utf-8"), name)
+        self.assert_no_leak()
+
+    def test_changed_code_hash_fails_before_publish(self):
+        self.changed_case(
+            "code",
+            lambda f: f.update(CodeSha256=code_sha(hashlib.sha256(b"other").hexdigest())),
+            "codeSha256",
+        )
+
+    def test_empty_or_missing_completed_revision_fails_before_publish(self):
+        self.changed_case("empty", lambda f: f.update(RevisionId=""), "revisionId")
+        self.changed_case("missing", lambda f: f.pop("RevisionId"), "revisionId")
+
+    def test_failed_update_status_fails_before_publish(self):
+        self.changed_case("status", lambda f: f.update(LastUpdateStatus="Failed"), "lastUpdateStatus")
+
+    def test_final_check_requires_explicit_active_and_successful(self):
+        """完了後の最終確認は、State・LastUpdateStatus の欠落・null・別の値を許さない（発行しない）。"""
+        cases = {
+            "state-missing": (lambda f: f.pop("State"), "state"),
+            "state-null": (lambda f: f.update(State=None), "state"),
+            "state-pending": (lambda f: f.update(State="Pending"), "state"),
+            "state-failed": (lambda f: f.update(State="Failed"), "state"),
+            "status-missing": (lambda f: f.pop("LastUpdateStatus"), "lastUpdateStatus"),
+            "status-null": (lambda f: f.update(LastUpdateStatus=None), "lastUpdateStatus"),
+            "status-in-progress": (lambda f: f.update(LastUpdateStatus="InProgress"), "lastUpdateStatus"),
+        }
+        for name, (change, expect) in cases.items():
+            with self.subTest(name):
+                self.changed_case(name, change, expect)
+
+    def test_status_keys_are_tolerated_only_before_the_update(self):
+        """検証時（更新の前）は従来どおり、キーがなければ許す。最終確認だけが厳密。"""
+        config = dict(FakeAws().function)
+        del config["State"], config["LastUpdateStatus"]
+        self.assertEqual(dl.config_problems(config), [])
+        self.assertEqual(sorted(dl.config_problems(config, require_status=True)), ["lastUpdateStatus", "state"])
+        self.assertEqual(dl.config_problems(FakeAws().function, require_status=True), [])
+
+    def test_every_versionable_setting_is_compared(self):
+        """検査対象外の設定（追加の環境変数・ロール・メモリなど）の変更も、発行の前に止める。"""
+
+        def env(f):
+            f["Environment"]["Variables"]["EXTRA"] = "x"
+
+        def secret_value(f):
+            f["Environment"]["Variables"]["API_TOKEN"] = "SECRET-2"
+
+        def drop_env(f):
+            del f["Environment"]["Variables"]["API_TOKEN"]
+
+        cases = {
+            "extra-env": (env, "setting:Environment"),
+            "secret-env-value": (secret_value, "setting:Environment"),
+            "removed-env": (drop_env, "setting:Environment"),
+            "role": (lambda f: f.update(Role="arn:aws:iam::1:role/other"), "setting:Role"),
+            "memory": (lambda f: f.update(MemorySize=1024), "setting:MemorySize"),
+            "timeout": (lambda f: f.update(Timeout=900), "setting:Timeout"),
+            "description": (lambda f: f.update(Description="changed"), "setting:Description"),
+            "vpc": (lambda f: f.update(VpcConfig={"SubnetIds": ["s-1"]}), "setting:VpcConfig"),
+            "kms": (lambda f: f.update(KMSKeyArn="arn:aws:kms:ap-northeast-1:1:key/k"), "setting:KMSKeyArn"),
+            "tracing": (lambda f: f.update(TracingConfig={"Mode": "Active"}), "setting:TracingConfig"),
+            "storage": (lambda f: f.update(EphemeralStorage={"Size": 1024}), "setting:EphemeralStorage"),
+            "filesystem": (
+                lambda f: f.update(FileSystemConfigs=[{"Arn": "arn:aws:elasticfilesystem:x", "LocalMountPath": "/mnt/x"}]),
+                "setting:FileSystemConfigs",
+            ),
+            "layer-order": (
+                lambda f: f.update(Layers=[{"Arn": dl.PINNED_LAYER_ARN}, {"Arn": "arn:aws:lambda:ap-northeast-1:1:layer:X:1"}]),
+                "layers",
+            ),
+            "package-type": (lambda f: f.update(PackageType="Image"), "setting:PackageType"),
+            "unknown-new-setting": (lambda f: f.update(FutureSetting={"On": True}), "setting:FutureSetting"),
+        }
+        for name, (change, expect) in cases.items():
+            with self.subTest(name):
+                self.changed_case(name, change, expect)
+
+    def test_runtime_architecture_handler_changes_are_still_named(self):
+        self.changed_case("runtime", lambda f: f.update(Runtime="python3.13"), "runtime")
+        self.changed_case("arch", lambda f: f.update(Architectures=["arm64"]), "architecture")
+        self.changed_case("handler", lambda f: f.update(Handler="other.sh"), "handler")
+
+    def test_only_setting_names_are_reported(self):
+        self.changed_case(
+            "secret", lambda f: f["Environment"]["Variables"].update(API_TOKEN="SECRET-2"), "setting:Environment"
+        )
+        self.assertNotIn("EXTRA", self.result()["error"])
+
+    def test_fingerprint_helpers_hold_no_raw_values(self):
+        key = b"k" * 32
+        config = dict(FakeAws().function)
+        digests = dl.settings_fingerprint(config, key)
+        self.assertNotIn("RevisionId", digests)
+        self.assertNotIn("CodeSha256", digests)
+        self.assertNotIn(SECRET, json.dumps(digests))
+        # 鍵が違えば指紋も違う（値の推測の手掛かりにしない）
+        self.assertNotEqual(digests, dl.settings_fingerprint(config, b"j" * 32))
+        # 揮発性のメタデータだけの違いは同じ指紋
+        other = dict(config, RevisionId="x", LastModified="y", CodeSize=1, LastUpdateStatus="InProgress")
+        self.assertEqual(dl.setting_differences(digests, dl.settings_fingerprint(other, key)), [])
+        self.assertEqual(
+            dl.setting_differences(digests, dl.settings_fingerprint(dict(config, MemorySize=1), key)),
+            ["setting:MemorySize"],
+        )
+
+    def test_every_excluded_metadata_key_is_ignored_and_nothing_else(self):
+        key = b"k" * 32
+        config = dict(FakeAws().function, SnapStart={"ApplyOn": "None", "OptimizationStatus": "Off"})
+        base = dl.settings_fingerprint(config, key)
+        for name in sorted(dl.VOLATILE_CONFIG_KEYS):
+            with self.subTest(name):
+                changed = dict(config, **{name: "changed-value"})
+                self.assertEqual(dl.setting_differences(base, dl.settings_fingerprint(changed, key)), [])
+        snap = dict(config, SnapStart={"ApplyOn": "None", "OptimizationStatus": "On"})
+        self.assertEqual(dl.setting_differences(base, dl.settings_fingerprint(snap, key)), [])
+        snap_apply = dict(config, SnapStart={"ApplyOn": "PublishedVersions", "OptimizationStatus": "Off"})
+        self.assertEqual(dl.setting_differences(base, dl.settings_fingerprint(snap_apply, key)), ["setting:SnapStart"])
+        # 値がnullの項目は、キーがないのと同じ。除外一覧にない未知の項目は比較する
+        self.assertEqual(dl.setting_differences(base, dl.settings_fingerprint(dict(config, Extra=None), key)), [])
+        self.assertEqual(
+            dl.setting_differences(base, dl.settings_fingerprint(dict(config, RuntimeVersionConfig={"A": 1}), key)),
+            ["setting:RuntimeVersionConfig"],
+        )
+
+    def test_unusual_setting_names_are_reported_without_the_name(self):
+        self.assertEqual(dl.setting_differences({"Bad Name!": "a"}, {}), ["setting:unknown"])
+        self.assertEqual(dl.setting_differences({}, {"x" * 65: "a"}), ["setting:unknown"])
 
 
 class PublishedVersionActivation(DeployTestCase):
@@ -1708,6 +1933,177 @@ class TemplatesMatchTheCode(unittest.TestCase):
         self.assertEqual(holders, ["ReadTheDemoFunctionReservedConcurrencyOnly"])
         for forbidden in ("PutFunctionConcurrency", "DeleteFunctionConcurrency", "lambda:*", "Put", "Delete"):
             self.assertNotIn(forbidden, text)
+
+
+class OidcTrustPolicyTemplate(unittest.TestCase):
+    """配布ロールの信頼ポリシーの sub は、認証済みの端末で確認した正確な接頭辞＋ :environment:demo。
+
+    新しいリポジトリのsubは、所有者とリポジトリの数値IDを含む不変の形式になり得る。ワイルドカード・
+    推測・旧形式への黙った戻しはしない。以下の識別子はすべて架空。
+    """
+
+    PREFIX = "repo:example-owner@1000001/example-repo@2000002"  # 架空
+    LEGACY = "repo:example-owner/example-repo"
+    SLUG = "example-owner/example-repo"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.template = (ROOT / "infra" / "cd" / "oidc-trust-policy.json").read_text(encoding="utf-8")
+        cls.bootstrap = (ROOT / "infra" / "cd" / "bootstrap.md").read_text(encoding="utf-8")
+
+    def pattern(self, name):
+        match = re.search(rf"^{name}='(.+)'$", self.bootstrap, re.MULTILINE)
+        self.assertIsNotNone(match, f"{name} が手順書にない")
+        return re.compile(match.group(1))
+
+    def test_template_uses_exactly_the_selected_prefix_and_demo_environment(self):
+        document = json.loads(self.template)
+        condition = document["Statement"][0]["Condition"]
+        self.assertEqual(set(condition), {"StringEquals"})  # StringLike・ワイルドカードの条件は持たない
+        self.assertEqual(
+            condition["StringEquals"]["token.actions.githubusercontent.com:sub"],
+            "<OIDC_SUB_PREFIX>:environment:demo",
+        )
+        self.assertEqual(condition["StringEquals"]["token.actions.githubusercontent.com:aud"], "sts.amazonaws.com")
+        self.assertNotIn("*", self.template)
+        # 古い前提（所有者/リポジトリ名から組み立てる形）に戻らない
+        for old in ("<OWNER>", "<REPO>", "repo:<"):
+            self.assertNotIn(old, self.template)
+
+    def test_substitution_yields_the_exact_subject(self):
+        for prefix in (self.PREFIX, self.LEGACY):
+            substituted = json.loads(self.template.replace("<OIDC_SUB_PREFIX>", prefix))
+            sub = substituted["Statement"][0]["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"]
+            self.assertEqual(sub, f"{prefix}:environment:demo")
+
+    def test_runbook_validation_accepts_only_the_two_exact_forms(self):
+        immutable = self.pattern("OIDC_IMMUTABLE_RE")
+        legacy = self.pattern("OIDC_LEGACY_RE")
+        self.assertIsNotNone(immutable.fullmatch(self.PREFIX))
+        self.assertIsNone(immutable.fullmatch(self.LEGACY))
+        self.assertIsNotNone(legacy.fullmatch(self.LEGACY))
+        self.assertIsNone(legacy.fullmatch(self.PREFIX))
+        for bad in (
+            "repo:*",
+            "repo:example-owner/*",
+            "repo:example-owner@1000001/*",
+            "repo:example-owner@1000001/example-repo",  # リポジトリのIDなし
+            "repo:example-owner/example-repo@2000002",  # 所有者のIDなし
+            "repo:example-owner@x/example-repo@2000002",
+            self.PREFIX + ":environment:demo",  # 接尾辞は含めない
+            self.PREFIX + ":*",
+            "REPLACE_OIDC_SUB_PREFIX",
+            "",
+            self.PREFIX + "\n",
+        ):
+            with self.subTest(bad):
+                self.assertIsNone(immutable.fullmatch(bad))
+                self.assertIsNone(legacy.fullmatch(bad))
+        # 手順書の検証は、接頭辞の所有者・リポジトリ名が REPO_SLUG と一致することも要求する
+        groups = immutable.fullmatch(self.PREFIX).groups()
+        self.assertEqual(f"{groups[0]}/{groups[2]}", self.SLUG)
+
+    def test_runbook_documents_the_authenticated_local_lookup_and_forbids_fallbacks(self):
+        text = self.bootstrap
+        self.assertIn("repos/${REPO_SLUG}/actions/oidc/customization/sub", text)
+        self.assertIn("OIDC_SUB_PREFIX", text)
+        self.assertIn("<OIDC_SUB_PREFIX>", text)
+        self.assertNotIn("<OWNER>/<REPO>", text)
+        self.assertNotIn("repo:<リポジトリ>:environment:demo", text)
+        self.assertNotIn("repo:${REPO_SLUG}:environment:demo", text)  # 旧前提の組み立て
+        self.assertIn("ワイルドカード", text)
+        self.assertIn("CloudShell", text)
+        # 実際のGitHubの応答（Codexの実測）で確認した項目名。未確認という古い記述に戻らない
+        for key in ("use_immutable_subject", "sub_claim_prefix"):
+            self.assertIn(key, text)
+        self.assertNotIn("接頭辞の項目名は未確認", text)
+
+    def runbook_block(self, marker):
+        blocks = [b for b in re.findall(r"```bash\n(.*?)```", self.bootstrap, re.DOTALL) if marker in b]
+        self.assertEqual(len(blocks), 1, marker)
+        return blocks[0]
+
+    def run_prefix_check(self, prefix, slug):
+        """手順書の検証ブロックを、実際のbashで実行する（AWS・ネットワークは使わない）。"""
+        if shutil.which("bash") is None:
+            self.skipTest("bash がない")
+        block = re.sub(r"^OIDC_SUB_PREFIX=.*\n", "", self.runbook_block("OIDC_IMMUTABLE_RE="), count=1, flags=re.M)
+        script = 'set -euo pipefail\ndie() { echo "停止: $*" >&2; exit 1; }\n' + block
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "OIDC_SUB_PREFIX": prefix, "REPO_SLUG": slug}
+        done = subprocess.run(
+            ["bash", "-c", script], env=env, capture_output=True, encoding="utf-8", errors="replace", check=False
+        )
+        return done.returncode
+
+    def test_runbook_bash_check_accepts_only_exact_forms_matching_the_repo_slug(self):
+        self.assertEqual(self.run_prefix_check(self.PREFIX, self.SLUG), 0)
+        self.assertEqual(self.run_prefix_check(self.LEGACY, self.SLUG), 0)
+        bad = {
+            "other-repo-immutable": ("repo:example-owner@1000001/other-repo@2000002", self.SLUG),
+            "other-owner-immutable": ("repo:other-owner@1000001/example-repo@2000002", self.SLUG),
+            "other-repo-legacy": ("repo:example-owner/other-repo", self.SLUG),
+            "other-owner-legacy": ("repo:other-owner/example-repo", self.SLUG),
+            "wildcard": ("repo:example-owner/*", self.SLUG),
+            "wildcard-all": ("repo:*", self.SLUG),
+            "suffix": (self.PREFIX + ":environment:demo", self.SLUG),
+            "no-owner-id": ("repo:example-owner/example-repo@2000002", self.SLUG),
+            "placeholder": ("REPLACE_OIDC_SUB_PREFIX", self.SLUG),
+            "empty": ("", self.SLUG),
+        }
+        for name, (prefix, slug) in bad.items():
+            with self.subTest(name):
+                self.assertNotEqual(self.run_prefix_check(prefix, slug), 0)
+
+    def run_jq_check(self, document, sub):
+        """手順書のjqの検査を、実際のjqで実行する。終了コード0だけが合格（jq -e）。"""
+        jq = shutil.which("jq")
+        if jq is None:
+            self.skipTest("jq がない")
+        match = re.search(
+            r"jq -e --arg sub \"\$\{OIDC_SUB_PREFIX\}:environment:demo\" \\\n  '([^']+)'", self.bootstrap
+        )
+        self.assertIsNotNone(match, "手順書のjqの検査が見つからない")
+        done = subprocess.run(
+            [jq, "-e", "--arg", "sub", sub, match.group(1)],
+            input=json.dumps(document), capture_output=True, encoding="utf-8", check=False,
+        )
+        return done.returncode
+
+    def test_runbook_jq_check_requires_one_statement_with_the_exact_sub(self):
+        sub = f"{self.PREFIX}:environment:demo"
+        good = json.loads(self.template.replace("<OIDC_SUB_PREFIX>", self.PREFIX))
+        self.assertEqual(self.run_jq_check(good, sub), 0)
+        # 確認した接頭辞と違う・接尾辞が違う場合は不合格
+        self.assertNotEqual(self.run_jq_check(good, f"{self.LEGACY}:environment:demo"), 0)
+        self.assertNotEqual(self.run_jq_check(good, f"{self.PREFIX}:environment:demo2"), 0)
+        self.assertNotEqual(self.run_jq_check(good, f"{self.PREFIX}:*"), 0)
+        # 文が2件（広い許可の追加）は不合格。lengthとsubの照合が別々に効く
+        two = json.loads(json.dumps(good))
+        two["Statement"].append(json.loads(json.dumps(good["Statement"][0])))
+        self.assertNotEqual(self.run_jq_check(two, sub), 0)
+        # StringEquals以外の条件演算子の追加（StringLikeなど）は不合格
+        like = json.loads(json.dumps(good))
+        like["Statement"][0]["Condition"]["StringLike"] = {"token.actions.githubusercontent.com:sub": "repo:*"}
+        self.assertNotEqual(self.run_jq_check(like, sub), 0)
+        # subが違う文書は不合格
+        wrong = json.loads(json.dumps(good))
+        wrong["Statement"][0]["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"] = "repo:x:environment:demo"
+        self.assertNotEqual(self.run_jq_check(wrong, sub), 0)
+
+    def test_public_docs_hold_no_real_account_ids(self):
+        # 12桁の数字は、公開されているアダプタのレイヤーの所有アカウントだけ許す（実在の利用者のアカウントIDは書かない）
+        allowed = {"753240598075"}
+        for name in ("infra/cd/bootstrap.md", "infra/cd/oidc-trust-policy.json", "docs/development-workflow.md"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            found = set(re.findall(r"(?<![0-9A-Za-z])[0-9]{12}(?![0-9A-Za-z])", text))
+            with self.subTest(name):
+                self.assertLessEqual(found, allowed)
+
+    def test_public_files_hold_only_the_fictional_example(self):
+        # 実在の識別子は書かない。例は架空の所有者・リポジトリ・IDだけ
+        for text in (self.bootstrap, self.template):
+            for match in re.finditer(r"repo:[A-Za-z0-9._-]+@[0-9]+/[A-Za-z0-9._-]+@[0-9]+", text):
+                self.assertEqual(match.group(0), self.PREFIX)
 
 
 class ReservedConcurrency(DeployTestCase):

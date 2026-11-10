@@ -7,6 +7,15 @@ AWS CLI（`aws lambda ...`）をsubprocessで呼ぶ。初回構築・IAM・関�
 検証する。公開URLはCloudFrontだけで、関数URLへの直接の公開はフォールバックにもしない。
 予約済み同時実行数は読み取り（get-function-concurrency）でちょうど1であることを確認するだけで、
 設定・削除は自動ではしない（違えば変更の前に止まる）。
+コード更新は検証時に読んだRevisionIdを条件にし、更新の完了を待った後に読み直した設定を、検証時の設定の
+指紋（環境変数を含む版に固定される設定全体。揮発性のメタデータは除く）と照合する。版に固定される設定・
+コードが検証時と違えば検出して発行しない。一致し、コードのハッシュが期待どおりで、State=Active・
+LastUpdateStatus=Successful（どちらも明示的な値が必須）、完了後のRevisionIdが空でないときだけ、その完了後の
+RevisionIdとコードのハッシュを条件に版を発行する（読んだ後に関数が変われば発行は拒否される）。更新の応答の
+RevisionIdは完了後と一致するとは限らず（実際のCDで不一致を観測。通常の遷移か同時期の手動変更かは未確定）、
+比較にも発行の条件にも使わない。ただし、読み直しの前に別の操作があっても、版に固定される設定・コードが
+検証時と同一（元に戻された変更を含む）なら区別できず、他者の操作が無かったとは証明できない。比較の対象は
+除外一覧（VOLATILE_CONFIG_KEYS）以外のすべての項目（未知の項目を含む）で、未知のAWSの差異は閉じて止まる。
 変更の前にすべて検証し（fail closed）、変更後は
 スモーク確認に失敗したら、こちらが切り替えたエイリアスだけを記録した直前の正常版へ戻す。
 結果は常に --result-file のJSONへ書く。Lambdaの設定全体や資格情報は出力・保存しない。
@@ -22,6 +31,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -118,8 +128,12 @@ def parse_description(text: object) -> dict[str, str] | None:
     return match.groupdict() if match else None
 
 
-def config_problems(config: dict) -> list[str]:
-    """検査対象の設定（関数・版の共通）。環境変数の値は保持せず、問題の名前だけ返す。"""
+def config_problems(config: dict, *, require_status: bool = False) -> list[str]:
+    """検査対象の設定（関数・版の共通）。環境変数の値は保持せず、問題の名前だけ返す。
+
+    require_status=True なら、State=Active・LastUpdateStatus=Successful の明示的な値を必須にする
+    （キーがない・null は問題）。更新の完了後の最終確認で使う。既定は、キーがなければ許す。
+    """
     variables = (config.get("Environment") or {}).get("Variables") or {}
     layers = [layer.get("Arn") for layer in config.get("Layers") or []]
     problems = []
@@ -135,11 +149,72 @@ def config_problems(config: dict) -> list[str]:
         problems.append("execWrapper")
     if variables.get("PORT") != ADAPTER_PORT:
         problems.append("port")
-    if config.get("State") not in (None, "Active"):
+    allowed_state = ("Active",) if require_status else (None, "Active")
+    allowed_update = ("Successful",) if require_status else (None, "Successful")
+    if config.get("State") not in allowed_state:
         problems.append("state")
-    if config.get("LastUpdateStatus") not in (None, "Successful"):
+    if config.get("LastUpdateStatus") not in allowed_update:
         problems.append("lastUpdateStatus")
     return problems
+
+
+# 版の発行で固定される設定の比較から外す、揮発性・状態・コード由来のメタデータ（AWSの
+# GetFunctionConfiguration の項目名。プロジェクト独自の正規化で、公式がこの一覧を定めているわけではない）。
+# コード更新の完了で正当に変わり得る（RevisionId・LastModified・CodeSize・CodeSha256・状態の遷移・
+# 署名情報）ものだけを外し、それ以外の項目（未知の項目を含む）はすべて比較する（fail closed）。
+# 比較する項目は、環境変数（検査対象外の変数も）・実行ロール・メモリ・タイムアウト・説明・VPC・KMS・
+# トレース・レイヤー・一時ストレージ・ファイルシステム・アーキテクチャ・ランタイムなど。
+VOLATILE_CONFIG_KEYS = frozenset(
+    {
+        "RevisionId",
+        "CodeSha256",
+        "CodeSize",
+        "LastModified",
+        "Version",
+        "State",
+        "StateReason",
+        "StateReasonCode",
+        "LastUpdateStatus",
+        "LastUpdateStatusReason",
+        "LastUpdateStatusReasonCode",
+        "SigningProfileVersionArn",
+        "SigningJobArn",
+        "ResponseMetadata",
+    }
+)
+SETTING_NAME_RE = re.compile(r"[A-Za-z0-9]{1,64}")
+
+
+def versionable_settings(config: dict) -> dict[str, object]:
+    """関数設定から、揮発性のメタデータとnullを除いた比較用の写し（メモリ内だけで使う）。"""
+    view = {
+        name: value
+        for name, value in config.items()
+        if name not in VOLATILE_CONFIG_KEYS and value is not None
+    }
+    snap = view.get("SnapStart")
+    if isinstance(snap, dict):  # 最適化の状態は発行・更新の進行で変わる状態の項目
+        view["SnapStart"] = {k: v for k, v in snap.items() if k != "OptimizationStatus"}
+    return view
+
+
+def settings_fingerprint(config: dict, key: bytes) -> dict[str, str]:
+    """比較用の設定の項目ごとの指紋（HMAC-SHA-256。キーはプロセスごとの乱数でメモリ内だけ）。
+
+    環境変数などの値そのものは保持・出力しない。キーを保存しないため、結果やログから値を推測できない。
+    """
+    return {
+        name: hmac.new(
+            key, json.dumps(value, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256
+        ).hexdigest()
+        for name, value in versionable_settings(config).items()
+    }
+
+
+def setting_differences(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """指紋が違う（または片方にしかない）項目の名前だけを返す（値は含めない）。"""
+    names = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
+    return [f"setting:{name}" if SETTING_NAME_RE.fullmatch(name) else "setting:unknown" for name in names]
 
 
 @dataclass(frozen=True)
@@ -638,6 +713,9 @@ class Deployer:
         self.alias_rev: str | None = None  # こちらの最新の更新が返したRevisionId
         self.switched = False
         self.function_revision: str | None = None  # 検証時の設定のRevisionId
+        # 検証時の設定の項目ごとの指紋（値は持たない）。コード更新の完了後の設定と比べる
+        self._fingerprint_key = os.urandom(32)
+        self.settings_baseline: dict[str, str] | None = None
         self.already_current = False
         self.result = Result(
             result_file,
@@ -807,6 +885,9 @@ class Deployer:
         revision = config.get("RevisionId")
         if not isinstance(revision, str) or not revision:
             problems.append("revisionId")
+        if not problems:
+            # 版に固定される設定全体の項目ごとの指紋。コード更新の完了後の設定と比べる（値は保持しない）
+            self.settings_baseline = settings_fingerprint(config, self._fingerprint_key)
         del config  # 環境変数を保持しない
         if problems:
             raise DeployError("関数設定が期待と一致しません: " + ",".join(problems))
@@ -891,6 +972,7 @@ class Deployer:
     def mutate(self) -> None:
         assert self.prev is not None and self.function_revision is not None
         prev = self.prev
+        assert self.settings_baseline is not None
         self.result.update(
             deployment="in-progress",
             recoveryNote=(
@@ -909,21 +991,29 @@ class Deployer:
             "--revision-id",
             self.function_revision,
         )
-        own_revision = updated.get("RevisionId")
         if updated.get("CodeSha256") != self.code_sha:
             raise DeployError("アップロード後のCodeSha256がmanifestと一致しません")
-        if not isinstance(own_revision, str) or not own_revision:
-            raise DeployError("コード更新の応答にRevisionIdがありません")
+        # 更新の応答のRevisionIdは、完了後のRevisionIdと同じとは限らない（実際のCDの実行で、完了後は
+        # 別の値だった。通常の遷移か、同時期の手動変更かは未確定）。応答の値は発行の条件にも比較にも使わない。
 
         self.result.update(stage="wait-update")
         self._lambda("wait", "function-updated-v2", "--function-name", self.function)
         current = self._lambda("get-function-configuration", "--function-name", self.function)
-        problems = config_problems(current)
+        # 完了後の最終確認は、State=Active・LastUpdateStatus=Successful の明示的な値を必須にする
+        problems = config_problems(current, require_status=True)
         if current.get("CodeSha256") != self.code_sha:
             problems.append("codeSha256")
-        # こちらの更新のRevisionIdのまま（他者の変更が入っていない）ことを、発行の条件にする
-        if current.get("RevisionId") != own_revision:
+        # 更新の完了後に読み直したRevisionIdを、発行の条件にする。読んだ後に関数が変われば、発行が拒否される
+        completed_revision = current.get("RevisionId")
+        if not isinstance(completed_revision, str) or not completed_revision:
             problems.append("revisionId")
+        # 検証時に捕捉した設定の指紋と比べる。コード更新の完了で変わるメタデータ以外が違えば発行しない
+        # （別の操作で版に固定される設定が変わっていれば検出する）。一方、読み直しの前の操作でも、設定・コードが
+        # 検証時と同一（元に戻された変更を含む）なら区別できず、他者の操作が無かったとは証明できない。
+        assert self.settings_baseline is not None
+        problems += setting_differences(
+            self.settings_baseline, settings_fingerprint(current, self._fingerprint_key)
+        )
         del current
         if problems:
             raise DeployError(
@@ -938,7 +1028,7 @@ class Deployer:
             "--code-sha256",
             self.code_sha,
             "--revision-id",
-            own_revision,
+            completed_revision,
             "--description",
             make_description(self.source_sha, self.zip_hex, self.run_id),
         )
