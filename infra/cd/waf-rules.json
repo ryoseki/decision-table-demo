@@ -18,40 +18,6 @@
         "CloudWatchMetricsEnabled": true,
         "MetricName": "per-ip-rate-limit"
       }
-    },
-    {
-      "Name": "global-rate-limit",
-      "Priority": 1,
-      "Statement": {
-        "RateBasedStatement": {
-          "Limit": 1500,
-          "EvaluationWindowSec": 300,
-          "AggregateKeyType": "CONSTANT",
-          "ScopeDownStatement": {
-            "ByteMatchStatement": {
-              "SearchString": "/",
-              "FieldToMatch": {
-                "UriPath": {}
-              },
-              "TextTransformations": [
-                {
-                  "Priority": 0,
-                  "Type": "NONE"
-                }
-              ],
-              "PositionalConstraint": "STARTS_WITH"
-            }
-          }
-        }
-      },
-      "Action": {
-        "Block": {}
-      },
-      "VisibilityConfig": {
-        "SampledRequestsEnabled": true,
-        "CloudWatchMetricsEnabled": true,
-        "MetricName": "global-rate-limit"
-      }
     }
   ]
 }

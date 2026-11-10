@@ -44,7 +44,14 @@ WAF_ID = "11111111-2222-3333-4444-555555555555"
 WAF_ARN = f"arn:aws:wafv2:us-east-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"
 SECRET = "SUPER-SECRET-ENV-VALUE"
 OLD_ZIP = hashlib.sha256(b"previous zip").hexdigest()
-MUTATING = {"update-function-code", "publish-version", "update-alias"}
+MUTATING = {
+    "update-function-code",
+    "publish-version",
+    "update-alias",
+    # 同時実行数は読み取りだけ。書き込みが呼ばれたら変更として数える（偽物も受け付けない）
+    "put-function-concurrency",
+    "delete-function-concurrency",
+}
 
 
 def code_sha(hex_digest: str) -> str:
@@ -123,7 +130,50 @@ def visibility(name: str) -> dict:
     return {"SampledRequestsEnabled": True, "CloudWatchMetricsEnabled": True, "MetricName": name}
 
 
+def make_ip_rule(priority: int = 0) -> dict:
+    """必須の規則: 実際の接続元IPごと 300件/300秒、超過はBlock（get-web-aclの形）。"""
+    return {
+        "Name": "per-ip",
+        "Priority": priority,
+        "Statement": {
+            "RateBasedStatement": {
+                "Limit": 300,
+                "EvaluationWindowSec": 300,
+                "AggregateKeyType": "IP",
+            }
+        },
+        "Action": {"Block": {}},
+        "VisibilityConfig": visibility("per-ip"),
+    }
+
+
+def make_global_rule(priority: int = 1) -> dict:
+    """要件から外した全体（CONSTANT）の規則。受け入れてはいけない未対応の規則として使う。"""
+    return {
+        "Name": "global",
+        "Priority": priority,
+        "Statement": {
+            "RateBasedStatement": {
+                "Limit": 1500,
+                "EvaluationWindowSec": 300,
+                "AggregateKeyType": "CONSTANT",
+                "ScopeDownStatement": {
+                    "ByteMatchStatement": {
+                        "SearchString": "Lw==",
+                        "FieldToMatch": {"UriPath": {}},
+                        "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                        "PositionalConstraint": "STARTS_WITH",
+                    }
+                },
+            }
+        },
+        "Action": {"Block": {}},
+        "VisibilityConfig": visibility("global"),
+    }
+
+
 def make_web_acl() -> dict:
+    """基準のWeb ACL: 必須のIP規則1件だけ（観測グループは各テストで足す）。"""
     return {
         "LockToken": "token",
         "WebACL": {
@@ -132,42 +182,7 @@ def make_web_acl() -> dict:
             "ARN": WAF_ARN,
             "DefaultAction": {"Allow": {}},
             "VisibilityConfig": visibility("demo-acl"),
-            "Rules": [
-                {
-                    "Name": "per-ip",
-                    "Priority": 0,
-                    "Statement": {
-                        "RateBasedStatement": {
-                            "Limit": 300,
-                            "EvaluationWindowSec": 300,
-                            "AggregateKeyType": "IP",
-                        }
-                    },
-                    "Action": {"Block": {}},
-                    "VisibilityConfig": visibility("per-ip"),
-                },
-                {
-                    "Name": "global",
-                    "Priority": 1,
-                    "Statement": {
-                        "RateBasedStatement": {
-                            "Limit": 1500,
-                            "EvaluationWindowSec": 300,
-                            "AggregateKeyType": "CONSTANT",
-                            "ScopeDownStatement": {
-                                "ByteMatchStatement": {
-                                    "SearchString": "Lw==",  # CLIのJSON出力ではblobはbase64
-                                    "FieldToMatch": {"UriPath": {}},
-                                    "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
-                                    "PositionalConstraint": "STARTS_WITH",
-                                }
-                            },
-                        }
-                    },
-                    "Action": {"Block": {}},
-                    "VisibilityConfig": visibility("global"),
-                },
-            ],
+            "Rules": [make_ip_rule()],
         },
     }
 
@@ -282,6 +297,8 @@ class FakeAws:
         self.oac = make_oac()
         self.acl = make_web_acl()
         self.policy_doc = make_policy_document()
+        # get-function-concurrency の応答（未設定なら実APIはキーを返さない想定）
+        self.concurrency = {"ReservedConcurrentExecutions": 1}
 
     # テストから設定を書き換えやすくする入口
     @property
@@ -356,6 +373,10 @@ class FakeAws:
             return json.loads(json.dumps(self.acl))
         if op == "get-layer-version-by-arn":
             return dict(self.layer)
+        if op == "get-function-concurrency":
+            # 修飾子なしの対象関数だけ（版・エイリアスの同時実行数は読まない）
+            assert args[0] == "lambda" and opts == {"--function-name": FUNCTION}
+            return json.loads(json.dumps(self.concurrency))
         if op == "get-alias":
             return json.loads(json.dumps(self.alias))
         if op == "get-function-configuration":
@@ -995,12 +1016,8 @@ class PublishedVersionActivation(DeployTestCase):
         self.assertIn("wait", self.aws.ops())
 
 
-def rate(aws, index):
+def rate(aws, index=0):
     return aws.rules[index]["Statement"]["RateBasedStatement"]
-
-
-def byte_match(aws):
-    return rate(aws, 1)["ScopeDownStatement"]["ByteMatchStatement"]
 
 
 def oac_config(aws):
@@ -1017,11 +1034,25 @@ def statement_condition(aws, index):
 
 
 def duplicate_ip_rule(aws):
-    aws.rules[1] = json.loads(json.dumps(aws.rules[0]))
+    aws.rules.append({**json.loads(json.dumps(aws.rules[0])), "Name": "per-ip-2", "Priority": 1})
 
 
-def extra_rule(aws):
-    aws.rules.append({**json.loads(json.dumps(aws.rules[0])), "Priority": 2})
+def unknown_count_rule(priority: int = 1) -> dict:
+    """未知の独自規則（Countで観測だけ）。既知のAWSマネージド規則グループではないので拒否する。"""
+    return {
+        "Name": "custom-count",
+        "Priority": priority,
+        "Statement": {
+            "ByteMatchStatement": {
+                "SearchString": "/admin",
+                "FieldToMatch": {"UriPath": {}},
+                "TextTransformations": [{"Priority": 0, "Type": "NONE"}],
+                "PositionalConstraint": "STARTS_WITH",
+            }
+        },
+        "Action": {"Count": {}},
+        "VisibilityConfig": visibility("custom-count"),
+    }
 
 
 OBSERVER_GROUPS = (
@@ -1043,7 +1074,7 @@ def observer(group: str, priority: int, vendor: str = "AWS") -> dict:
 
 
 def add_observers(aws, groups=OBSERVER_GROUPS, first=True):
-    """観測グループを足す。first=True なら必須の2規則より前の優先順位（Countは終端しないので可）。"""
+    """観測グループを足す。first=True なら必須のIP規則より前の優先順位（Countは終端しないので可）。"""
     if first:
         for rule in aws.rules:
             rule["Priority"] += len(groups)
@@ -1170,33 +1201,52 @@ BOUNDARY_CASES = [
     ),
     ("origin-group", lambda a: a.dist_config.update(OriginGroups={"Quantity": 1, "Items": [{"Id": "g"}]}), "originGroups"),
     ("default-root-object", lambda a: a.dist_config.update(DefaultRootObject="index.html"), "defaultRootObject"),
-    # WAF
-    ("waf-weak-ip-limit", lambda a: rate(a, 0).update(Limit=3000), "webAclRules"),
-    ("waf-weak-global-limit", lambda a: rate(a, 1).update(Limit=100000), "webAclRules"),
-    ("waf-window", lambda a: rate(a, 0).update(EvaluationWindowSec=600), "webAclRules"),
+    # WAF: 必須のIP規則（接続元IP・300件/300秒・Block）はちょうど1件。値・形が少しでも違えば拒否
+    ("waf-weak-ip-limit", lambda a: rate(a).update(Limit=3000), "webAclRules"),
+    ("waf-ip-limit-301", lambda a: rate(a).update(Limit=301), "webAclRules"),
+    ("waf-ip-limit-299", lambda a: rate(a).update(Limit=299), "webAclRules"),
+    ("waf-ip-limit-string", lambda a: rate(a).update(Limit="300"), "webAclRules"),
+    ("waf-ip-limit-float", lambda a: rate(a).update(Limit=300.0), "webAclRules"),
+    ("waf-ip-limit-missing", lambda a: rate(a).pop("Limit"), "webAclRules"),
+    ("waf-window", lambda a: rate(a).update(EvaluationWindowSec=600), "webAclRules"),
+    ("waf-window-60", lambda a: rate(a).update(EvaluationWindowSec=60), "webAclRules"),
+    ("waf-window-missing", lambda a: rate(a).pop("EvaluationWindowSec"), "webAclRules"),
+    ("waf-ip-key-constant", lambda a: rate(a).update(AggregateKeyType="CONSTANT"), "webAclRules"),
+    ("waf-ip-key-custom", lambda a: rate(a).update(AggregateKeyType="CUSTOM_KEYS", CustomKeys=[{"IP": {}}]), "webAclRules"),
     ("waf-count-action", lambda a: a.rules[0].update(Action={"Count": {}}), "webAclRules"),
-    ("waf-allow-action", lambda a: a.rules[1].update(Action={"Allow": {}}), "webAclRules"),
+    ("waf-allow-action", lambda a: a.rules[0].update(Action={"Allow": {}}), "webAclRules"),
+    ("waf-challenge-action", lambda a: a.rules[0].update(Action={"Challenge": {}}), "webAclRules"),
+    ("waf-captcha-action", lambda a: a.rules[0].update(Action={"Captcha": {}}), "webAclRules"),
+    ("waf-action-missing", lambda a: a.rules[0].pop("Action"), "webAclRules"),
     ("waf-custom-response", lambda a: a.rules[0].update(Action={"Block": {"CustomResponse": {"ResponseCode": 429}}}), "webAclRules"),
     ("waf-override-action", lambda a: a.rules[0].update(OverrideAction={"Count": {}}), "webAclRules"),
-    ("waf-ip-scope-down", lambda a: rate(a, 0).update(ScopeDownStatement={"NotStatement": {}}), "webAclRules"),
+    ("waf-ip-rule-labels", lambda a: a.rules[0].update(RuleLabels=[{"Name": "demo:label"}]), "webAclRules"),
+    ("waf-ip-rule-unknown-key", lambda a: a.rules[0].update(CaptchaConfig={}), "webAclRules"),
+    ("waf-ip-scope-down", lambda a: rate(a).update(ScopeDownStatement={"NotStatement": {}}), "webAclRules"),
     (
         "waf-forwarded-ip",
-        lambda a: rate(a, 0).update(AggregateKeyType="FORWARDED_IP", ForwardedIPConfig={"HeaderName": "X-Forwarded-For"}),
+        lambda a: rate(a).update(AggregateKeyType="FORWARDED_IP", ForwardedIPConfig={"HeaderName": "X-Forwarded-For"}),
         "webAclRules",
     ),
-    ("waf-global-scope-removed", lambda a: rate(a, 1).pop("ScopeDownStatement"), "webAclRules"),
-    (
-        "waf-global-scope-exclusion",
-        lambda a: rate(a, 1).update(ScopeDownStatement={"NotStatement": {"Statement": {"ByteMatchStatement": {}}}}),
-        "webAclRules",
-    ),
-    ("waf-global-not-starts-with", lambda a: byte_match(a).update(PositionalConstraint="EXACTLY"), "webAclRules"),
-    ("waf-global-other-path", lambda a: byte_match(a).update(SearchString="/api"), "webAclRules"),
-    ("waf-global-transform", lambda a: byte_match(a).update(TextTransformations=[{"Priority": 0, "Type": "LOWERCASE"}]), "webAclRules"),
-    ("waf-global-other-field", lambda a: byte_match(a).update(FieldToMatch={"QueryString": {}}), "webAclRules"),
-    ("waf-extra-rule", extra_rule, "webAclRules"),
-    ("waf-single-rule", lambda a: a.rules.pop(), "webAclRules"),
+    ("waf-ip-forwarded-config-with-ip-key", lambda a: rate(a).update(ForwardedIPConfig={"HeaderName": "X-Forwarded-For"}), "webAclRules"),
+    ("waf-ip-statement-wrapped", lambda a: a.rules[0]["Statement"].update(NotStatement={}), "webAclRules"),
+    ("waf-no-rules", lambda a: a.rules.clear(), "webAclRules"),
+    ("waf-rules-not-a-list", lambda a: a.acl["WebACL"].update(Rules={"per-ip": a.rules[0]}), "webAclRules"),
     ("waf-duplicate-ip-rule", duplicate_ip_rule, "webAclRules"),
+    # 要件から外した全体（CONSTANT）の規則は、IP規則があっても・件数が上限内でも受け入れない
+    ("waf-unsupported-global-rule-added", lambda a: a.rules.append(make_global_rule()), "webAclRules"),
+    ("waf-unsupported-global-rule-instead-of-ip", lambda a: a.rules.__setitem__(0, make_global_rule(0)), "webAclRules"),
+    (
+        "waf-unsupported-global-rule-with-two-observers",
+        lambda a: (add_observers(a, OBSERVER_GROUPS[1:], first=False), a.rules.append(make_global_rule(3))),
+        "webAclRules",
+    ),
+    (
+        "waf-unsupported-global-rule-with-three-observers",
+        lambda a: (add_observers(a, first=False), a.rules.append(make_global_rule(4))),
+        "webAclRules",
+    ),
+    ("waf-unknown-count-rule", lambda a: a.rules.append(unknown_count_rule()), "webAclRules"),
     # 観測専用のマネージド規則グループ（Count）。既知の3つ以外・Count以外・絞り込みや上書きは拒否
     ("waf-observer-unknown-group", with_observers(lambda r: observer_group(r).update(Name="AWSManagedRulesBotControlRuleSet")), "webAclRules"),
     ("waf-observer-unknown-group-alone", lambda a: a.rules.append(observer("AWSManagedRulesAdminProtectionRuleSet", 2)), "webAclRules"),
@@ -1209,7 +1259,7 @@ BOUNDARY_CASES = [
     ("waf-observer-name-number", with_observers(lambda r: observer_group(r).update(Name=1)), "webAclRules"),
     ("waf-observer-vendor-list", with_observers(lambda r: observer_group(r).update(VendorName=["AWS"])), "webAclRules"),
     ("waf-observer-duplicate", lambda a: add_observers(a, (OBSERVER_GROUPS[1], OBSERVER_GROUPS[1])), "webAclRules"),
-    ("waf-more-than-five-rules", lambda a: add_observers(a, (*OBSERVER_GROUPS, OBSERVER_GROUPS[0])), "webAclRules"),
+    ("waf-more-than-four-rules", lambda a: add_observers(a, (*OBSERVER_GROUPS, OBSERVER_GROUPS[0])), "webAclRules"),
     ("waf-observer-override-none", with_observers(lambda r: r.update(OverrideAction={"None": {}})), "webAclRules"),
     ("waf-observer-override-missing", with_observers(lambda r: r.pop("OverrideAction")), "webAclRules"),
     (
@@ -1230,19 +1280,20 @@ BOUNDARY_CASES = [
     ("waf-observer-version", with_observers(lambda r: observer_group(r).update(Version="Version_1.0")), "webAclRules"),
     ("waf-observer-rule-labels", with_observers(lambda r: r.update(RuleLabels=[{"Name": "demo:label"}])), "webAclRules"),
     ("waf-observer-other-statement", with_observers(lambda r: r.update(Statement={"RuleGroupReferenceStatement": {"ARN": "arn:example"}})), "webAclRules"),
-    # 観測グループがあっても、必須の2規則が欠けた・変わったら拒否（観測グループで代わりにはならない）
+    # 観測グループがあっても、必須のIP規則が欠けた・変わったら拒否（観測グループで代わりにはならない）
     ("waf-observers-without-ip-rate", lambda a: (add_observers(a, first=False), a.rules.pop(0)), "webAclRules"),
-    ("waf-observers-without-global-rate", lambda a: (add_observers(a, first=False), a.rules.pop(1)), "webAclRules"),
     ("waf-observers-only", lambda a: (add_observers(a), a.rules.__delitem__(slice(3, None))), "webAclRules"),
-    ("waf-observers-with-weak-ip-limit", lambda a: (add_observers(a, first=False), rate(a, 0).update(Limit=3000)), "webAclRules"),
-    ("waf-observers-with-global-window", lambda a: (add_observers(a, first=False), rate(a, 1).update(EvaluationWindowSec=600)), "webAclRules"),
-    ("waf-observers-with-count-global", lambda a: (add_observers(a, first=False), a.rules[1].update(Action={"Count": {}})), "webAclRules"),
+    ("waf-observers-with-weak-ip-limit", lambda a: (add_observers(a, first=False), rate(a).update(Limit=3000)), "webAclRules"),
+    ("waf-observers-with-ip-window", lambda a: (add_observers(a, first=False), rate(a).update(EvaluationWindowSec=600)), "webAclRules"),
+    ("waf-observers-with-count-ip", lambda a: (add_observers(a, first=False), a.rules[0].update(Action={"Count": {}})), "webAclRules"),
+    ("waf-observers-with-forwarded-ip", lambda a: (add_observers(a, first=False), rate(a).update(AggregateKeyType="FORWARDED_IP")), "webAclRules"),
+    ("waf-observers-with-duplicate-ip", lambda a: (add_observers(a, OBSERVER_GROUPS[:2], first=False), duplicate_ip_rule(a)), "webAclRules"),
     (
         "waf-rate-rule-as-count-override",
         lambda a: (add_observers(a, first=False), a.rules[0].pop("Action"), a.rules[0].update(OverrideAction={"Count": {}})),
         "webAclRules",
     ),
-    # Firewall Managerの前処理・後処理の規則グループ、管理下のACLは、期待の2規則より前に迂回し得るため拒否
+    # Firewall Managerの前処理・後処理の規則グループ、管理下のACLは、必須のIP規則より前に迂回し得るため拒否
     ("waf-firewall-manager-managed", lambda a: a.acl["WebACL"].update(ManagedByFirewallManager=True), "webAclFirewallManager"),
     (
         "waf-firewall-manager-pre-process",
@@ -1387,7 +1438,9 @@ class PublicPathBoundaries(DeployTestCase):
             )
 
         variants = [
-            ("plain-slash", lambda a: byte_match(a).update(SearchString="/")),
+            ("ip-rule-only-is-the-baseline", lambda a: None),
+            ("ip-rule-empty-rule-labels", lambda a: a.rules[0].update(RuleLabels=[])),
+            ("ip-rule-other-name-and-priority", lambda a: a.rules[0].update(Name="rate-by-ip", Priority=7)),
             ("https-only-viewer", lambda a: a.behavior.update(ViewerProtocolPolicy="https-only")),
             ("method-order", lambda a: a.behavior["AllowedMethods"].update(Items=["OPTIONS", "HEAD", "GET"])),
             (
@@ -1422,17 +1475,18 @@ class PublicPathBoundaries(DeployTestCase):
                 lambda a: a.dist_config.update(ContinuousDeploymentPolicyId="", Staging=False),
             ),
             ("deny-is-ignored", deny_statement),
-            ("rule-order", lambda a: a.rules.reverse()),
-            # 必須の2規則＋既知の観測グループ（Count）0〜3件。優先順位は前でも後でもよい（Countは終端しない）
-            ("observers-all-three-before-rates", add_observers),
-            ("observers-all-three-after-rates", lambda a: add_observers(a, first=False)),
+            ("rule-order", lambda a: (add_observers(a, first=False), a.rules.reverse())),
+            # 必須のIP規則1件＋既知の観測グループ（Count）0〜3件（合計1〜4件）。
+            # 優先順位は前でも後でもよい（Countは終端しない）
+            ("observers-all-three-before-ip-rule", add_observers),
+            ("observers-all-three-after-ip-rule", lambda a: add_observers(a, first=False)),
             ("observer-ip-reputation-only", lambda a: add_observers(a, OBSERVER_GROUPS[:1])),
             ("observer-common-only", lambda a: add_observers(a, OBSERVER_GROUPS[1:2])),
             ("observer-known-bad-inputs-only", lambda a: add_observers(a, OBSERVER_GROUPS[2:])),
             ("observers-two", lambda a: add_observers(a, OBSERVER_GROUPS[1:])),
             (
-                "observers-shuffled-with-rates",
-                lambda a: (add_observers(a), a.rules.insert(1, a.rules.pop(4))),
+                "observers-shuffled-with-ip-rule",
+                lambda a: (add_observers(a), a.rules.insert(1, a.rules.pop(3))),
             ),
             (
                 "observer-empty-optional-lists",
@@ -1526,27 +1580,40 @@ class RunAwsRegions(unittest.TestCase):
 
 
 class WebAclRuleClassification(unittest.TestCase):
-    """必須の2規則（classify_rule）と観測グループ（classify_observer）は互いの形を受け入れない。"""
+    """必須のIP規則（ip_rate_rule_ok）と観測グループ（classify_observer）は互いの形を受け入れない。"""
 
     def setUp(self):
-        self.ip, self.global_rule = make_web_acl()["WebACL"]["Rules"]
+        (self.ip,) = make_web_acl()["WebACL"]["Rules"]
+        self.global_rule = make_global_rule()
 
-    def test_mandatory_rate_rules_are_still_classified_by_rate(self):
-        self.assertEqual(dl.classify_rule(self.ip), "ip")
-        self.assertEqual(dl.classify_rule(self.global_rule), "global")
+    def test_ip_rule_is_the_only_accepted_rate_rule(self):
+        self.assertTrue(dl.ip_rate_rule_ok(self.ip))
         self.assertIsNone(dl.classify_observer(self.ip))
+        # 要件から外した全体（CONSTANT）の規則は、どちらの判定でも受け入れない
+        self.assertFalse(dl.ip_rate_rule_ok(self.global_rule))
         self.assertIsNone(dl.classify_observer(self.global_rule))
+
+    def test_obsolete_global_rule_helpers_are_removed(self):
+        for name in ("GLOBAL_RATE_LIMIT", "scope_down_ok", "classify_rule"):
+            with self.subTest(name):
+                self.assertFalse(hasattr(dl, name))
+
+    def test_bool_is_not_accepted_as_a_number(self):
+        rule = json.loads(json.dumps(self.ip))
+        rule["Statement"]["RateBasedStatement"]["EvaluationWindowSec"] = True
+        self.assertFalse(dl.ip_rate_rule_ok(rule))
 
     def test_known_observers_are_not_rate_rules(self):
         for group in OBSERVER_GROUPS:
             with self.subTest(group):
                 rule = observer(group, 2)
                 self.assertEqual(dl.classify_observer(rule), group)
-                self.assertIsNone(dl.classify_rule(rule))
+                self.assertFalse(dl.ip_rate_rule_ok(rule))
 
     def test_allowed_observers_are_exactly_the_three_known_groups(self):
         self.assertEqual(dl.OBSERVER_GROUPS, frozenset(OBSERVER_GROUPS))
-        self.assertEqual(dl.WEB_ACL_MAX_RULES, 2 + len(OBSERVER_GROUPS))
+        self.assertEqual(dl.WEB_ACL_MAX_RULES, 1 + len(OBSERVER_GROUPS))
+        self.assertEqual(dl.WEB_ACL_MAX_RULES, 4)
 
     def test_malformed_group_names_are_rejected_without_raising(self):
         for bad in (["AWSManagedRulesCommonRuleSet"], {"a": 1}, None, 1, True):
@@ -1554,15 +1621,21 @@ class WebAclRuleClassification(unittest.TestCase):
                 rule = observer(OBSERVER_GROUPS[1], 2)
                 rule["Statement"]["ManagedRuleGroupStatement"]["Name"] = bad
                 self.assertIsNone(dl.classify_observer(rule))
-                self.assertFalse(dl.web_acl_rules_ok([self.ip, self.global_rule, rule]))
+                self.assertFalse(dl.web_acl_rules_ok([self.ip, rule]))
 
     def test_rule_list_bounds(self):
-        observers = [observer(g, 2 + i) for i, g in enumerate(OBSERVER_GROUPS)]
-        self.assertTrue(dl.web_acl_rules_ok([self.ip, self.global_rule]))
-        self.assertTrue(dl.web_acl_rules_ok([self.ip, self.global_rule, *observers]))
-        self.assertFalse(dl.web_acl_rules_ok([self.ip, self.global_rule, *observers, observers[0]]))
+        observers = [observer(g, 1 + i) for i, g in enumerate(OBSERVER_GROUPS)]
+        self.assertTrue(dl.web_acl_rules_ok([self.ip]))
+        self.assertTrue(dl.web_acl_rules_ok([self.ip, *observers]))  # 合計4件（実際の構成と同じ形）
+        self.assertTrue(dl.web_acl_rules_ok([*observers, self.ip]))
+        self.assertFalse(dl.web_acl_rules_ok([self.ip, *observers, observers[0]]))
+        self.assertFalse(dl.web_acl_rules_ok([self.ip, *observers, self.global_rule]))
+        self.assertFalse(dl.web_acl_rules_ok([self.ip, self.global_rule]))
+        self.assertFalse(dl.web_acl_rules_ok([self.ip, *observers[:2], self.global_rule]))
+        self.assertFalse(dl.web_acl_rules_ok([self.global_rule]))
         self.assertFalse(dl.web_acl_rules_ok(observers))
-        self.assertFalse(dl.web_acl_rules_ok([self.ip, self.ip, self.global_rule]))
+        self.assertFalse(dl.web_acl_rules_ok([self.ip, self.ip]))
+        self.assertFalse(dl.web_acl_rules_ok([self.ip, unknown_count_rule()]))
         self.assertFalse(dl.web_acl_rules_ok([]))
         self.assertFalse(dl.web_acl_rules_ok(None))
 
@@ -1575,12 +1648,23 @@ class TemplatesMatchTheCode(unittest.TestCase):
         response = make_web_acl()
         response["WebACL"]["Rules"] = self.load("waf-rules.json")["Rules"]
         self.assertEqual(dl.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
+        # テンプレートの1件に既知の観測グループ3種（Count）を足した4件も受け入れる
+        response["WebACL"]["Rules"] += [observer(g, 1 + i) for i, g in enumerate(OBSERVER_GROUPS)]
+        self.assertEqual(dl.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
 
-    def test_waf_template_thresholds_match_the_code(self):
-        rules = self.load("waf-rules.json")["Rules"]
-        limits = sorted(r["Statement"]["RateBasedStatement"]["Limit"] for r in rules)
-        self.assertEqual(limits, sorted([dl.IP_RATE_LIMIT, dl.GLOBAL_RATE_LIMIT]))
-        self.assertEqual((dl.IP_RATE_LIMIT, dl.GLOBAL_RATE_LIMIT, dl.RATE_WINDOW_SEC), (300, 1500, 300))
+    def test_waf_template_has_only_the_ip_rule(self):
+        text = (ROOT / "infra" / "cd" / "waf-rules.json").read_text(encoding="utf-8")
+        rules = json.loads(text)["Rules"]
+        self.assertEqual(len(rules), 1)
+        self.assertTrue(dl.ip_rate_rule_ok(rules[0]))
+        rate_statement = rules[0]["Statement"]["RateBasedStatement"]
+        self.assertEqual(
+            rate_statement,
+            {"Limit": dl.IP_RATE_LIMIT, "EvaluationWindowSec": dl.RATE_WINDOW_SEC, "AggregateKeyType": "IP"},
+        )
+        self.assertEqual((dl.IP_RATE_LIMIT, dl.RATE_WINDOW_SEC), (300, 300))
+        for removed in ("CONSTANT", "1500", "ScopeDownStatement"):
+            self.assertNotIn(removed, text)
 
     def test_deploy_policy_adds_only_the_read_permissions(self):
         text = (ROOT / "infra" / "cd" / "deploy-policy.json").read_text(encoding="utf-8")
@@ -1608,6 +1692,162 @@ class TemplatesMatchTheCode(unittest.TestCase):
         for action in ("lambda:UpdateFunctionCode", "lambda:PublishVersion", "lambda:UpdateAlias", "lambda:GetFunction"):
             self.assertIn(action, deploy)
         self.assertEqual(by_sid["ReadThePinnedPublicLayerVersionOnly"]["Resource"], dl.PINNED_LAYER_ARN)
+        # 予約済み同時実行数は読み取りだけ。別の文で、修飾子なしの対象関数だけを対象にする
+        concurrency = by_sid["ReadTheDemoFunctionReservedConcurrencyOnly"]
+        self.assertEqual(concurrency["Effect"], "Allow")
+        self.assertEqual(concurrency["Action"], "lambda:GetFunctionConcurrency")
+        self.assertEqual(
+            concurrency["Resource"],
+            "arn:aws:lambda:ap-northeast-1:<ACCOUNT_ID>:function:<FUNCTION_NAME>",
+        )
+        self.assertNotIn("Condition", concurrency)
+        holders = [
+            s["Sid"] for s in statements
+            if "lambda:GetFunctionConcurrency" in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])
+        ]
+        self.assertEqual(holders, ["ReadTheDemoFunctionReservedConcurrencyOnly"])
+        for forbidden in ("PutFunctionConcurrency", "DeleteFunctionConcurrency", "lambda:*", "Put", "Delete"):
+            self.assertNotIn(forbidden, text)
+
+
+class ReservedConcurrency(DeployTestCase):
+    """予約済み同時実行数は、変更の前に読み取りでちょうど1を確認する。自動では設定しない。"""
+
+    def concurrency_calls(self):
+        return [c for c in self.aws.calls if c[1].endswith("function-concurrency")]
+
+    def test_exactly_one_passes_and_is_read_before_any_mutation_or_smoke(self):
+        self.assertEqual(self.deploy(), 0)
+        result = self.result()
+        self.assertEqual(result["reservedConcurrency"], "passed")
+        self.assertEqual(
+            self.concurrency_calls(),
+            [["lambda", "get-function-concurrency", "--function-name", FUNCTION]],
+        )
+        ops = self.aws.ops()
+        self.assertLess(ops.index("get-function-concurrency"), ops.index("update-function-code"))
+        self.assertEqual(self.smoke.calls[0][2], "previous")
+        self.assertNotIn("put-function-concurrency", ops)
+        self.assertNotIn("delete-function-concurrency", ops)
+
+    def test_wrong_concurrency_blocks_with_zero_mutation_and_no_smoke(self):
+        cases = [
+            ("missing", {}, "missing", "設定されていません"),
+            ("null", {"ReservedConcurrentExecutions": None}, "missing", "設定されていません"),
+            ("zero", {"ReservedConcurrentExecutions": 0}, "zero", "0です"),
+            ("two", {"ReservedConcurrentExecutions": 2}, "not-one", "1ではありません"),
+            ("large", {"ReservedConcurrentExecutions": 1000}, "not-one", "1ではありません"),
+            ("negative", {"ReservedConcurrentExecutions": -1}, "not-one", "1ではありません"),
+            ("bool-true", {"ReservedConcurrentExecutions": True}, "not-one", "1ではありません"),
+            ("string", {"ReservedConcurrentExecutions": "1"}, "not-one", "1ではありません"),
+            ("float", {"ReservedConcurrentExecutions": 1.0}, "not-one", "1ではありません"),
+        ]
+        for name, response, state, message in cases:
+            with self.subTest(name):
+                self.aws = FakeAws()
+                self.smoke = FakeSmoke()
+                self.result_file.unlink(missing_ok=True)
+                self.aws.concurrency = response
+                self.assertEqual(self.deploy(), 1)
+                result = self.result()
+                self.assertEqual(result["reservedConcurrency"], state)
+                self.assertEqual(result["overall"], "failed")
+                self.assertEqual(result["validation"], "failed")
+                self.assertEqual(result["stage"], "validate-concurrency")
+                self.assertEqual(result["deployment"], "not-started")
+                self.assertFalse(result["mutationStarted"])
+                self.assertIn(message, result["error"])
+                self.assertIn("変更しません", result["error"])
+                self.assertEqual(self.aws.mutating(), [])
+                self.assertEqual(self.smoke.calls, [])
+                # 自動で直さない（読み取り1回だけ）
+                self.assertEqual(
+                    self.concurrency_calls(),
+                    [["lambda", "get-function-concurrency", "--function-name", FUNCTION]],
+                )
+                self.assertEqual(self.aws.alias["FunctionVersion"], "1")
+                self.assert_no_leak()
+
+    def test_read_failure_blocks_with_zero_mutation(self):
+        self.aws.fail["get-function-concurrency"] = dl.AwsError("lambda get-function-concurrency", 254)
+        self.assertEqual(self.deploy(), 1)
+        result = self.result()
+        self.assertEqual(result["reservedConcurrency"], "read-failed")
+        self.assertIn("AWS操作に失敗", result["error"])
+        self.assertEqual(self.aws.mutating(), [])
+        self.assertEqual(self.smoke.calls, [])
+
+    def test_public_path_failure_stops_before_reading_concurrency(self):
+        rate(self.aws).update(Limit=3000)
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.result()["reservedConcurrency"], "not-run")
+        self.assertEqual(self.concurrency_calls(), [])
+
+    def test_problem_classifier(self):
+        self.assertIsNone(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 1}))
+        self.assertEqual(dl.reserved_concurrency_problem({}), "missing")
+        self.assertEqual(dl.reserved_concurrency_problem(None), "missing")
+        self.assertEqual(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 0}), "zero")
+        self.assertEqual(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 2}), "not-one")
+        self.assertEqual(dl.REQUIRED_RESERVED_CONCURRENCY, 1)
+
+
+class ActualFourRuleWebAcl(DeployTestCase):
+    """利用者が確認した実際の形（2026-11-10）: IP規則のBlock 1件＋既知の観測グループ3種（Count）、全体の規則なし。
+
+    偽のAWSでの形の再現で、実際のWeb ACLの応答そのものではない。
+    """
+
+    def setUp(self):
+        super().setUp()
+        add_observers(self.aws, first=False)  # 優先順位: IP規則 0、観測グループ 1〜3
+
+    def test_four_rule_acl_is_reused_and_deploys(self):
+        self.assertEqual(len(self.aws.rules), 4)
+        self.assertEqual(self.deploy(), 0)
+        result = self.result()
+        self.assertEqual(result["overall"], "success")
+        self.assertEqual(result["publicPath"], "passed")
+        self.assertEqual(result["reservedConcurrency"], "passed")
+        self.assertEqual(self.aws.mutating(), ["update-function-code", "publish-version", "update-alias"])
+        # Web ACL・CloudFrontは読み取りだけ（作り直し・更新をしない）
+        for call in self.aws.calls:
+            if call[0] in ("cloudfront", "wafv2"):
+                self.assertTrue(call[1].startswith("get-"))
+        self.assertEqual(len(self.aws.rules), 4)
+
+    def test_four_rules_with_observers_first_also_deploy(self):
+        self.aws = FakeAws()
+        add_observers(self.aws, first=True)
+        self.assertEqual(self.deploy(), 0)
+
+    def test_current_disabled_distribution_fails_closed_only_on_enabled(self):
+        # 現在はディストリビューションが無効のまま。WAFの4件は受け入れ、無効化だけで止まる
+        self.aws.dist_config.update(Enabled=False)
+        self.assertEqual(self.deploy(), 1)
+        result = self.result()
+        self.assertIn("distributionEnabled", result["error"])
+        self.assertNotIn("webAclRules", result["error"])
+        self.assertEqual(self.aws.mutating(), [])
+        self.assertEqual(self.smoke.calls, [])
+
+    def test_four_rules_with_wrong_concurrency_still_block(self):
+        self.aws.concurrency = {"ReservedConcurrentExecutions": 0}
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.result()["reservedConcurrency"], "zero")
+        self.assertEqual(self.aws.mutating(), [])
+
+    def test_four_rules_with_bad_ip_setting_still_block(self):
+        rate(self.aws).update(EvaluationWindowSec=600)
+        self.assertEqual(self.deploy(), 1)
+        self.assertIn("webAclRules", self.result()["error"])
+        self.assertEqual(self.aws.mutating(), [])
+
+    def test_adding_the_removed_global_rule_makes_five_and_blocks(self):
+        self.aws.rules.append(make_global_rule(4))
+        self.assertEqual(self.deploy(), 1)
+        self.assertIn("webAclRules", self.result()["error"])
+        self.assertEqual(self.aws.mutating(), [])
 
 
 class SummaryFlags(DeployTestCase):

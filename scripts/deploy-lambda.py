@@ -2,9 +2,11 @@
 """承認済みのLambda ZIPを、既存のエイリアス demo へ配布する（標準ライブラリのみ）。
 
 AWS CLI（`aws lambda ...`）をsubprocessで呼ぶ。初回構築・IAM・関数URL・同時実行数・CloudFront・WAFの
-操作はしない（infra/cd/bootstrap.md と infra/cd/cloudfront-plan.md の人の操作）。CloudFront・WAFは
+変更はしない（infra/cd/bootstrap.md と infra/cd/cloudfront-plan.md の人の操作）。CloudFront・WAFは
 読み取り（get-*）だけで、公開経路（CloudFront → OAC → AWS_IAMの関数URL）が期待どおりか、AWSの変更の前に
 検証する。公開URLはCloudFrontだけで、関数URLへの直接の公開はフォールバックにもしない。
+予約済み同時実行数は読み取り（get-function-concurrency）でちょうど1であることを確認するだけで、
+設定・削除は自動ではしない（違えば変更の前に止まる）。
 変更の前にすべて検証し（fail closed）、変更後は
 スモーク確認に失敗したら、こちらが切り替えたエイリアスだけを記録した直前の正常版へ戻す。
 結果は常に --result-file のJSONへ書く。Lambdaの設定全体や資格情報は出力・保存しない。
@@ -51,10 +53,14 @@ ALL_VIEWER_EXCEPT_HOST_POLICY_ID = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 CLOUDFRONT_SERVICE = "cloudfront.amazonaws.com"
 INVOKE_ACTIONS = {"lambda:InvokeFunctionUrl", "lambda:InvokeFunction"}
 ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS"}
-# WAFのレートベース規則の閾値（infra/cd/waf-rules.json と同じ値。近似で厳密な保証ではない）
+# WAFの必須のレートベース規則（実際の接続元IPごと）の閾値。infra/cd/waf-rules.json と同じ値。
+# 近似で厳密な保証ではない。全体（CONSTANT）の規則は2026-11-10に要件から外した（受け入れない）。
 RATE_WINDOW_SEC = 300
 IP_RATE_LIMIT = 300
-GLOBAL_RATE_LIMIT = 1500
+# 予約済み同時実行数はちょうど1（読み取りで確認するだけ。自動では設定しない）。
+# 関数URLの上限は予約済み同時実行数の10倍のRPS（1なら10RPS、超過は429）で、
+# WAFの件数制限や月額の上限の代わりではない（infra/cd/cloudfront-plan.md）。
+REQUIRED_RESERVED_CONCURRENCY = 1
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -291,51 +297,39 @@ RULE_KEYS = {"Name", "Priority", "Statement", "Action", "VisibilityConfig", "Rul
 RATE_KEYS = {"Limit", "EvaluationWindowSec", "AggregateKeyType"}
 
 
-def scope_down_ok(statement: object) -> bool:
-    """全体制限の対象は、URIパスが "/" で始まるもの（ほぼすべてのリクエスト）だけ。変換なし。"""
-    if not isinstance(statement, dict) or set(statement) != {"ByteMatchStatement"}:
+def ip_rate_rule_ok(rule: object) -> bool:
+    """必須のIPごとのレート制限（接続元IP・300件/300秒・Block）とちょうど一致するか。
+
+    少しでも違えば False（迂回の余地を残さない）。ActionはBlockだけ（通常の403。Count・Allow・
+    Captcha・Challenge・独自応答は不可）。OverrideAction・RuleLabelsも不可。集計キーは実際の接続元IP
+    （AggregateKeyType=IP）だけで、ForwardedIPConfig・ScopeDownStatement・独自キーは持たない。
+    全体（CONSTANT）などほかのレートベース規則は、この判定でも観測グループの判定でも受け入れない。
+    """
+    if not isinstance(rule, dict) or not set(rule) <= RULE_KEYS:
         return False
-    inner = statement["ByteMatchStatement"]
+    if rule.get("Action") != {"Block": {}} or rule.get("RuleLabels"):
+        return False
+    statement = rule.get("Statement")
+    if not isinstance(statement, dict) or set(statement) != {"RateBasedStatement"}:
+        return False
+    rate = statement["RateBasedStatement"]
+    if not isinstance(rate, dict) or set(rate) != RATE_KEYS:
+        return False
+    limit = rate["Limit"]
+    window = rate["EvaluationWindowSec"]
+    # bool は int の一種（True == 1）なので、型も厳密に確かめる
     return (
-        isinstance(inner, dict)
-        and set(inner) == {"SearchString", "FieldToMatch", "TextTransformations", "PositionalConstraint"}
-        # CLIのJSON出力ではblobがbase64（"/" は "Lw=="）になることがある。どちらも同じ "/" の意味
-        and inner["SearchString"] in ("/", "Lw==")
-        and inner["FieldToMatch"] == {"UriPath": {}}
-        and inner["TextTransformations"] == [{"Priority": 0, "Type": "NONE"}]
-        and inner["PositionalConstraint"] == "STARTS_WITH"
+        rate["AggregateKeyType"] == "IP"
+        and type(limit) is int
+        and limit == IP_RATE_LIMIT
+        and type(window) is int
+        and window == RATE_WINDOW_SEC
     )
 
 
-def classify_rule(rule: object) -> str | None:
-    """必須の2規則のどちらか（"ip" / "global"）。少しでも違えば None（迂回の余地を残さない）。"""
-    if not isinstance(rule, dict) or not set(rule) <= RULE_KEYS:
-        return None
-    # ActionはBlockだけ（通常の403。Count・Allow・Captcha・Challenge・独自応答は不可）。OverrideActionも不可
-    if rule.get("Action") != {"Block": {}} or rule.get("RuleLabels"):
-        return None
-    statement = rule.get("Statement")
-    if not isinstance(statement, dict) or set(statement) != {"RateBasedStatement"}:
-        return None
-    rate = statement["RateBasedStatement"]
-    if not isinstance(rate, dict) or rate.get("EvaluationWindowSec") != RATE_WINDOW_SEC:
-        return None
-    key = rate.get("AggregateKeyType")
-    if key == "IP" and rate.get("Limit") == IP_RATE_LIMIT and set(rate) == RATE_KEYS:
-        return "ip"  # 実際の接続元IP。ForwardedIPConfigも、対象を絞るScopeDownもなし
-    if (
-        key == "CONSTANT"
-        and rate.get("Limit") == GLOBAL_RATE_LIMIT
-        and set(rate) == RATE_KEYS | {"ScopeDownStatement"}
-        and scope_down_ok(rate["ScopeDownStatement"])
-    ):
-        return "global"
-    return None
-
-
-# 必須の2規則に加えて、観測専用として残してよいAWSのマネージド規則グループ（プロジェクト独自の判断）。
+# 必須のIP規則に加えて、観測専用として残してよいAWSのマネージド規則グループ（プロジェクト独自の判断）。
 # コンソールがWeb ACLの自動作成時に付け得るもので、OverrideActionのCountだけで残す。
-# Countは終端しない（一致しても評価が続く）ため、優先順位に関係なく必須の2規則のBlockを迂回しない
+# Countは終端しない（一致しても評価が続く）ため、優先順位に関係なく必須のIP規則のBlockを迂回しない
 # （https://docs.aws.amazon.com/waf/latest/developerguide/web-acl-rule-group-override-options.html）
 OBSERVER_VENDOR = "AWS"
 OBSERVER_GROUPS = frozenset(
@@ -348,8 +342,8 @@ OBSERVER_GROUPS = frozenset(
 OBSERVER_RULE_KEYS = {"Name", "Priority", "Statement", "OverrideAction", "VisibilityConfig", "RuleLabels"}
 # 規則グループ内の除外・動作の上書き・設定。APIが空の配列で返すことがあるため、空なら許す
 OBSERVER_OPTIONAL_LISTS = ("ExcludedRules", "RuleActionOverrides", "ManagedRuleGroupConfigs")
-# Web ACLの規則の上限（必須2件＋観測3件。CloudFrontのFreeプランの規則5件までに合わせた独自の上限）
-WEB_ACL_MAX_RULES = 5
+# Web ACLの規則の上限（必須のIP規則1件＋観測3件。プロジェクト独自の上限）
+WEB_ACL_MAX_RULES = 1 + len(OBSERVER_GROUPS)
 
 
 def classify_observer(rule: object) -> str | None:
@@ -379,21 +373,48 @@ def classify_observer(rule: object) -> str | None:
 
 
 def web_acl_rules_ok(rules: object) -> bool:
-    """必須の2規則（IPごと・全体のBlock）がちょうど1件ずつ、ほかは重複のない観測専用グループ0〜3件。"""
-    if not isinstance(rules, list) or len(rules) > WEB_ACL_MAX_RULES:
+    """必須のIP規則（Block）がちょうど1件、ほかは重複のない観測専用グループ0〜3件（合計1〜4件）。"""
+    if not isinstance(rules, list) or not 1 <= len(rules) <= WEB_ACL_MAX_RULES:
         return False
-    rates: list[str] = []
+    ip_rules = 0
     observers: list[str] = []
     for rule in rules:
-        kind = classify_rule(rule)
-        if kind is not None:
-            rates.append(kind)
+        if ip_rate_rule_ok(rule):
+            ip_rules += 1
             continue
         group = classify_observer(rule)
         if group is None:
-            return False  # 未知の規則・未知のベンダー・Count以外のグループは拒否
+            # 未知の規則（全体のCONSTANTなど）・未知のベンダー・Count以外のグループは拒否
+            return False
         observers.append(group)
-    return sorted(rates) == ["global", "ip"] and len(set(observers)) == len(observers)
+    return ip_rules == 1 and len(set(observers)) == len(observers)
+
+
+CONCURRENCY_MESSAGES = {
+    "missing": "予約済み同時実行数が設定されていません",
+    "zero": "予約済み同時実行数が0です（公開停止中の可能性があります）",
+    "not-one": "予約済み同時実行数が1ではありません",
+}
+
+
+def reserved_concurrency_problem(response: object) -> str | None:
+    """get-function-concurrency の応答。ちょうど整数の1なら None、違えば問題の種類。
+
+    未設定（キーなし・null）は "missing"、0は "zero"、それ以外（2以上・負・bool・文字列・小数）は
+    "not-one"。値は結果に残さず、種類だけ返す。
+    """
+    if not isinstance(response, dict):
+        return "missing"
+    value = response.get("ReservedConcurrentExecutions")
+    if value is None:
+        return "missing"
+    if type(value) is not int:  # True・"1"・1.0 は整数の1と扱わない
+        return "not-one"
+    if value == 0:
+        return "zero"
+    if value != REQUIRED_RESERVED_CONCURRENCY:
+        return "not-one"
+    return None
 
 
 def web_acl_problems(response: dict, arn: str, name: str, acl_id: str) -> list[str]:
@@ -405,7 +426,7 @@ def web_acl_problems(response: dict, arn: str, name: str, acl_id: str) -> list[s
         problems.append("webAclIdentity")
     if acl.get("DefaultAction") != {"Allow": {}}:
         problems.append("webAclDefaultAction")
-    # Firewall Managerが管理・前後に差し込む規則グループは、必須の2規則より先に評価されてAllowなどで
+    # Firewall Managerが管理・前後に差し込む規則グループは、必須のIP規則より先に評価されてAllowなどで
     # 迂回し得る。初期構成では使わないので、有効・非空なら拒否する（キーがない・空・falseは正常）
     if acl.get("ManagedByFirewallManager") not in (None, False) or any(
         acl.get(key) not in (None, [])
@@ -632,6 +653,9 @@ class Deployer:
                 "validation": "not-run",
                 # CloudFront・OAC・WAF・関数のリソースポリシーの読み取り検証（変更なし）の結果
                 "publicPath": "not-run",
+                # 予約済み同時実行数の読み取り検証（変更なし）。passed / missing / zero / not-one /
+                # read-failed（取得に失敗）/ not-run
+                "reservedConcurrency": "not-run",
                 "deployment": "not-started",
                 # AWSの変更操作を始める直前に true にする。成功を意味せず、結果の書き込み自体が
                 # 失敗した場合は記録されない（その場合の有無は未確認）。
@@ -745,6 +769,27 @@ class Deployer:
         if problems:
             raise DeployError("公開経路の設定が期待と一致しません: " + ",".join(sorted(set(problems))))
 
+    def _validate_concurrency(self) -> None:
+        """予約済み同時実行数がちょうど1であることを、読み取り（修飾子なしの関数）だけで確認する。
+
+        AWSの変更の前に呼ぶ。違えば例外で止まり、put/delete-function-concurrency は呼ばない
+        （自動で設定・修正しない。人が確認する）。
+        """
+        self.result.update(stage="validate-concurrency")
+        try:
+            response = self._lambda("get-function-concurrency", "--function-name", self.function)
+        except DeployError:
+            self.result.update(reservedConcurrency="read-failed")
+            raise
+        problem = reserved_concurrency_problem(response)
+        if problem is not None:
+            self.result.update(reservedConcurrency=problem)
+            raise DeployError(
+                CONCURRENCY_MESSAGES[problem]
+                + "。ちょうど1が必要です。配布ヘルパーは同時実行数を変更しません（人が確認してください）"
+            )
+        self.result.update(reservedConcurrency="passed")
+
     def validate(self) -> None:
         self.result.update(stage="validate-manifest")
         self.zip_path, self.manifest = load_manifest(
@@ -767,6 +812,9 @@ class Deployer:
             raise DeployError("関数設定が期待と一致しません: " + ",".join(problems))
         # 検証した設定のRevisionId。コード更新はこの版を条件にする（検証後に変わっていたら更新は失敗する）
         self.function_revision = revision
+
+        self._validate_concurrency()
+        self.result.update(stage="validate-aws")
 
         layer = self._lambda("get-layer-version-by-arn", "--arn", PINNED_LAYER_ARN)
         if (layer.get("Content") or {}).get("CodeSha256") != self.layer_code_sha256:
