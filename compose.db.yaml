@@ -1,0 +1,36 @@
+# ローカルDB（PostgreSQL）の設定。compose.yaml と重ねて使う:
+#   DB_PASSWORD=... docker compose -f compose.yaml -f compose.db.yaml up -d db
+# ホストへはポートを公開しない（他のDBとの衝突を避ける）。検証は scripts/db-verify.sh を使う。
+# AWS側のAurora DSQLは別の環境で、この設定では再現しない。
+services:
+  db:
+    # AuroraDSQLがPostgreSQL 16互換のため16系列。マルチアーキテクチャdigestで固定（16.15を確認）
+    image: postgres:16-bookworm@sha256:5264710be20f409750ac6dc4e5706dcef929c87e241605463f0f9aefa932a8d9
+    environment:
+      POSTGRES_DB: "${DB_NAME:-decision_demo}"
+      POSTGRES_USER: "${DB_USER:-demo_admin}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD を環境変数で指定してください}"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  db-verify:
+    profiles: ["verify"]
+    build: ./db
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_NAME: "${DB_NAME:-decision_demo}"
+      DB_USER: "${DB_USER:-demo_admin}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_SCHEMA: "${DB_SCHEMA:-}"
+    volumes:
+      - ./docs:/repo/docs:ro
+
+volumes:
+  db_data:
