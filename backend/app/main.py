@@ -6,7 +6,13 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app import intake, mock_api
+
 app = FastAPI(title="不正審査デモ API")
+# 保存先は仮のメモリ実装。実DBへの差し替えは別Issueの範囲。
+app.state.case_store = intake.InMemoryCaseStore()
+app.include_router(mock_api.router)
+app.include_router(intake.router)
 
 _SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 
