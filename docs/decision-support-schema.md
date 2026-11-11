@@ -6,7 +6,7 @@
 
 東京リージョンの単一リージョンクラスターで **Amazon Aurora DSQL** を使う案です。PostgreSQL 16互換のサーバーレスDBで、毎月最初の100,000 DPUとストレージ1 GBが無料です。超過分や、利用したバックアップ・データ転送などは別途課金されます。少量の架空データを使うデモでは、実測したDPUと保存量を見て無料枠に収まるかを判断します。 [AWS料金](https://aws.amazon.com/rds/aurora/dsql/pricing/)・[対応リージョンと互換性](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/what-is-aurora-dsql.html)
 
-接続にはTLSと一時的なIAM認証トークンを使います。このスキーマ案（2026-11-12に最終承認した変更後のDDL）は、ローカルのDockerのPostgreSQLで適用・保存・再表示を検証済みです。実Aurora DSQLでの検証は、変更前のスキーマ案で実施済みで、変更後のDDLでは未実施です（結果は[DBの接続・スキーマ適用環境](database-environment.md)）。CIへの組み込みは未実施です。Kubernetesでのアプリ展開はデプロイ設計のレビューで扱います。 [AWSの接続仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/accessing.html)
+接続にはTLSと一時的なIAM認証トークンを使います。このスキーマ案（2026-11-12に最終承認した変更後のDDL）は、ローカルのDockerのPostgreSQLと、実Aurora DSQL（専用スキーマ。2026-11-12にユーザーがCloudShellで実行し、結果を提示）の両方で、適用・保存・再表示を検証済みです（結果は[DBの接続・スキーマ適用環境](database-environment.md)）。CIへの組み込みは未実施です。Kubernetesでのアプリ展開はデプロイ設計のレビューで扱います。 [AWSの接続仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/accessing.html)
 
 ## テーブルと関連
 
