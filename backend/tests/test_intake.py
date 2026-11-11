@@ -20,7 +20,7 @@ from unittest import mock
 import uvicorn
 from fastapi import FastAPI
 
-from app import intake, mock_api
+from app import cases, intake, mock_api
 
 
 class _Server:
@@ -51,16 +51,17 @@ class _Server:
         self.sock.close()
 
 
-def post(url: str, payload, headers=None) -> tuple[int, dict]:
+def send(method: str, url: str, payload=None, headers=None) -> tuple[int, dict]:
     request = urllib.request.Request(
         url,
-        data=json.dumps(payload).encode(),
+        data=None if payload is None else json.dumps(payload).encode(),
         headers={"Content-Type": "application/json", **(headers or {})},
-        method="POST",
+        method=method,
     )
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            return response.status, json.loads(response.read())
+            raw = response.read()
+            return response.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
         raw = error.read()
         error.close()
@@ -68,6 +69,10 @@ def post(url: str, payload, headers=None) -> tuple[int, dict]:
             return error.code, json.loads(raw)
         except ValueError:  # 未処理の例外は本文がJSONでない500になる
             return error.code, {"raw": raw.decode(errors="replace")}
+
+
+def post(url: str, payload, headers=None) -> tuple[int, dict]:
+    return send("POST", url, payload, headers)
 
 
 class FailingStore(intake.InMemoryCaseStore):
@@ -92,6 +97,7 @@ def make_app(store: intake.InMemoryCaseStore, mock_calls: list[str]) -> FastAPI:
     application.state.case_store = store
     application.include_router(mock_api.router)
     application.include_router(intake.router)
+    application.include_router(cases.router)
 
     @application.middleware("http")
     async def count_mock_calls(request, call_next):

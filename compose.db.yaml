@@ -31,6 +31,23 @@ services:
       DB_SCHEMA: "${DB_SCHEMA:-}"
     volumes:
       - ./docs:/repo/docs:ro
+  # アプリの保存・再表示を、DDLを適用した使い捨てスキーマでローカルPostgreSQLに対して検証する。
+  # 実行は scripts/backend-db-test.sh（Aurora DSQLへの適合の証拠にならない）。
+  backend-db-test:
+    profiles: ["backend-test"]
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_NAME: "${DB_NAME:-decision_demo}"
+      DB_USER: "${DB_USER:-demo_admin}"
+      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_DOCS_DIR: /repo/docs
+    volumes:
+      - ./docs:/repo/docs:ro
+    command: ["python", "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-v"]
 
 volumes:
   db_data:
