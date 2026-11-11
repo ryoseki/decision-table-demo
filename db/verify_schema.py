@@ -63,16 +63,21 @@ def expect_ok(conn, name, sql, params=None):
         record(name, False, f"{type(e).__name__}: {e}")
 
 
+def _copy_questions_sql(conn, case_id):
+    """マスターの全設問を案件へコピーするSQL。呼び出し側のトランザクション内で実行する。"""
+    conn.execute(
+        """INSERT INTO case_questions (case_id, question_code, revision, category, prompt,
+                                       source_kind, source_field)
+           SELECT %s, question_code, revision, category, prompt, source_kind, source_field
+           FROM review_questions""",
+        (case_id,),
+    )
+
+
 def copy_questions(conn, case_id):
     """受付時の処理案: マスターの全設問を案件へコピーして固定する。"""
     with conn.transaction():
-        conn.execute(
-            """INSERT INTO case_questions (case_id, question_code, revision, category, prompt,
-                                           source_kind, source_field)
-               SELECT %s, question_code, revision, category, prompt, source_kind, source_field
-               FROM review_questions""",
-            (case_id,),
-        )
+        _copy_questions_sql(conn, case_id)
 
 
 def intake_case(conn, case_id, fetch, user_data='{"user_id": "456"}'):
@@ -88,7 +93,7 @@ def intake_case(conn, case_id, fetch, user_data='{"user_id": "456"}'):
             "INSERT INTO review_cases (case_id, summary, user_data, inquiry_data) VALUES (%s, 's', %s, %s)",
             (case_id, user_data, '{"subject": "s", "body": "b"}'),
         )
-        copy_questions(conn, case_id)
+        _copy_questions_sql(conn, case_id)  # 入れ子のトランザクション（SAVEPOINT）を避ける
         conn.execute("INSERT INTO case_results (case_id) VALUES (%s)", (case_id,))
         conn.execute(
             "INSERT INTO case_checks (case_id, question_code, answer) VALUES (%s, 'A09', 'pending')",
