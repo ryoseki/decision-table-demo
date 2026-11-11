@@ -12,10 +12,9 @@ Rules can also be changed through a chat interface powered by Amazon Bedrock.
 > They are not suitable for real fraud detection.
 
 ## Tech stack
-Area: Technologies
 Frontend: TypeScript, React
 Backend: Python, FastAPI
-E2E: tests Playwright
+E2E: Playwright
 CI/CD: GitHub Actions
 Infrastructure: AWS (Lambda, Aurora DSQL, Bedrock, CloudFront, CloudWatch)
 
