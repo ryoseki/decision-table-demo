@@ -22,6 +22,19 @@
 - 保存先の共通の形（`CaseStore`）は、受付の2メソッドだけで `intake.py` にある。判定の保存・再表示のメソッドは、HTTP層が `hasattr` で確認している。
 - 保存先の選択は、`main.py` の読み込み時の環境変数（`DB_HOST`）で決まる。
 
+## フロント（`frontend/src`）
+
+| 種類 | ファイル | 役割 | Reactを取り込んでよいか |
+| --- | --- | --- | --- |
+| ロジック・データ | `src` 直下の camelCase の `.ts`（`matching.ts`、`route.ts` など）、`data/*.ts` | 照合の判断、ルートの解釈、固定の架空データ。純粋な関数とデータ | **取り込まない** |
+| Reactを使うもの | 画面の部品（PascalCaseの `.tsx`: `CaseDetail`、`CaseList` など）、フック（`use〇〇.ts`: `useRoute.ts`） | 描画、操作、Reactの状態やブラウザの機能を使う処理 | 取り込んでよい |
+
+- ロジック・データは、React を取り込まない。画面の都合は、部品かフックに置き、ロジックは純粋な関数・データとして切り出す。
+- 命名で見分ける: 部品は PascalCase の `.tsx`、フックは `use〇〇.ts`、ロジックはそれ以外の camelCase の `.ts`。
+- 検査: `docker compose run --rm --no-deps frontend npm run lint`（ESLint の `no-restricted-imports`。設定は `frontend/eslint.config.js`）。メッセージに、直し方を書いている。テスト（`*.test.ts`）、フック（`use*.ts`）、型定義（`*.d.ts`）は、検査の対象外。
+- 検査が見ていないもの（既知の抜け）: ロジックが画面の部品やフックを取り込むこと、動的な `import()`。今はフロントの構造が小さいため、React を取り込まない、という最も大事な決まりだけを検査している。
+- 機能ごとのフォルダ分けと、機能どうしの取り込み禁止は、画面とAPIの統合のときに、検査を増やすかも含めて検討する。
+
 ## 違反したとき
 
 - エラーメッセージの「直し方」に従って、コードを直す。

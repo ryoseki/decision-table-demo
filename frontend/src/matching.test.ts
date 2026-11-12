@@ -1,6 +1,6 @@
-// 実行: node --test src/matching.test.ts（Node 24以降。型は取り除いて直接実行する）
+// 実行: npm test（Vitest）
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test } from "vitest";
 import { DEMO_RULES, RESULTS, canSkipQuestion, matchRules, type AnswerMap } from "./matching.ts";
 
 const grays = (a: AnswerMap) => matchRules(a).map((r) => `${r.rule.id}:${r.gray ? "gray" : "normal"}`);
