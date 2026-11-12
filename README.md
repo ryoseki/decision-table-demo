@@ -43,7 +43,7 @@ Local checks performed during preparation, and the scope that remains unchecked,
 
 ## Local app development (Docker Compose)
 
-On a fresh checkout, run the following at the repository root (where `compose.yaml` is located). Prepare Docker Engine and the Compose plugin, confirm that `docker version` can connect to the server, and confirm that `docker compose version` works. Network access is required to fetch images and dependencies. You do not need to install Node.js, Python, npm, or uv on the host, or to set app environment variables or credentials.
+On a fresh checkout, run the following at the repository root (where `compose.yaml` is located). Prepare Docker Engine and the Compose plugin, confirm that `docker version` can connect to the server, and confirm that `docker compose version` works. Network access is required to fetch images and dependencies. You do not need to install Node.js, Python, npm, or uv on the host, or to set app environment variables or credentials. The local development database (PostgreSQL) starts together with the app and also needs no credentials (see "Local database" below).
 
 ### Pinned configuration
 
@@ -52,7 +52,7 @@ The initialization verification record used Docker 29.4.0 / Compose 5.1.2. These
 | Target | Pinned versions / definitions |
 | --- | --- |
 | Frontend | Node.js 26.13.0, npm 11.20.0 (bundled with the base image), React 19.3.1, Vite 8.3.6, TypeScript 6.0.3, ESLint 10.14.0 |
-| API | Python 3.14.10, uv 0.13.7, Ruff 0.17.4. Concrete versions including FastAPI and Uvicorn, and transitive dependencies, are pinned in `backend/requirements.txt` |
+| API | Python 3.14.10, uv 0.13.7, Ruff 0.17.4, import-linter 2.14 (dependency-direction check; see [architecture](ARCHITECTURE.md)). Concrete versions including FastAPI and Uvicorn, and transitive dependencies, are pinned in `backend/requirements.txt` |
 | npm dependencies | `frontend/package.json` and `frontend/package-lock.json`. Installed with `npm ci` at image build time |
 | Python dependencies | Hashed `backend/requirements.txt` and `backend/requirements-dev.txt`. Synced into the container's Python at build time with `uv pip sync --system requirements.txt requirements-dev.txt` |
 
@@ -74,7 +74,7 @@ docker compose ps
 docker compose logs --tail=50 frontend backend
 ```
 
-`frontend` runs `npm run dev` in `/app` inside the container, and `backend` runs `uvicorn app.main:app --host 0.0.0.0 --port 8000` in `/app`. Right after startup, wait until preparation finishes, then check the following with both services running. Keep host ports 5173 and 8000 free.
+`frontend` runs `npm run dev` in `/app` inside the container, and `backend` runs `uvicorn app.main:app --host 0.0.0.0 --port 8000` in `/app`. `db` is the development PostgreSQL, and `db-init` is a one-shot service that applies the DDL and the fictional sample data when the tables do not exist yet, then exits (`backend` starts after it succeeds). Right after startup, wait until preparation finishes, then check the following with the services running. Keep host ports 5173 and 8000 free.
 
 | Where to check | Expected result |
 | --- | --- |
@@ -88,7 +88,30 @@ curl --fail --show-error http://localhost:8000/health
 
 Fetching Vite's HTML alone does not confirm that React renders, so also check the heading and description in a browser. Ports map host 5173 → container 5173 and host 8000 → container 8000.
 
-### Static checks inside containers
+### Local database
+
+`docker compose up -d` also starts a development PostgreSQL 16 (`db`). It uses trust authentication (no password), and **its port is not published to the host**; only containers in the same Compose project can connect. Do not add `ports:` to `db` in `compose.yaml`, because that would expose a passwordless database. `backend` saves to it when `DB_HOST` is set (the Compose file sets it), so saving and redisplaying a judgment work with plain `docker compose up`.
+
+- On the first start, `db-init` applies the DDL from `docs/decision-support-schema.md` and the fictional sample data (12 questions, 1 decision rule) from `docs/decision-support-sample.json`.
+- Data is kept in the named volume `db_data`. `docker compose down` keeps it, and the DDL is not applied again.
+- After changing the DDL or the sample data, recreate the database with `docker compose down -v` and then `docker compose up -d`. Recreating only the containers does not re-apply them. `down -v` deletes the development data.
+- To open a SQL shell: `docker compose exec db psql -U demo_admin -d decision_demo`.
+- This is not Aurora DSQL. A success here does not show that the app works on Aurora DSQL (see [database environment](docs/database-environment.md)).
+
+### Tests and static checks inside containers
+
+Run these at the repository root. They need no running services and no database (except the DB integration row), and each is one command. Exit code 0 is expected. Check the layers in this order, and do not move to the next layer while the previous one fails. See [testing policy](docs/testing-policy.md) for what each layer checks.
+
+| Layer | Command |
+| --- | --- |
+| Backend unit (no database) | `docker compose run --rm --no-deps --build backend python -m unittest discover -s tests -t .` |
+| E2E (one end-to-end flow) | `bash scripts/e2e.sh` |
+| DB integration (local PostgreSQL only) | `bash scripts/backend-db-test.sh` |
+| Architecture: dependency direction, backend (import-linter) | `docker compose run --rm --no-deps --build backend lint-imports` |
+
+`--build` rebuilds the image first, because the source is copied into the image (no bind mounts). Without it, the tests may run against an old copy of the source. Tests that need the database are skipped unless `RUN_DB_TESTS=1`, which only `scripts/backend-db-test.sh` sets.
+
+Before handing off an implementation task, run `bash scripts/review-tests.sh --feature-file <file>`, where the file holds the feature details (the issue title, description, and acceptance criteria, copied as written). It starts a separate, read-only Claude Code session that is given the feature details and the changed files (not your test results) and reviews missing frontend, backend, and E2E tests from a senior engineer's view. See the [testing policy](docs/testing-policy.md) and the [review prompt](docs/test-review-prompt.md).
 
 After startup, run these at the same repository root. Exit code 0 is expected for all of them.
 
@@ -97,6 +120,7 @@ docker compose exec -T frontend npm run lint
 docker compose exec -T frontend npm run build
 docker compose exec -T backend ruff check .
 docker compose exec -T backend ruff format --check .
+docker compose exec -T backend lint-imports
 docker compose exec -T backend uv pip check
 ```
 
@@ -104,13 +128,14 @@ ESLint is the lint step; Ruff does lint and a format check that does not rewrite
 
 ### Reflecting changes and stopping
 
-The current Compose setup uses no source bind mounts or persistent volumes. Dependencies and source are copied into the image, so after changing files, run `docker compose up -d --build` at the root to rebuild and recreate. Files changed only inside a container are lost when it is recreated.
+The current Compose setup uses no source bind mounts. The only persistent volume is `db_data` for the development database. Dependencies and source are copied into the image, so after changing files, run `docker compose up -d --build` at the root to rebuild and recreate. Files changed only inside a container are lost when it is recreated.
 
 ```bash
-docker compose down
+docker compose down        # keeps the development database
+docker compose down -v     # also deletes the development database (re-created on the next up)
 ```
 
-This stops and removes the services and the Compose network. Built images remain. The DB, HTTP mock, business features, and deployment to AWS are not part of this startup procedure.
+This stops and removes the services and the Compose network. Built images remain. The HTTP mock for automatic answers runs inside `backend`. Deployment to AWS and real Aurora DSQL are not part of this startup procedure.
 
 ### Verification status of this procedure
 
@@ -123,6 +148,8 @@ On 2026-11-08 (Japan time), the entire procedure was run from a fresh checkout o
 - Browser display: opened `http://localhost:5173/` in a headless browser and confirmed the heading "不正審査デモ" and the description "初期化の確認用の画面です。業務画面は未実装です。" rendered.
 - In-container checks: `npm run lint`, `npm run build`, `ruff check .`, `ruff format --check .`, and `uv pip check` all exited with code 0.
 - `docker compose down`: stopped and removed the services and the Compose network.
+
+On 2026-11-12 (Japan time), the Compose setup with the development database and the test commands were checked on the same kind of environment (Docker 29.4.0 / Compose 5.1.2). Checked: the backend unit tests (50 run, 16 skipped because they need the database, OK) with no database; `docker compose up -d --wait` starting all services with `db-init` applying the DDL and the sample data (12 questions, 1 rule); inside the `backend` container, intake (201), redisplay, saving a judgment (204), rejecting an undefined result code (422) and redisplay of the saved result; the dependency-direction check (`lint-imports`: 3 contracts kept on 24 files), also confirmed to fail with a remediation message when a violation is temporarily introduced; data kept after `docker compose down` and `up` (the DDL was not applied again); data removed and re-initialized after `down -v`; `bash scripts/e2e.sh` (success); `bash scripts/backend-db-test.sh` (50 run, OK; includes the check of `db/init_dev.py`) and `bash scripts/db-verify.sh` (success). Not checked: opening `http://localhost:5173/` and `http://localhost:8000/health` from the host for the new setup (those host ports were in use, so the startup check used a temporary override without published host ports and called the API from inside the container), and the new CI step (`lint-imports`) in GitHub Actions.
 
 Browser display is checked at `http://localhost:5173/` as described. By default, Vite's dev server accepts connections only from `localhost`, `.localhost`, and IP addresses (default behavior of the official Vite `server.allowedHosts`, confirmed 2026-11-08). In this repository, `allowedHosts` in `frontend/vite.config.ts` additionally allows the Compose service name `frontend` for E2E. Access checks with other host names are outside the scope of this procedure.
 

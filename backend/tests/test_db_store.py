@@ -1,7 +1,8 @@
 """PostgreSQLでの保存と再表示の検証（受入例4〜7と、DBが関わる受入条件S1・S4〜S15・S17）。
 
-ローカルのPostgreSQLだけで実行する（DB_HOSTがなければ全件スキップ）。実Aurora DSQLの
-結果ではない。uvicornを実際に起動し、受付が実HTTPでモックを呼ぶ。案件・値はすべて架空。
+ローカルのPostgreSQLだけで実行する（RUN_DB_TESTS=1 でなければ全件スキップ）。
+実Aurora DSQLの結果ではない。uvicornを実際に起動し、
+受付が実HTTPでモックを呼ぶ。案件・値はすべて架空。
 実行: bash scripts/backend-db-test.sh
 """
 
@@ -19,7 +20,8 @@ from app import db_store
 from tests.test_intake import _Server, case_payload, make_app, send
 
 DOCS = Path(os.environ.get("DB_DOCS_DIR", "/repo/docs"))
-HAVE_DB = bool(os.environ.get("DB_HOST"))
+# 通常のbackendコンテナにも DB_HOST があるため、専用の目印（RUN_DB_TESTS）で切り替える。
+HAVE_DB = os.environ.get("RUN_DB_TESTS") == "1"
 
 
 def _connect(schema: str | None = None, autocommit: bool = False):
@@ -53,7 +55,7 @@ class _FailingConnection:
         return self._conn.execute(sql, *args)
 
 
-@unittest.skipUnless(HAVE_DB, "DB_HOST がないためスキップ（ローカルPostgreSQLが必要）")
+@unittest.skipUnless(HAVE_DB, "RUN_DB_TESTS=1 でないためスキップ（要ローカルDB）")
 class DbFlow(unittest.TestCase):
     def setUp(self):
         self.schema = f"t_{secrets.token_hex(6)}"
@@ -160,6 +162,19 @@ class DbFlow(unittest.TestCase):
         self.assertTrue(all(v is None for k, v in answers.items() if k != "A09"))
         self.assertEqual(len(view["questions"]), 12)
         self.assertNotIn("automated_answer", json.dumps(view))  # 表示に使わない
+
+    def test_s16_unknown_fields_are_not_stored_in_the_columns(self):
+        payload = case_payload("456", source_case_id="X-1")
+        payload["user"]["identity_verified"] = True
+        payload["inquiry"]["received_at"] = "2026-10-20T09:00:00+09:00"
+        status, body = send("POST", f"{self.server.base_url}/api/intake/cases", payload)
+        self.assertEqual(status, 201, body)
+        [(user_data, inquiry_data)] = self.rows(
+            "SELECT user_data, inquiry_data FROM review_cases WHERE case_id = %s",
+            (body["case_id"],),
+        )
+        self.assertEqual(user_data, {"user_id": "456"})
+        self.assertEqual(set(inquiry_data), {"subject", "body"})
 
     def test_s4_failure_leaves_pending(self):
         with (

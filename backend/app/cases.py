@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, StrictInt, StrictStr, model_validator
 
-from app.db_store import CaseNotFound, InvalidJudgment
+from app.domain import CaseNotFound, InvalidJudgment
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 

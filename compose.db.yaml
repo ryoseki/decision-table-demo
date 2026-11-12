@@ -1,22 +1,9 @@
-# ローカルDB（PostgreSQL）の設定。compose.yaml と重ねて使う:
-#   DB_PASSWORD=... docker compose -f compose.yaml -f compose.db.yaml up -d db
-# ホストへはポートを公開しない（他のDBとの衝突を避ける）。検証は scripts/db-verify.sh を使う。
-# AWS側のAurora DSQLは別の環境で、この設定では再現しない。
+# DB検証・DB付きテスト用の設定。開発用のDB（db）は compose.yaml にあり、これを重ねて使う:
+#   bash scripts/db-verify.sh           # DDLのスキーマ検証
+#   bash scripts/backend-db-test.sh     # DB付きのバックエンドテスト
+# どちらも実行ごとに専用のプロジェクト名で隔離し、終了時にそのプロジェクトだけを削除する。
+# ホストへはポートを公開しない。AWS側のAurora DSQLは別の環境で、この設定では再現しない。
 services:
-  db:
-    # AuroraDSQLがPostgreSQL 16互換のため16系列。マルチアーキテクチャdigestで固定（16.15を確認）
-    image: postgres:16-bookworm@sha256:5264710be20f409750ac6dc4e5706dcef929c87e241605463f0f9aefa932a8d9
-    environment:
-      POSTGRES_DB: "${DB_NAME:-decision_demo}"
-      POSTGRES_USER: "${DB_USER:-demo_admin}"
-      POSTGRES_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD を環境変数で指定してください}"
-    volumes:
-      - db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
-      interval: 2s
-      timeout: 3s
-      retries: 30
   db-verify:
     profiles: ["verify"]
     build: ./db
@@ -27,12 +14,13 @@ services:
       DB_HOST: db
       DB_NAME: "${DB_NAME:-decision_demo}"
       DB_USER: "${DB_USER:-demo_admin}"
-      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_PASSWORD: "${DB_PASSWORD-}"
       DB_SCHEMA: "${DB_SCHEMA:-}"
     volumes:
       - ./docs:/repo/docs:ro
   # アプリの保存・再表示を、DDLを適用した使い捨てスキーマでローカルPostgreSQLに対して検証する。
   # 実行は scripts/backend-db-test.sh（Aurora DSQLへの適合の証拠にならない）。
+  # RUN_DB_TESTS=1 のときだけ、DB付きのテスト（tests/test_db_store.py）が動く。
   backend-db-test:
     profiles: ["backend-test"]
     build: ./backend
@@ -40,14 +28,14 @@ services:
       db:
         condition: service_healthy
     environment:
+      RUN_DB_TESTS: "1"
       DB_HOST: db
       DB_NAME: "${DB_NAME:-decision_demo}"
       DB_USER: "${DB_USER:-demo_admin}"
-      DB_PASSWORD: "${DB_PASSWORD}"
+      DB_PASSWORD: "${DB_PASSWORD-}"
       DB_DOCS_DIR: /repo/docs
     volumes:
       - ./docs:/repo/docs:ro
+      # 開発用DBの初期化（db/init_dev.py）を、tests/test_dev_init.py が読み込んで確認する。
+      - ./db:/repo/db:ro
     command: ["python", "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-v"]
-
-volumes:
-  db_data:

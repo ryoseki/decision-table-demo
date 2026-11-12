@@ -1,5 +1,7 @@
-# 初期化の確認用。ポート・ボリュームなどの細目は開発環境担当が決める。
+# ローカル開発用。`docker compose up` で、frontend・backend・開発用DBが起動し、保存と再表示まで動く。
 # E2E用の設定は compose.e2e.yaml に分けている（scripts/e2e.sh が専用プロジェクト名で使う）。
+# DB検証・DB付きテスト用の設定は compose.db.yaml に分けている（scripts/db-verify.sh、
+# scripts/backend-db-test.sh が専用プロジェクト名で使う）。
 services:
   frontend:
     build: ./frontend
@@ -14,8 +16,54 @@ services:
     build: ./backend
     ports:
       - "8000:8000"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      # DB_HOST があるとPostgreSQLに保存する（なければメモリ保存）。パスワードは使わない。
+      DB_HOST: db
+      DB_NAME: "${DB_NAME:-decision_demo}"
+      DB_USER: "${DB_USER:-demo_admin}"
+      DB_PASSWORD: ""
+      # 受付が呼ぶHTTPモックは同じプロセスにあるため、自分自身を指す。
+      MOCK_BASE_URL: "http://127.0.0.1:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
       interval: 2s
       timeout: 3s
       retries: 30
+  # 開発用のローカルDB。AuroraDSQLがPostgreSQL 16互換のため16系列。マルチアーキテクチャdigestで固定（16.15を確認）。
+  # パスワードなし（trust認証）で、ホストへポートを公開しない。Composeのネットワーク内のコンテナだけが
+  # 接続できる。そのため、ここに `ports:` を足さないこと（足すとパスワードなしで公開される）。
+  # AWS側のAurora DSQLは別の環境で、この設定では再現しない。
+  db:
+    image: postgres:16-bookworm@sha256:5264710be20f409750ac6dc4e5706dcef929c87e241605463f0f9aefa932a8d9
+    environment:
+      POSTGRES_DB: "${DB_NAME:-decision_demo}"
+      POSTGRES_USER: "${DB_USER:-demo_admin}"
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  # テーブルが無いときだけ、docs のDDLと架空データを適用して終了する（db/init_dev.py）。
+  # DDLを更新したら `docker compose down -v` でボリュームを消して作り直す。
+  db-init:
+    build: ./db
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_NAME: "${DB_NAME:-decision_demo}"
+      DB_USER: "${DB_USER:-demo_admin}"
+    volumes:
+      - ./docs:/repo/docs:ro
+    command: ["python", "init_dev.py"]
+    restart: "no"
+
+volumes:
+  db_data:

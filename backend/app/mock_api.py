@@ -11,10 +11,7 @@ from typing import Annotated
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, StrictInt, StrictStr
 
-# 自動回答の対象設問。設問コード -> 自動回答の種類
-# （設問マスターの auto_answer_key 相当）。
-# 初版の対象はA09のみ。設問の追加はここへ足す。
-AUTO_ANSWER_KEYS: dict[str, str] = {"A09": "parity"}
+from app.domain import AUTO_ANSWER_KEYS
 
 # 失敗指示ヘッダー X-Mock-Fault: timeout を受けたとき、応答を遅らせる秒数。
 # 受付側のタイムアウト（3秒）より十分長くする。

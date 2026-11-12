@@ -19,12 +19,25 @@
 - Git、Symphony、BetterleaksはWSLのシェルから実行する。クローン先のルートを開き、Symphonyを起動するときは利用者が選んだLinearプロジェクトのURLを使う。初回準備とWindowsからの起動手順は [README.md](README.md) を参照する。
 - Symphonyの準備確認は、配布バイナリを配置したクローン先のルートで `bash scripts/symphony.sh check` を実行する。案件別コピーには配布バイナリがない。準備確認とLinearへの実接続試験は区別する。
 
+## 開発の進め方（層ごとのテストと完了の定義）
+
+詳細、層ごとの標準コマンド、着手時チェックの観点は [docs/testing-policy.md](docs/testing-policy.md)、起動手順は [README.md](README.md) を参照する。
+
+- 機能は層ごとに確認する。順序は、API契約（DBなし）→ フロント単体（APIはモック）→ E2E（一連の流れ1本）→ インフラのつなぎ込み。前の段階が赤いままでは、次へ進まない。
+- 標準コマンドは、`docker compose run --rm --no-deps --build backend python -m unittest discover -s tests -t .`（API契約）と `docker compose run --rm --no-deps --build frontend npm test`（フロント単体）。`docker compose up` だけで、DB付きでアプリが動く。
+- 着手時、実装の前に、担当Issueの受入条件が、項目ごとに確認する層と方法を含むか確認する。不足していれば、不足と補う案を示して人に相談する。チャットでは止まって回答を待ち、Symphony経由では `WORKFLOW.md` に従う。Issueの説明文は書き換えない。
+- 完了報告に、確認した層と未確認の層を書く。未確認の層が残るときは、`In Review` へ進めず相談して待つ。人の操作や資格情報が必要な層（実Aurora DSQLなど）は例外で、未確認を明記して進めてよい。
+- DB統合テストは、Aurora DSQLでも成り立つ挙動だけを対象にする。PostgreSQL固有の挙動はテストしない。
+- 層と依存の向きは [ARCHITECTURE.md](ARCHITECTURE.md) に定め、機械的に検査する（バックエンドは `lint-imports`、フロントは ESLint）。違反したら、メッセージの直し方に従って直す。検査を緩める・無視するのは、人に相談する。
+- テストの不足を防ぐ。要件ごとに確認するテスト（層とテスト名）を対応づけ、完了報告に書く。画面は、ロジックだけでなく部品のテストも書く。E2Eで確認する挙動は、下の層でも確認する。新しい検査（ESLint・import-linter）は、違反を入れて失敗することを必ず確認し、新しいテストは、先に失敗を見るか実装を一時的に壊して確認する。実装タスクは、PR前に `bash scripts/review-tests.sh --feature-file <機能の詳細>` で、独立した別セッションに、機能の詳細と実装内容を渡して、テストの不足をレビューさせる。
+
 ## Claude Codeへのファイル作業の委譲
 
 - Codexアプリでこのリポジトリのファイルを作成・編集する作業は、コード、文書、設定、テストを含めてすべてClaude Codeに委譲する。Symphony経由の自動実行は別の運用として扱う。
 - Codexは、関連するLinearのIssueと受入条件を読み取り、ユーザーの依頼と変更範囲をClaude Codeへの指示にまとめる。各セッションに `AGENTS.md` を読むよう明示し、守るべき既存の編集を伝える。作業結果はCodexアプリでユーザーに報告する。
 - WSLの対象作業コピーのルートで `env -u ANTHROPIC_API_KEY claude -p` を使い、Claudeのサブスクリプションで認証する。Codex側の承認とClaude Code側の権限を確認し、各セッションに必要な編集とコマンド実行だけを許可する。
 - ファイル作業が終わったら、同じ作業コピーで新しいClaude Codeセッションを起動する。レビュー担当には変更対象と受入条件を渡し、差分を照合して必要な修正とテストを行い、指摘、修正内容、テスト結果、未確認事項を報告するよう指示する。文書だけの変更は `git diff --check` と内容の整合性を確認する。
+- 実装タスク（コードやテストの変更）では、上のレビューに加えて、`bash scripts/review-tests.sh` で、テスト不足のレビューを行う。レビュー担当には、実装した機能の詳細（Linearの課題のタイトル・説明・受入条件を、書かれている通りに転記したもの。`--feature-file` で渡す。必須）と、実装の内容（変更したファイルの一覧）を渡す。テストが通ったという報告、作者の自己評価、検証結果、作業メモは渡さない。シニアの目線で、フロントエンド・バックエンド・E2E の不足を導かせる。読み取り専用で、指摘は担当が対応する。詳細は [docs/testing-policy.md](docs/testing-policy.md)。
 - Claude Codeの起動や委譲した作業に失敗したら、Codexは失敗した段階と理由を報告する。
 
 ## 担当Issueを完了まで進める運用

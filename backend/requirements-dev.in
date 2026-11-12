@@ -1,2 +1,6 @@
 -c requirements.txt
 ruff
+import-linter==2.14
+# 推移依存のうち、公開から2週間未満の版を避けるための上限（2026-11-12時点）
+grimp<3.18
+markdown-it-py<4.3
