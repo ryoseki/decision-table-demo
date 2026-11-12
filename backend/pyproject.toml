@@ -4,3 +4,28 @@ line-length = 88
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+# 依存の向きの検査（import-linter）。実行: docker compose run --rm --no-deps --build backend lint-imports
+# 違反したとき、契約の name がそのまま表示される。name に「直し方」を書いている。
+# 層の説明は ARCHITECTURE.md。
+[tool.importlinter]
+root_package = "app"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "HTTP層（cases・intake・mock_api）は、DB用モジュール（db_store）と psycopg を取り込まない。直し方: 例外・定数・ID生成は app.domain に置いて取り込む。保存先は、app.main で組み立てて app.state.case_store から受け取り、HTTP層は保存先の共通の形（save_judgment などのメソッド）だけを呼ぶ。詳細は ARCHITECTURE.md"
+type = "forbidden"
+source_modules = ["app.cases", "app.intake", "app.mock_api"]
+forbidden_modules = ["app.db_store", "psycopg"]
+
+[[tool.importlinter.contracts]]
+name = "DB用モジュール（db_store）は、HTTP層（cases・intake・mock_api）と fastapi を取り込まない。直し方: 共有する定数・例外は app.domain に置いて取り込む。HTTPの都合（ステータス、リクエストの型）は HTTP層に置く。詳細は ARCHITECTURE.md"
+type = "forbidden"
+source_modules = ["app.db_store"]
+forbidden_modules = ["app.cases", "app.intake", "app.mock_api", "fastapi"]
+
+[[tool.importlinter.contracts]]
+name = "ドメイン（domain）と照合（rule_matching）は、fastapi・starlette・pydantic・psycopg と、他のアプリ内モジュールを取り込まない。直し方: フレームワークやDBの都合を持ち込まず、純粋な関数・定数・例外だけにする。必要なものは呼び出し側から引数で渡す。詳細は ARCHITECTURE.md"
+type = "forbidden"
+source_modules = ["app.domain", "app.rule_matching"]
+forbidden_modules = ["fastapi", "starlette", "pydantic", "psycopg", "app.cases", "app.intake", "app.mock_api", "app.db_store"]

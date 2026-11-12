@@ -11,7 +11,7 @@
 | 未試験の範囲 | DSQL固有のOCC、3,000行上限、10MiB上限、CI、Lambda ZIPでの互換性、保存処理の同時実行。ローカルPostgreSQLではDSQL固有のOCCを再現できない（一般的な衝突試験は可能） |
 | スキーマ案の最終適用 | 設計内容は2026-11-12にユーザーが最終承認（受付時に未判定の`case_results`を作る、`automated_answer`の追加、補完情報なし、採用ルールは参考の記録で外部キーなし）。変更後のDDLの実DSQLでの検証（専用スキーマ）は2026-11-12に成功。専用スキーマは削除済みで、恒久的なスキーマの適用は行っていない |
 | Aurora DSQLのクラスタ作成・接続・DDL適用・保存の検証 | クラスタ作成と、CloudShellからのadmin接続は2026-11-10にユーザーが実施・Issueに記録済み。2026-11-11に、ユーザーがCloudShellで`scripts/dsql-verify.sh`を実行し、**スキーマ案（6テーブル）のDDL適用、制約、外部キー、設問のコピー、一括保存、再判定、ロールバック、再表示、ルール版の振り返りの44/44が実DSQLで成功**。専用スキーマの削除も完了（出力はユーザーが提示した証拠で、Claude Codeが直接実行した観測ではない）。上記44/44は変更前のスキーマ案（`supplement_data`あり、`decision_rules`への外部キーあり）の結果。2026-11-12に、ユーザーがCloudShellで`scripts/dsql-verify.sh`を実行し、変更後のスキーマ案と、受付・保存の処理案の**55/55が実DSQLで成功**、専用スキーマの後片付けも完了（ユーザーが提示した出力の末尾3行〔件数、後片付け、成功〕による。Claude Codeが直接実行した観測ではない）。未確認はDSQL固有のOCC再試行、3,000行・10MiB上限、カスタムロール、保存の同時実行、費用・使用量 |
-| アプリ（FastAPI）からのDB接続 | ローカルPostgreSQLのみ実装・検証済み（`backend/app/db_store.py`。`DB_HOST`などの環境変数で接続。受付の2回の保存、［判定する］の一括保存、再表示）。`bash scripts/backend-db-test.sh`で、DDLを適用した使い捨てスキーマに対し、実uvicornと実HTTPのモックを使って48件（受入例4〜7と受入条件S1・S3〜S5・S8〜S10・S12・S14を含む）が成功（2026-11-12）。**Aurora DSQL（IAMトークン接続、OCC再試行、カスタムロール）は未実装・未検証**で、別のIssueの範囲 |
+| アプリ（FastAPI）からのDB接続 | ローカルPostgreSQLのみ実装・検証済み（`backend/app/db_store.py`。`DB_HOST`などの環境変数で接続。受付の2回の保存、［判定する］の一括保存、再表示）。`bash scripts/backend-db-test.sh`で、DDLを適用した使い捨てスキーマに対し、実uvicornと実HTTPのモックを使って50件（開発用DBの初期化の確認1件を含む。受入例4〜7と受入条件S1・S3〜S5・S8〜S10・S12・S14を含む）が成功（2026-11-12）。**Aurora DSQL（IAMトークン接続、OCC再試行、カスタムロール）は未実装・未検証**で、別のIssueの範囲 |
 
 ## ローカルの検証
 
@@ -35,15 +35,16 @@ bash scripts/db-verify.sh
 開発用にDBを起動する場合（ポートは公開しない）:
 
 ```bash
-read -rs -p "ローカル用DBパスワード: " DB_PASSWORD; echo
-export DB_PASSWORD
-docker compose -f compose.yaml -f compose.db.yaml up -d db
-docker compose -f compose.yaml -f compose.db.yaml exec db psql -U demo_admin -d decision_demo
+docker compose up -d
+docker compose exec db psql -U demo_admin -d decision_demo
 ```
 
-`DB_PASSWORD=<値> docker compose ... up -d db`と1行目だけに一時代入すると、次の行の`exec`では値が消えてComposeの変数補間に失敗します。同じシェルで`export`してください。`read -rs`は秘密値を画面とシェル履歴に残さないための手順で、ここで使う値は**ローカル用のみ**です。パスワードはリポジトリに書きません。
+通常の`docker compose up -d`で、`db`（PostgreSQL 16、パスワードなしのtrust認証）と、DDL・架空データを適用する`db-init`が起動し、`backend`が`DB_HOST`でこのDBに保存します。DBはホストへポートを公開せず、同じComposeプロジェクトのコンテナだけが接続できます（`compose.yaml`の`db`に`ports:`を足さないこと。足すとパスワードなしで公開されます）。
 
-既存のボリュームの`POSTGRES_PASSWORD`は、初期化後に再起動しても変更されません。パスワードを変えるときは、DB内で変更するか、データが不要と確認した専用ボリュームだけを再初期化します。他のボリュームは削除しません。
+- 初回起動時（テーブルがないとき）だけ、`db-init`が`docs/decision-support-schema.md`のDDLと、`docs/decision-support-sample.json`の設問・判定ルールを適用します。
+- DDLや架空データを更新したときは、`docker compose down -v`でボリュームを削除して作り直します。コンテナの作り直しだけでは再適用されません。開発用のデータは消えます。
+- `scripts/db-verify.sh`と`scripts/backend-db-test.sh`は、同じ`db`の定義を、専用のプロジェクト名で使い捨てにして使います。DB付きのテストは`RUN_DB_TESTS=1`のときだけ動きます。
+- この開発用DBはAurora DSQLではありません。パスワードなしの設定は、ローカルの開発用だけのものです。
 
 ## 固定した版
 

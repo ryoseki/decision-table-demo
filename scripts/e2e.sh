@@ -23,7 +23,8 @@ compose=(docker compose -p decision-table-demo-e2e -f compose.yaml -f compose.e2
 up_code=$?
 
 # 後片付けはテスト結果に関わらず必ず実行し、その終了コードも記録する。
-"${compose[@]}" down --remove-orphans
+# -v で、E2E専用プロジェクトの開発用DBのボリュームも消す（残ると古いスキーマで通ることがある）。
+"${compose[@]}" down -v --remove-orphans
 down_code=$?
 
 # 終了コードの決定:

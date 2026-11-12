@@ -8,6 +8,6 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e
 COPY requirements.txt ./
 RUN uv pip sync --system requirements.txt
 
-COPY verify_schema.py ./
+COPY verify_schema.py init_dev.py ./
 
 CMD ["python", "verify_schema.py"]

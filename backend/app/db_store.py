@@ -6,32 +6,21 @@
 """
 
 import os
-import uuid
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.mock_api import AUTO_ANSWER_KEYS
-
-# 保存できる結果コード。値は仮（未合意）。表示名ではなくコードで保存する。
-RESULT_CODES = ("account_deletion", "account_suspension", "caution", "no_issue")
-# オペレータは担当者1名固定（ログインなし）。
-OPERATOR_ID = "OP-1"
-HUMAN_ANSWERS = ("yes", "no")
-
-
-class CaseNotFound(Exception):
-    pass
-
-
-class InvalidJudgment(Exception):
-    """入力が保存の条件を満たさない（案件は変更しない）。"""
-
-
-def new_case_id() -> str:
-    return f"CASE-{uuid.uuid4().hex[:8].upper()}"  # 仮の形式（採番形式は未決）
+from app.domain import (
+    AUTO_ANSWER_KEYS,
+    HUMAN_ANSWERS,
+    OPERATOR_ID,
+    RESULT_CODES,
+    CaseNotFound,
+    InvalidJudgment,
+    new_case_id,
+)
 
 
 def connect_from_env() -> psycopg.Connection:

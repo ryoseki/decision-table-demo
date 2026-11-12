@@ -26,8 +26,8 @@ from pydantic import (
     model_validator,
 )
 
-from app.db_store import new_case_id
-from app.mock_api import AUTO_ANSWER_KEYS, FAULT_TIMEOUT
+from app.domain import AUTO_ANSWER_KEYS, new_case_id
+from app.mock_api import FAULT_TIMEOUT
 
 # 受付側のタイムアウト（ユーザー合意: 3秒）。
 MOCK_TIMEOUT_SECONDS = 3.0
