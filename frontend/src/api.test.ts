@@ -64,7 +64,7 @@ test("定義にない結果コードが返ってきたら、例外にする", as
   await expect(listCases()).rejects.toThrow("定義にない結果コード");
 });
 
-test("保存: PUT で、結果コードだけを送る", async () => {
+test("保存: PUT で、結果コードだけを送る（回答を渡さないとき）", async () => {
   const spy = stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 204 } });
   await saveJudgment("CASE-X", "アカウント一時凍結");
   const init = spy.mock.calls[0][1] as RequestInit;
@@ -80,4 +80,11 @@ test("保存: 422 などの拒否は ApiError にする", async () => {
 
 test("ApiError でないものは、一般の文言にする", () => {
   expect(describeError(new Error("内部の詳細"))).toBe("予期しないエラーが発生しました");
+});
+
+test("保存: 変更した回答があれば、answers として一緒に送る", async () => {
+  const spy = stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 204 } });
+  await saveJudgment("CASE-X", "問題なし", { A09: "no", A03: "yes" });
+  const init = spy.mock.calls[0][1] as RequestInit;
+  expect(JSON.parse(init.body as string)).toEqual({ result_code: "no_issue", answers: { A09: "no", A03: "yes" } });
 });

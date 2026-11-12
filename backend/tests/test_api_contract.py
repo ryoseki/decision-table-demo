@@ -310,7 +310,24 @@ class CasesApiContract(unittest.TestCase):
             case_id, {"result_code": "no_issue", "answers": {"A09": "no"}}
         )
         self.assertEqual(status, 204)
-        self.assertEqual(self.answers_of(self.get(case_id))["A09"], "no")
+        view = self.get(case_id)
+        self.assertEqual(self.answers_of(view)["A09"], "no")
+        self.assertEqual(
+            view["result"]["result_code"], "no_issue"
+        )  # 結果も、同時に保存される
+
+    def test_put_may_replace_pending_with_yes_and_keeps_the_rest(self):
+        case_id = self.intake_with_pending_a09()
+        status, _ = self.judge(
+            case_id, {"result_code": "caution", "answers": {"A09": "yes"}}
+        )
+        self.assertEqual(status, 204)
+        view = self.get(case_id)
+        answers = self.answers_of(view)
+        self.assertEqual(answers["A09"], "yes")
+        self.assertEqual(view["result"]["result_code"], "caution")
+        # 送っていない設問は、未回答のまま変わらない
+        self.assertTrue(all(v is None for k, v in answers.items() if k != "A09"))
 
     # --- 入力の拒否（422）。拒否した保存は何も変えない ---------------------------
 

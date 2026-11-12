@@ -1,14 +1,14 @@
 import { useState, type FormEvent } from "react";
 import { AnswerCounts } from "./AnswerCounts";
-import { ApiError, describeError, saveJudgment } from "./api";
+import { ApiError, describeError, saveJudgment, type HumanAnswers } from "./api";
 import { StatusBadge } from "./Badges";
 import { statusOf, tally, type Answer, type ResultName, type ReviewCase } from "./data/cases";
 import { questions, type QuestionId } from "./data/questions";
 import { RESULTS, canSkipQuestion, matchRules, type AnswerMap } from "./matching";
 import { useCase } from "./useApi";
 
-// 案件はAPIから取得し、［判定する］で結果だけを保存する（途中の自動保存はない）。
-// 回答の変更は、この画面のメモリ上だけに持つ（保存は、別のスライスで扱う）。
+// 案件はAPIから取得し、［判定する］で、結果と、変更した回答だけを保存する（途中の自動保存はない）。
+// 保存するまで、回答の変更は、この画面のメモリ上だけに持つ。開き直すと、最後に保存した値に戻る。
 
 function openState(answers: AnswerMap): Record<string, boolean> {
   return Object.fromEntries(matchRules(answers).map((r) => [r.rule.id, !r.gray]));
@@ -53,11 +53,19 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
       </section>
     );
   }
-  return <Review c={remote.data} save={(result) => saveJudgment(caseId, result)} />;
+  return <Review c={remote.data} save={(result, answers) => saveJudgment(caseId, result, answers)} />;
 }
 
-export function Review({ c, save }: { c: ReviewCase; save: (result: ResultName) => Promise<void> }) {
+export function Review({
+  c,
+  save,
+}: {
+  c: ReviewCase;
+  save: (result: ResultName, answers: HumanAnswers) => Promise<void>;
+}) {
   const [answers, setAnswers] = useState<AnswerMap>(c.answers);
+  // 保存済みの回答（開いたときの値。保存に成功したら更新する）。送るのは、これと違う設問だけ。
+  const [baseline, setBaseline] = useState<AnswerMap>(c.answers);
   const [edited, setEdited] = useState<ReadonlySet<QuestionId>>(new Set());
   // 行の開閉。初期は食い違わない行を開く。回答が変わったときだけ同じ規則で更新し、手動の開閉はそれまで保つ。
   const [open, setOpen] = useState<Record<string, boolean>>(() => openState(c.answers));
@@ -89,8 +97,15 @@ export function Review({ c, save }: { c: ReviewCase; save: (result: ResultName) 
     setSaving(true);
     setSaveError("");
     try {
-      await save(outcome);
+      // 保存済みの値から変わった設問だけを送る（Yes・Noに限る。確認待ちが変わらない設問は送らない）。
+      const changed: HumanAnswers = {};
+      for (const q of questions) {
+        const value = answers[q.id];
+        if ((value === "yes" || value === "no") && baseline[q.id] !== value) changed[q.id] = value;
+      }
+      await save(outcome, changed);
       setSaved(outcome);
+      setBaseline(answers);
       setJustSaved(outcome);
     } catch (error) {
       // 失敗したときは、保存済みの表示を変えない。
@@ -122,7 +137,7 @@ export function Review({ c, save }: { c: ReviewCase; save: (result: ResultName) 
       </div>
 
       <p className="note note-top" data-testid="save-note">
-        結果は［判定する］で保存されます。回答の変更は、まだ保存されません（このページを開いている間だけの表示用で、開き直すと戻ります）。
+        結果と、変更した回答は、［判定する］で保存されます。［判定する］を押さずに離れると、変更は保存されません（開き直すと、最後に保存した値に戻ります）。
       </p>
 
       <div className="columns">
