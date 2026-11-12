@@ -33,9 +33,15 @@ class JudgmentRequest(BaseModel):
 
 def _db_store(request: Request):  # noqa: ANN202
     store = request.app.state.case_store
-    if not hasattr(store, "save_judgment"):
+    if not hasattr(store, "save_judgment") or not hasattr(store, "list_cases"):
         raise HTTPException(status_code=503, detail="保存先のDBが設定されていません")
     return store
+
+
+@router.get("")
+def list_cases(request: Request) -> list[dict]:
+    """案件の一覧。HTTPモックは呼ばない。並びは案件ID順（受付日時の列がないため）。"""
+    return _db_store(request).list_cases()
 
 
 @router.get("/{case_id}")

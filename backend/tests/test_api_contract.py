@@ -70,6 +70,28 @@ class ContractStore(intake.InMemoryCaseStore):
             "result": stored.get("result"),
         }
 
+    def list_cases(self) -> list[dict]:
+        """一覧の各行。並びは案件ID順（受付日時の列がないため）。"""
+        rows = []
+        for case_id in sorted(self.cases):
+            stored = self.cases[case_id]
+            counts = {"yes": 0, "no": 0, "pending": 0}
+            for answer in stored["answers"].values():
+                counts[answer] += 1
+            counts["unanswered"] = len(QUESTION_CODES) - len(stored["answers"])
+            result = stored.get("result")
+            rows.append(
+                {
+                    "case_id": case_id,
+                    "summary": stored["summary"],
+                    "user_id": stored["user"]["user_id"],
+                    "inquiry": stored["inquiry"],
+                    "result_code": result["result_code"] if result else None,
+                    "counts": counts,
+                }
+            )
+        return rows
+
     def save_judgment(self, case_id, result_code, answers, adopted_rule) -> None:
         self.save_calls.append((case_id, result_code, dict(answers), adopted_rule))
         stored = self.cases.get(case_id)
@@ -171,6 +193,53 @@ class CasesApiContract(unittest.TestCase):
         self.assertEqual(self.answers_of(self.get(case_id))["A09"], "pending")
 
     # --- ［判定する］（PUT） ----------------------------------------------------
+
+    # --- 一覧（GET /api/cases） --------------------------------------------------
+
+    def list_cases(self) -> list[dict]:
+        status, body = send("GET", f"{self.server.base_url}/api/cases")
+        self.assertEqual(status, 200, body)
+        return body
+
+    def test_list_returns_summary_rows_in_case_id_order(self):
+        yes_case = self.intake("456")  # A09 は yes
+        no_case = self.intake("457")  # A09 は no
+        pending_case = self.intake_with_pending_a09()  # A09 は確認待ち
+        rows = self.list_cases()
+        ids = [row["case_id"] for row in rows]
+        self.assertEqual(ids, sorted(ids))  # 案件ID順（仮）
+        by_id = {row["case_id"]: row for row in rows}
+        row = by_id[yes_case]
+        self.assertEqual(
+            set(row),
+            {"case_id", "summary", "user_id", "inquiry", "result_code", "counts"},
+        )
+        self.assertEqual(row["user_id"], "456")
+        self.assertEqual(set(row["inquiry"]), {"subject", "body"})
+        self.assertIsNone(row["result_code"])  # 未判定は null
+        self.assertEqual(
+            row["counts"], {"yes": 1, "no": 0, "pending": 0, "unanswered": 11}
+        )
+        self.assertEqual(by_id[no_case]["counts"]["no"], 1)
+        self.assertEqual(
+            by_id[pending_case]["counts"],
+            {"yes": 0, "no": 0, "pending": 1, "unanswered": 11},
+        )
+
+    def test_list_reflects_a_saved_judgment(self):
+        case_id = self.intake()
+        self.judge(case_id, {"result_code": "caution", "answers": {"A01": "yes"}})
+        row = {r["case_id"]: r for r in self.list_cases()}[case_id]
+        self.assertEqual(row["result_code"], "caution")
+        self.assertEqual(
+            row["counts"], {"yes": 2, "no": 0, "pending": 0, "unanswered": 10}
+        )
+
+    def test_list_does_not_call_the_mock(self):
+        self.intake()
+        calls = len(self.mock_calls)
+        self.list_cases()
+        self.assertEqual(len(self.mock_calls), calls)
 
     def test_put_unknown_case_is_404(self):
         status, body = self.judge("CASE-NOPE", {"result_code": "caution"})
@@ -379,6 +448,21 @@ class CasesApiContract(unittest.TestCase):
         self.assertEqual(len(self.store.save_calls), before)
 
 
+class EmptyList(unittest.TestCase):
+    """案件が1件もないときの一覧は、空の配列（200）。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = _Server(make_app(ContractStore(), [])).__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.__exit__()
+
+    def test_list_is_an_empty_array(self):
+        self.assertEqual(send("GET", f"{self.server.base_url}/api/cases"), (200, []))
+
+
 class WithoutDatabase(unittest.TestCase):
     """保存先がDBでない（開発用のメモリ保存）ときの契約: 503。"""
 
@@ -393,6 +477,7 @@ class WithoutDatabase(unittest.TestCase):
     def test_get_and_put_return_503(self):
         base = f"{self.server.base_url}/api/cases/CASE-ANY"
         self.assertEqual(send("GET", base)[0], 503)
+        self.assertEqual(send("GET", f"{self.server.base_url}/api/cases")[0], 503)
         self.assertEqual(
             send("PUT", f"{base}/judgment", {"result_code": "caution"})[0], 503
         )

@@ -176,6 +176,37 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(user_data, {"user_id": "456"})
         self.assertEqual(set(inquiry_data), {"subject", "body"})
 
+    def test_list_cases_returns_summary_rows_in_case_id_order(self):
+        first, _ = self.intake("456")  # A09 は yes
+        second, _ = self.intake("457")  # A09 は no
+        self.judge(first, {"result_code": "caution", "answers": {"A01": "yes"}})
+        with (
+            mock.patch("app.intake.MOCK_TIMEOUT_SECONDS", 0.5),
+            mock.patch("app.mock_api.FAULT_DELAY_SECONDS", 2.0),
+        ):
+            third, _ = self.intake("458", demo_controls={"fault_questions": ["A09"]})
+        rows = self.store.list_cases()
+        self.assertEqual([r["case_id"] for r in rows], sorted([first, second, third]))
+        by_id = {r["case_id"]: r for r in rows}
+        self.assertEqual(by_id[first]["user_id"], "456")
+        self.assertEqual(by_id[first]["result_code"], "caution")
+        self.assertEqual(
+            by_id[first]["counts"], {"yes": 2, "no": 0, "pending": 0, "unanswered": 10}
+        )
+        # 取得に失敗した案件は、確認待ち（pending）が1件
+        self.assertEqual(
+            by_id[third]["counts"], {"yes": 0, "no": 0, "pending": 1, "unanswered": 11}
+        )
+        self.assertIsNone(by_id[second]["result_code"])  # 未判定
+        self.assertEqual(
+            by_id[second]["counts"], {"yes": 0, "no": 1, "pending": 0, "unanswered": 11}
+        )
+        # HTTP経由でも同じ内容（再表示と同じく、HTTPモックは呼ばない）
+        calls = len(self.mock_calls)
+        status, body = send("GET", f"{self.server.base_url}/api/cases")
+        self.assertEqual((status, body), (200, rows))
+        self.assertEqual(len(self.mock_calls), calls)
+
     def test_s4_failure_leaves_pending(self):
         with (
             mock.patch("app.intake.MOCK_TIMEOUT_SECONDS", 0.5),

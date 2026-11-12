@@ -12,7 +12,9 @@ import uuid
 # 初版の対象はA09のみ。設問の追加はここへ足す。
 AUTO_ANSWER_KEYS: dict[str, str] = {"A09": "parity"}
 
-# 保存できる結果コード。値は仮（未合意）。表示名ではなくコードで保存する。
+# 保存できる結果コード（2026-11-12に、この4つで確定）。表示名ではなくコードで保存する。
+# 画面の表示名（アカウント削除、アカウント一時凍結、注意、問題なし）との対応は、
+# 画面側の1か所に置く。
 RESULT_CODES = ("account_deletion", "account_suspension", "caution", "no_issue")
 # オペレータは担当者1名固定（ログインなし）。
 OPERATOR_ID = "OP-1"

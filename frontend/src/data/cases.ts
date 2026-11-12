@@ -1,7 +1,7 @@
 import { questions, type QuestionId } from "./questions";
 
-// 固定の架空案件（フロント内のフィクスチャ）。HTTP・DBの契約は未合意のため作らない。
-// 回答の値は表示の確認用で、業務上の認定を示すものではない。
+// 固定の架空案件。画面は、APIから案件を取得して表示する（api.ts）。この配列は、単体テストの
+// フィクスチャとして残している。回答の値は表示の確認用で、業務上の認定を示すものではない。
 
 /** 回答。確認待ちは No・未回答と区別する。未回答は回答欄に値がないこと。 */
 export type Answer = "yes" | "no" | "pending";
@@ -104,10 +104,9 @@ export function tally(c: ReviewCase): Tally {
   return t;
 }
 
-/** 画面案（未承認）の表示用の状態。回答の集計と登録結果の有無から計算する。 */
-export function statusOf(c: ReviewCase): CaseStatus {
+/** 表示用の状態。登録結果の有無と、回答の集計（確認待ちの有無）から計算する。 */
+export function statusOf(c: { result?: ResultName; counts: Tally }): CaseStatus {
   if (c.result !== undefined) return "登録済み";
-  const t = tally(c);
-  if (t.pending > 0) return "取得エラー";
+  if (c.counts.pending > 0) return "取得エラー";
   return "未審査";
 }

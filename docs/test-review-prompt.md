@@ -69,6 +69,7 @@
 
 - 許可された読み取りと、`git diff`・`git status`・`git log`・`git show`。
 - テストの実行（`docker compose run --rm --no-deps --build backend ...`、`docker compose run --rm --no-deps --build frontend ...`）。`docker compose up` は使わない。
+- コマンドは、許可されたものを、1つずつ、単純な形で実行する（`&&`、パイプ、`cd`、複数行をまとめると拒否されることがある。拒否されたら、単純な形に分けて、やり直す）。
 - 上記以外のコマンドと、ファイルの書き込みは、権限により拒否される。「壊すと赤くなるか」を実際に確かめることはできない。実装とアサーションを読んで判断し、確かめていないものは「未確認」と書く。
 
 ## 報告の形式（日本語）

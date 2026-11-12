@@ -26,8 +26,8 @@
 
 | 種類 | ファイル | 役割 | Reactを取り込んでよいか |
 | --- | --- | --- | --- |
-| ロジック・データ | `src` 直下の camelCase の `.ts`（`matching.ts`、`route.ts` など）、`data/*.ts` | 照合の判断、ルートの解釈、固定の架空データ。純粋な関数とデータ | **取り込まない** |
-| Reactを使うもの | 画面の部品（PascalCaseの `.tsx`: `CaseDetail`、`CaseList` など）、フック（`use〇〇.ts`: `useRoute.ts`） | 描画、操作、Reactの状態やブラウザの機能を使う処理 | 取り込んでよい |
+| ロジック・データ | `src` 直下の camelCase の `.ts`（`matching.ts`、`route.ts`、`api.ts`、`resultCodes.ts` など）、`data/*.ts` | 照合の判断、ルートの解釈、APIの呼び出し（`fetch`）、結果コードの対応、固定の架空データ。純粋な関数とデータ | **取り込まない** |
+| Reactを使うもの | 画面の部品（PascalCaseの `.tsx`: `CaseDetail`、`CaseList` など）、フック（`use〇〇.ts`: `useRoute.ts`、`useApi.ts`） | 描画、操作、Reactの状態やブラウザの機能を使う処理 | 取り込んでよい |
 
 - ロジック・データは、React を取り込まない。画面の都合は、部品かフックに置き、ロジックは純粋な関数・データとして切り出す。
 - 命名で見分ける: 部品は PascalCase の `.tsx`、フックは `use〇〇.ts`、ロジックはそれ以外の camelCase の `.ts`。

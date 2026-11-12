@@ -78,8 +78,9 @@ docker compose logs --tail=50 frontend backend
 
 | Where to check | Expected result |
 | --- | --- |
-| Browser: [http://localhost:5173/](http://localhost:5173/) | Heading "不正審査デモ" (Fraud Review Demo) and the description "初期化の確認用の画面です。業務画面は未実装です。" (This is a screen for confirming initialization. Business screens are not implemented.) |
+| Browser: [http://localhost:5173/](http://localhost:5173/) | The heading "審査対象一覧" (list of cases to review). The list is loaded from the API (`GET /api/cases`); with no cases yet, "条件に合う案件がありません" is shown. To see a case, create one through the intake API (see "Saving and redisplaying a judgment" below). |
 | [http://localhost:8000/health](http://localhost:8000/health) | HTTP 200, JSON `{"status":"ok"}` |
+| [http://localhost:8000/api/cases](http://localhost:8000/api/cases) | HTTP 200, a JSON array (empty before the first case) |
 
 ```bash
 curl --fail --show-error http://localhost:5173/
@@ -87,6 +88,20 @@ curl --fail --show-error http://localhost:8000/health
 ```
 
 Fetching Vite's HTML alone does not confirm that React renders, so also check the heading and description in a browser. Ports map host 5173 → container 5173 and host 8000 → container 8000.
+
+### Saving and redisplaying a judgment
+
+The screen calls the API with relative paths (`/api/...`). In development and in the E2E run, the Vite dev server proxies `/api` to the `backend` service (see `frontend/vite.config.ts`); in production FastAPI serves the built screen too, so the same code runs on the same origin. No CORS setting is needed.
+
+Cases come from the intake API (a system-to-system call; the screen has no intake form). Try the whole flow from the host:
+
+```bash
+curl -s -X POST http://localhost:8000/api/intake/cases -H 'Content-Type: application/json' \
+  -d '{"summary":"架空の問い合わせ","user":{"user_id":"456"},"inquiry":{"subject":"架空","body":"架空の本文"}}'
+# open http://localhost:5173/ , open the case, choose a result and press "判定する", then reload the page
+```
+
+The result is saved by "判定する" (`PUT /api/cases/{id}/judgment`) and shown again when the case is reopened. Answer edits on the screen are not saved yet. The API contract is in [intake-mock-contract-design.md](docs/intake-mock-contract-design.md) (section 2.8).
 
 ### Local database
 
@@ -152,6 +167,8 @@ On 2026-11-08 (Japan time), the entire procedure was run from a fresh checkout o
 - `docker compose down`: stopped and removed the services and the Compose network.
 
 On 2026-11-12 (Japan time), the Compose setup with the development database and the test commands were checked on the same kind of environment (Docker 29.4.0 / Compose 5.1.2). Checked: the API contract and backend unit tests (70 run, 16 skipped because they need the database, OK) and the frontend tests (Vitest, 35 run including 21 `.tsx` component tests, OK) with no database; `docker compose up -d --wait` starting all services with `db-init` applying the DDL and the sample data (12 questions, 1 rule); inside the `backend` container, intake (201), redisplay, saving a judgment (204), rejecting an undefined result code (422) and redisplay of the saved result; the dependency-direction checks (`lint-imports`: 3 contracts kept on 24 files; ESLint `no-restricted-imports`), each also confirmed to fail with a remediation message when a violation is temporarily introduced; data kept after `docker compose down` and `up` (the DDL was not applied again); data removed and re-initialized after `down -v`; `bash scripts/e2e.sh` (success); `bash scripts/backend-db-test.sh` (70 run, OK; includes the check of `db/init_dev.py`) and `bash scripts/db-verify.sh` (success). Not checked: opening `http://localhost:5173/` and `http://localhost:8000/health` from the host for the new setup (those host ports were in use, so the startup check used a temporary override without published host ports and called the API from inside the container), and the new CI steps (`lint-imports`, the backend unit tests, `npm test`) in GitHub Actions.
+
+On 2026-11-12 (Japan time), the screen was connected to the API (the first vertical slice: open a case, choose a result, save it, reopen it). Checked locally: the API contract tests including `GET /api/cases` (75 run, 17 skipped because they need the database, OK), the DB integration (75 run, OK), the frontend tests (Vitest, 72 run, OK; 42 of them are `.tsx` component and hook tests), lint, the build, the dependency-direction checks, and `bash scripts/e2e.sh` (6 tests, success: acceptance example 7 through the screen, the API and the database; the list; the not-found display; the mobile width). Each new kind of test was confirmed to fail when the code is broken temporarily (the double-submit guard, the handling of a failed save, the result in a list row, and a wrong result code in the E2E run). Not checked: operating the screen by hand in a browser, serving the built screen from FastAPI (`STATIC_DIR`, the same origin as the API) with the new API calls, the new test steps in GitHub Actions, and real Aurora DSQL. That the HTTP mock is not called again on redisplay is checked at the API integration level (real HTTP, counting the mock calls), not in the browser E2E.
 
 Browser display is checked at `http://localhost:5173/` as described. By default, Vite's dev server accepts connections only from `localhost`, `.localhost`, and IP addresses (default behavior of the official Vite `server.allowedHosts`, confirmed 2026-11-08). In this repository, `allowedHosts` in `frontend/vite.config.ts` additionally allows the Compose service name `frontend` for E2E. Access checks with other host names are outside the scope of this procedure.
 
@@ -241,7 +258,7 @@ bash scripts/e2e.sh --force-failure  # intentionally fail by changing the expect
 
 Compose starts frontend (Vite) and backend (FastAPI) under a dedicated project name (`decision-table-demo-e2e`), waits on healthchecks, and then runs Playwright (`e2e/`). Afterward, it stops and removes only that project's containers and network. Host ports are not published, so you can run it while the normal development environment (`docker compose up`) is up, and it does not affect that environment. The exit code is 0 on success and non-zero on failure. Startup or wait failures also give a non-zero code. On failure, check the reason in the report at `e2e/playwright-report/index.html` and the traces in `e2e/test-results/`. CI also calls the same `bash scripts/e2e.sh`. The CI workflow and check names will be decided in a separate issue.
 
-The targets are only the initial screen display and the `GET /health` response. Business E2E scenarios, inputs, and expected results will be added separately after the initial requirements are agreed, and will be recorded apart from this environment's smoke results.
+The environment smoke tests (`e2e/tests/smoke.spec.ts`) check only the initial screen display and the `GET /health` response. The business E2E tests (`e2e/tests/review.spec.ts`) go through the screen, the API and the database: open a case created through the intake API, choose a result, press "判定する", reload and check the saved result (acceptance example 7), the list and the not-found display, and the mobile width. The screen reaches the API through the Vite proxy (`/api` to the `backend` service). Business results are recorded apart from the environment smoke results. Behavior that does not need a real browser is checked by the component tests (`frontend/src/*.test.tsx`).
 
 ## CI (GitHub Actions)
 
