@@ -14,7 +14,6 @@ import json
 import os
 import urllib.error
 import urllib.request
-import uuid
 from datetime import datetime
 from typing import Annotated, Protocol
 
@@ -27,6 +26,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.db_store import new_case_id
 from app.mock_api import AUTO_ANSWER_KEYS, FAULT_TIMEOUT
 
 # 受付側のタイムアウト（ユーザー合意: 3秒）。
@@ -80,11 +80,20 @@ class IntakeRequest(BaseModel):
             raise ValueError(
                 "period_start_at と period_end_at は両方指定するか、両方省く"
             )
+        if self.period_start_at is not None:
+            try:
+                ordered = self.period_start_at < self.period_end_at
+            except TypeError:  # タイムゾーンの有無が揃っていない
+                raise ValueError(
+                    "period_start_at と period_end_at のタイムゾーンの有無を揃える"
+                ) from None
+            if not ordered:
+                raise ValueError("period_start_at は period_end_at より前にする")
         return self
 
 
 class CaseStore(Protocol):
-    """受付の保存境界。実DBの実装は別Issueで差し替える。"""
+    """受付の保存境界。実装はメモリ（開発用）とPostgreSQL（db_store）。"""
 
     def create_case(self, case: dict) -> str:
         """1回目の保存。A09などの自動回答対象は pending で作る。案件IDを返す。"""
@@ -100,7 +109,7 @@ class InMemoryCaseStore:
         self.cases: dict[str, dict] = {}
 
     def create_case(self, case: dict) -> str:
-        case_id = f"CASE-{uuid.uuid4().hex[:8].upper()}"  # 仮の形式
+        case_id = new_case_id()
         self.cases[case_id] = {
             **case,
             "answers": {code: "pending" for code in AUTO_ANSWER_KEYS},
