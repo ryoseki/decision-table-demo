@@ -51,7 +51,7 @@ The initialization verification record used Docker 29.4.0 / Compose 5.1.2. These
 
 | Target | Pinned versions / definitions |
 | --- | --- |
-| Frontend | Node.js 26.13.0, npm 11.20.0 (bundled with the base image), React 19.3.1, Vite 8.3.6, TypeScript 6.0.3, ESLint 10.14.0 |
+| Frontend | Node.js 26.13.0, npm 11.20.0 (bundled with the base image), React 19.3.1, Vite 8.3.6, TypeScript 6.0.3, ESLint 10.14.0, Vitest 5.0.5, jsdom 30.1.3, Testing Library (react 16.3.3, dom 10.4.2) |
 | API | Python 3.14.10, uv 0.13.7, Ruff 0.17.4, import-linter 2.14 (dependency-direction check; see [architecture](ARCHITECTURE.md)). Concrete versions including FastAPI and Uvicorn, and transitive dependencies, are pinned in `backend/requirements.txt` |
 | npm dependencies | `frontend/package.json` and `frontend/package-lock.json`. Installed with `npm ci` at image build time |
 | Python dependencies | Hashed `backend/requirements.txt` and `backend/requirements-dev.txt`. Synced into the container's Python at build time with `uv pip sync --system requirements.txt requirements-dev.txt` |
@@ -104,10 +104,12 @@ Run these at the repository root. They need no running services and no database 
 
 | Layer | Command |
 | --- | --- |
-| Backend unit (no database) | `docker compose run --rm --no-deps --build backend python -m unittest discover -s tests -t .` |
+| API contract and backend unit (no database) | `docker compose run --rm --no-deps --build backend python -m unittest discover -s tests -t .` |
+| Frontend unit (Vitest + jsdom, `*.test.ts` and `*.test.tsx`; API mocked, no server connection) | `docker compose run --rm --no-deps --build frontend npm test` |
 | E2E (one end-to-end flow) | `bash scripts/e2e.sh` |
 | DB integration (local PostgreSQL only) | `bash scripts/backend-db-test.sh` |
 | Architecture: dependency direction, backend (import-linter) | `docker compose run --rm --no-deps --build backend lint-imports` |
+| Architecture: dependency direction, frontend (ESLint `no-restricted-imports`, part of lint) | `docker compose run --rm --no-deps --build frontend npm run lint` |
 
 `--build` rebuilds the image first, because the source is copied into the image (no bind mounts). Without it, the tests may run against an old copy of the source. Tests that need the database are skipped unless `RUN_DB_TESTS=1`, which only `scripts/backend-db-test.sh` sets.
 
@@ -149,7 +151,7 @@ On 2026-11-08 (Japan time), the entire procedure was run from a fresh checkout o
 - In-container checks: `npm run lint`, `npm run build`, `ruff check .`, `ruff format --check .`, and `uv pip check` all exited with code 0.
 - `docker compose down`: stopped and removed the services and the Compose network.
 
-On 2026-11-12 (Japan time), the Compose setup with the development database and the test commands were checked on the same kind of environment (Docker 29.4.0 / Compose 5.1.2). Checked: the backend unit tests (50 run, 16 skipped because they need the database, OK) with no database; `docker compose up -d --wait` starting all services with `db-init` applying the DDL and the sample data (12 questions, 1 rule); inside the `backend` container, intake (201), redisplay, saving a judgment (204), rejecting an undefined result code (422) and redisplay of the saved result; the dependency-direction check (`lint-imports`: 3 contracts kept on 24 files), also confirmed to fail with a remediation message when a violation is temporarily introduced; data kept after `docker compose down` and `up` (the DDL was not applied again); data removed and re-initialized after `down -v`; `bash scripts/e2e.sh` (success); `bash scripts/backend-db-test.sh` (50 run, OK; includes the check of `db/init_dev.py`) and `bash scripts/db-verify.sh` (success). Not checked: opening `http://localhost:5173/` and `http://localhost:8000/health` from the host for the new setup (those host ports were in use, so the startup check used a temporary override without published host ports and called the API from inside the container), and the new CI step (`lint-imports`) in GitHub Actions.
+On 2026-11-12 (Japan time), the Compose setup with the development database and the test commands were checked on the same kind of environment (Docker 29.4.0 / Compose 5.1.2). Checked: the API contract and backend unit tests (70 run, 16 skipped because they need the database, OK) and the frontend tests (Vitest, 35 run including 21 `.tsx` component tests, OK) with no database; `docker compose up -d --wait` starting all services with `db-init` applying the DDL and the sample data (12 questions, 1 rule); inside the `backend` container, intake (201), redisplay, saving a judgment (204), rejecting an undefined result code (422) and redisplay of the saved result; the dependency-direction checks (`lint-imports`: 3 contracts kept on 24 files; ESLint `no-restricted-imports`), each also confirmed to fail with a remediation message when a violation is temporarily introduced; data kept after `docker compose down` and `up` (the DDL was not applied again); data removed and re-initialized after `down -v`; `bash scripts/e2e.sh` (success); `bash scripts/backend-db-test.sh` (70 run, OK; includes the check of `db/init_dev.py`) and `bash scripts/db-verify.sh` (success). Not checked: opening `http://localhost:5173/` and `http://localhost:8000/health` from the host for the new setup (those host ports were in use, so the startup check used a temporary override without published host ports and called the API from inside the container), and the new CI steps (`lint-imports`, the backend unit tests, `npm test`) in GitHub Actions.
 
 Browser display is checked at `http://localhost:5173/` as described. By default, Vite's dev server accepts connections only from `localhost`, `.localhost`, and IP addresses (default behavior of the official Vite `server.allowedHosts`, confirmed 2026-11-08). In this repository, `allowedHosts` in `frontend/vite.config.ts` additionally allows the Compose service name `frontend` for E2E. Access checks with other host names are outside the scope of this procedure.
 

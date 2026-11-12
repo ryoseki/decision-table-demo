@@ -1,4 +1,4 @@
-# PRの更新ごとに、lint・依存の向きの検査・ビルド・E2Eスモークを実行する。
+# PRの更新ごとに、lint・ビルド・単体テスト（backend・frontend）・E2Eスモークを実行する。
 # 3つのジョブ名（frontend / backend / e2e）が、取り込み前に必須とするチェック名の候補。
 # アクションはコミットSHAで固定している（コメントは対応するタグ）。
 name: CI
@@ -36,6 +36,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      # ローカルと同じテスト（APIはモックで、サーバーに接続しない）
+      - run: npm test
 
   backend:
     name: backend
@@ -57,6 +59,8 @@ jobs:
       - run: ruff format --check .
       # 依存の向きの検査（違反すると、契約の名前に書いた直し方が表示される）
       - run: lint-imports
+      # ローカルと同じテスト。DBなし（DB付きのテストは RUN_DB_TESTS=1 でないとスキップされる）
+      - run: python -m unittest discover -s tests -t .
 
   e2e:
     name: e2e

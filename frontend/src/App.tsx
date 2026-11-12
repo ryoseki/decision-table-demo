@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import CaseDetail from "./CaseDetail";
 import CaseList, { type ListFilter } from "./CaseList";
-import { useRoute } from "./route";
+import { useRoute } from "./useRoute";
 
 export default function App() {
   const route = useRoute();
