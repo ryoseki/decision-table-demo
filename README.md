@@ -93,13 +93,14 @@ Fetching Vite's HTML alone does not confirm that React renders, so also check th
 
 The screen calls the API with relative paths (`/api/...`). In development and in the E2E run, the Vite dev server proxies `/api` to the `backend` service (see `frontend/vite.config.ts`); in production FastAPI serves the built screen too, so the same code runs on the same origin. No CORS setting is needed.
 
-Cases come from the intake API (a system-to-system call; the screen has no intake form). Try the whole flow from the host:
+The list shows the cases stored in the database, and the screen has no intake form: cases come from the intake API (a system-to-system call). Right after `docker compose up -d` the list is empty. To create fictional demo cases (2 not yet reviewed, 1 with a failed automatic answer, 1 already registered) from the host:
 
 ```bash
-curl -s -X POST http://localhost:8000/api/intake/cases -H 'Content-Type: application/json' \
-  -d '{"summary":"架空の問い合わせ","user":{"user_id":"456"},"inquiry":{"subject":"架空","body":"架空の本文"}}'
-# open http://localhost:5173/ , open the case, choose a result and press "判定する", then reload the page
+bash scripts/seed-demo-cases.sh     # needs only curl; set API_BASE if the API is not at http://localhost:8000
+# then open http://localhost:5173/ and reload the page
 ```
+
+Each run adds new cases. To start over, run `docker compose down -v` (it deletes the development database) and `docker compose up -d`. A single case can also be created by hand with `POST /api/intake/cases` (see the API contract below); the first run of the list and the reopening of a case can be tried from the host through the Vite proxy, for example `curl http://localhost:5173/api/cases`.
 
 The result is saved by "判定する" (`PUT /api/cases/{id}/judgment`) and shown again when the case is reopened. Answer edits on the screen are not saved yet. The API contract is in [intake-mock-contract-design.md](docs/intake-mock-contract-design.md) (section 2.8).
 
