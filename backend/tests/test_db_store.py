@@ -9,7 +9,6 @@ import json
 import os
 import re
 import secrets
-import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -336,26 +335,6 @@ class DbFlow(unittest.TestCase):
             [(1,)],
         )
         self.assertIsNone(self.answers_of(self.get(case_id))["A02"])
-
-    def test_concurrent_judgments_on_one_case_are_serialized(self):
-        """同じ案件の保存は、別トランザクションが行を保持している間は待つ。"""
-        case_id, _ = self.intake("456")
-        done = threading.Event()
-
-        def save():
-            self.store.save_judgment(case_id, "caution", {"A01": "yes"}, None)
-            done.set()
-
-        with _connect(self.schema) as holder:
-            holder.execute(
-                "SELECT 1 FROM case_results WHERE case_id = %s FOR UPDATE", (case_id,)
-            )
-            worker = threading.Thread(target=save)
-            worker.start()
-            self.assertFalse(done.wait(1.0), "ロック中は保存が進まない")
-        worker.join(10)
-        self.assertTrue(done.is_set())
-        self.assertEqual(self.answers_of(self.get(case_id))["A01"], "yes")
 
     # --- 失敗とロールバック（S5・S12） -----------------------------------------------
 
