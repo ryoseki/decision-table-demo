@@ -14,6 +14,7 @@ from app import (
     question_admin,
     question_proposer,
     question_store,
+    rules,
 )
 
 app = FastAPI(title="不正審査デモ API")
@@ -32,6 +33,7 @@ app.include_router(question_admin.router)
 app.include_router(mock_api.router)
 app.include_router(intake.router)
 app.include_router(cases.router)
+app.include_router(rules.router)
 
 _SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 

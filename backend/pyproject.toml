@@ -13,25 +13,25 @@ root_package = "app"
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "HTTP層（cases・intake・mock_api・question_admin）は、DB用モジュール（db_store）、設問の保存先とAIモックの実装（question_store・question_proposer）、psycopg を取り込まない。直し方: 例外・定数・ID生成は app.domain に置いて取り込む。保存先やAIモックは、app.main で組み立てて app.state（case_store・question_store・question_proposer）から受け取り、HTTP層は共通の形（save_judgment などのメソッド、Protocol）だけを呼ぶ。詳細は ARCHITECTURE.md"
+name = "HTTP層（cases・intake・mock_api・question_admin・rules）は、DB用モジュール（db_store）、設問の保存先とAIモックの実装（question_store・question_proposer）、psycopg を取り込まない。直し方: 例外・定数・ID生成は app.domain に置いて取り込む。保存先やAIモックは、app.main で組み立てて app.state（case_store・question_store・question_proposer）から受け取り、HTTP層は共通の形（save_judgment などのメソッド、Protocol）だけを呼ぶ。詳細は ARCHITECTURE.md"
 type = "forbidden"
-source_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin"]
+source_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rules"]
 forbidden_modules = ["app.db_store", "app.question_store", "app.question_proposer", "psycopg"]
 
 [[tool.importlinter.contracts]]
-name = "DB用モジュール（db_store）は、HTTP層（cases・intake・mock_api・question_admin）と fastapi を取り込まない。直し方: 共有する定数・例外は app.domain に置いて取り込む。HTTPの都合（ステータス、リクエストの型）は HTTP層に置く。詳細は ARCHITECTURE.md"
+name = "DB用モジュール（db_store）は、HTTP層（cases・intake・mock_api・question_admin・rules）と fastapi を取り込まない。直し方: 共有する定数・例外は app.domain に置いて取り込む。HTTPの都合（ステータス、リクエストの型）は HTTP層に置く。詳細は ARCHITECTURE.md"
 type = "forbidden"
 source_modules = ["app.db_store"]
-forbidden_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin", "fastapi"]
+forbidden_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rules", "fastapi"]
 
 [[tool.importlinter.contracts]]
 name = "ドメイン（domain）、照合（rule_matching）、設問案の検証（question_validation）は、fastapi・starlette・pydantic・psycopg と、他のアプリ内モジュールを取り込まない。直し方: フレームワークやDBの都合を持ち込まず、純粋な関数・定数・例外だけにする。必要なものは呼び出し側から引数で渡す。詳細は ARCHITECTURE.md"
 type = "forbidden"
 source_modules = ["app.domain", "app.rule_matching", "app.question_validation"]
-forbidden_modules = ["fastapi", "starlette", "pydantic", "psycopg", "app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.db_store", "app.question_store", "app.question_proposer"]
+forbidden_modules = ["fastapi", "starlette", "pydantic", "psycopg", "app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rules", "app.db_store", "app.question_store", "app.question_proposer"]
 
 [[tool.importlinter.contracts]]
 name = "設問案の保存先（question_store）とAIモック（question_proposer）は、HTTP層・fastapi・DB用モジュール（db_store）・psycopg を取り込まない。直し方: HTTPの都合は app.question_admin に置き、共有する例外は app.domain、検証と型は app.question_validation に置く。この2つはDBなしで動く（DB接続は別Issue）。詳細は ARCHITECTURE.md"
 type = "forbidden"
 source_modules = ["app.question_store", "app.question_proposer"]
-forbidden_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.db_store", "fastapi", "psycopg"]
+forbidden_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rules", "app.db_store", "fastapi", "psycopg"]

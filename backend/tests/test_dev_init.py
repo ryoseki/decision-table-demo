@@ -17,7 +17,16 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from app.rule_matching import DEMO_RULES, Result
 from tests.test_db_store import DOCS, HAVE_DB, _connect
+
+# 照合ロジックの結果（表示名）と、DBの結果コードの対応（画面と同じ4つ）。
+CODE_OF_RESULT = {
+    Result.ACCOUNT_DELETION: "account_deletion",
+    Result.ACCOUNT_SUSPENSION: "account_suspension",
+    Result.CAUTION: "caution",
+    Result.NO_ISSUE: "no_issue",
+}
 
 INIT_DEV = Path(os.environ.get("DB_INIT_DIR", "/repo/db")) / "init_dev.py"
 TABLES = [
@@ -91,7 +100,19 @@ class DevInit(unittest.TestCase):
             [q[0] for q in questions],
             sorted(q["question_code"] for q in sample["review_questions"]),
         )
-        self.assertEqual(len(rules), len(sample["decision_rules"]))  # 判定ルールの件数
+        # 判定ルールは、画面の受入例用の開発用ルール（R01〜R03）。
+        self.assertEqual([r[0] for r in rules], ["R01", "R02", "R03"])
+        self.assertEqual(
+            [r[2] for r in rules], ["caution", "no_issue", "account_suspension"]
+        )
+        self.assertTrue(all(len(r[3]) == 12 for r in rules))  # 条件はA01〜A12の12問
+        # 条件の中身も、照合ロジックの定義（rule_matching.DEMO_RULES）と同じ。
+        for rule_id, _, code, conditions, _ in rules:
+            expected = next(r for r in DEMO_RULES if r.rule_id == rule_id)
+            self.assertEqual(
+                conditions, {q: a.value for q, a in expected.conditions.items()}
+            )
+            self.assertEqual(code, CODE_OF_RESULT[expected.result])
         first = (tables, questions, rules)
 
         code, out = self.run_init()  # 2回目

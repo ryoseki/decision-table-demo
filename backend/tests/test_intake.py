@@ -20,7 +20,7 @@ from unittest import mock
 import uvicorn
 from fastapi import FastAPI
 
-from app import cases, intake, mock_api
+from app import cases, intake, mock_api, rules
 
 
 class _Server:
@@ -98,6 +98,7 @@ def make_app(store: intake.InMemoryCaseStore, mock_calls: list[str]) -> FastAPI:
     application.include_router(mock_api.router)
     application.include_router(intake.router)
     application.include_router(cases.router)
+    application.include_router(rules.router)
 
     @application.middleware("http")
     async def count_mock_calls(request, call_next):

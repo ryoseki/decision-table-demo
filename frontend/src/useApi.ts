@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { getCase, listCases, type CaseListRow } from "./api";
+import { getCase, listCases, listRules, type CaseListRow } from "./api";
+import type { Rule } from "./matching";
 import type { ReviewCase } from "./data/cases";
 import { getDemoQuestions, type DemoQuestionList } from "./questionsApi";
 
@@ -38,4 +39,8 @@ export function useDemoQuestions(version: number): Remote<DemoQuestionList> {
 
 export function useCase(caseId: string): Remote<ReviewCase> {
   return useRemote(() => getCase(caseId), `case:${caseId}`);
+}
+
+export function useRules(): Remote<Rule[]> {
+  return useRemote(listRules, "rules");
 }

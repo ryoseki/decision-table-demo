@@ -165,6 +165,24 @@ class PostgresCaseStore:
             ),
         }
 
+    def list_rules(self) -> list[dict[str, Any]]:
+        """rule_id ごとに最新の revision の行。rule_id 順。HTTPモックは呼ばない。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT ON (rule_id)"
+                " rule_id, revision, result_code, conditions"
+                " FROM decision_rules ORDER BY rule_id, revision DESC"
+            ).fetchall()
+        return [
+            {
+                "rule_id": rule_id,
+                "revision": revision,
+                "result_code": result_code,
+                "conditions": conditions,
+            }
+            for rule_id, revision, result_code, conditions in rows
+        ]
+
     def list_cases(self) -> list[dict[str, Any]]:
         """一覧の各行。並びは案件ID順（受付日時の列がないため）。HTTPモックは呼ばない。
 

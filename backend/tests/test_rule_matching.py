@@ -8,6 +8,7 @@ from app.rule_matching import (
     ConditionState,
     Result,
     RowDisplay,
+    Rule,
     match_rules,
 )
 
@@ -138,6 +139,28 @@ class AnswerStates(unittest.TestCase):
             match_rules({"A13": Y})
         with self.assertRaises(ValueError):
             match_rules({"C01": Y})
+
+
+class RulesWithSomeConditions(unittest.TestCase):
+    """条件のない設問は「問わない」。条件のある設問だけで、通常・グレーが決まる。"""
+
+    RULE = Rule("P1", Result.CAUTION, {"A03": Answer.NO, "A09": Answer.YES})
+
+    def match(self, answers):
+        return match_rules(answers, (self.RULE,)).rules[0]
+
+    def test_unconstrained_questions_are_any_and_never_mismatch(self):
+        m = self.match({"A01": Y, "A02": N, "A12": P})
+        self.assertEqual(m.states["A01"], ConditionState.ANY)
+        self.assertEqual(m.display, RowDisplay.NORMAL)
+
+    def test_constrained_questions_decide_the_display(self):
+        self.assertEqual(self.match({"A03": N, "A09": Y}).display, RowDisplay.NORMAL)
+        matched = self.match({"A03": N, "A09": Y})
+        self.assertEqual(matched.states["A03"], ConditionState.MATCH)
+        gray = self.match({"A03": Y})
+        self.assertEqual(gray.display, RowDisplay.GRAY)
+        self.assertEqual(gray.mismatched_questions, ("A03",))
 
 
 class SelectableResultsNeverRestricted(unittest.TestCase):

@@ -2,12 +2,13 @@
 // Review（画面の本体）は、固定の架空案件と、保存の関数（モック）で確認する。CaseDetail（取得と保存の
 // つなぎ）は、fetch のスタブで確認する。サーバーには接続しない。
 // モバイル幅の横はみ出しは、実際のレイアウト計算が要るため、E2Eだけで確認する。
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError } from "./api";
 import CaseDetail, { Review } from "./CaseDetail";
 import { cases } from "./data/cases";
-import { apiCase, stubFetch } from "./testing";
+import { DEMO_RULES } from "./data/demoRules";
+import { apiCase, apiRules, stubFetch } from "./testing";
 
 afterEach(() => {
   cleanup();
@@ -30,7 +31,7 @@ let save: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   save = vi.fn().mockResolvedValue(undefined);
 });
-const renderReview = (id: string) => render(<Review c={fixture(id)} save={save} />);
+const renderReview = (id: string) => render(<Review c={fixture(id)} rules={DEMO_RULES} save={save} />);
 
 test("開いた直後は、結果と変更した回答が［判定する］で保存される旨と、離れると保存されない旨を表示する", () => {
   renderReview("CASE-B");
@@ -249,12 +250,11 @@ test("詳細で、定義にない結果コードが返ったら、エラーを�
   expect(screen.queryByTestId("save-note")).toBeNull();
 });
 
-test("取得の呼び出しは、案件IDのURLに1回だけ行う", async () => {
+test("取得の呼び出しは、案件のURLとルールのURLに、1回ずつ行う", async () => {
   const spy = stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() } });
   render(<CaseDetail caseId="CASE-X" />);
   await screen.findByTestId("save-note");
-  expect(spy).toHaveBeenCalledTimes(1);
-  expect(String(spy.mock.calls[0][0])).toBe("/api/cases/CASE-X");
+  expect(spy.mock.calls.map((call) => String(call[0])).sort()).toEqual(["/api/cases/CASE-X", "/api/rules"]);
 });
 
 test("保存の通信エラー（PUT）は、接続できなかった旨を表示し、保存済みの表示を変えない", async () => {
@@ -310,6 +310,7 @@ test("案件を切り替えたあとに、古い案件の応答が遅れて届�
   const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
   const { rerender } = render(<CaseDetail caseId="CASE-A" />);
   rerender(<CaseDetail caseId="CASE-B" />);
+  await act(async () => pending["/api/rules"](json(apiRules())));
   await act(async () => pending["/api/cases/CASE-B"](json(apiCase({ case_id: "CASE-B", summary: "案件Bの概要" }))));
   expect(await screen.findByRole("heading", { name: /案件Bの概要/ })).toBeTruthy();
   await act(async () => pending["/api/cases/CASE-A"](json(apiCase({ case_id: "CASE-A", summary: "案件Aの概要" }))));
@@ -372,7 +373,8 @@ test("［判定する］を押さないかぎり、何も送らない（途中�
   answer("A01", "Yes");
   answer("A02", "No");
   choose("注意");
-  expect(spy).toHaveBeenCalledTimes(1); // 取得（GET）だけ
+  expect(spy.mock.calls.every((call) => (call[1]?.method ?? "GET") === "GET")).toBe(true); // 取得（GET）だけ
+  expect(spy).toHaveBeenCalledTimes(2); // 案件とルール
 });
 
 test("保存しなかった変更は、開き直すと残らない（取得した値を表示する）", async () => {
@@ -469,4 +471,145 @@ test("保存している間に別の設問を変えても、その変更は、�
   await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
   expect(save).toHaveBeenNthCalledWith(1, "注意", { A09: "no" }); // 送った時点の変更だけ
   expect(save).toHaveBeenNthCalledWith(2, "注意", { A03: "yes" }); // A09 は、保存済み
+});
+
+// ---- ルールはAPIから取得する（受入例1〜3を、API経由の画面で） ------------------------------
+
+test("取得したルールで、照合の通常・グレーが決まる（例1→例2。A01を訂正）", async () => {
+  stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() } });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  expect(rules(display)).toEqual(["normal", "normal", "gray"]); // 例1
+  answer("A01", "No");
+  expect(rules(display)).toEqual(["gray", "gray", "normal"]); // 例2
+  expect(screen.getByTestId("rule-count").textContent).toBe("照合 1／3件");
+});
+
+test("ルールが、APIが返したものだけになる（固定のルールを使わない）", async () => {
+  const { conditions } = apiRules()[0];
+  stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "GET /api/rules": { body: [{ rule_id: "R77", revision: 3, result_code: "account_deletion", conditions }] },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  expect(screen.getByTestId("rule-R77")).toBeTruthy();
+  expect(screen.queryByTestId("rule-R01")).toBeNull();
+  expect(screen.getByTestId("rule-count").textContent).toBe("照合 1／1件");
+});
+
+test("ルールが0件でも、4つの結果をすべて選べて、保存できる", async () => {
+  const spy = stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "GET /api/rules": { body: [] },
+    "PUT /api/cases/CASE-X/judgment": { status: 204 },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  for (const name of ["アカウント削除", "アカウント一時凍結", "注意", "問題なし"]) {
+    expect(screen.getByRole("radio", { name })).toBeTruthy();
+  }
+  // 0件の表示。照合を絞る意味がないので、未回答の設問を「省略できる」とはしない。
+  expect(screen.getByTestId("rule-count").textContent).toBe("照合 0／0件");
+  expect(screen.queryByTestId("rule-R01")).toBeNull();
+  expect(screen.getByTestId("q-A01").className).not.toContain("gray");
+  expect(screen.getByRole("radio", { name: "アカウント削除" }).hasAttribute("disabled")).toBe(false);
+  choose("問題なし");
+  submit();
+  await screen.findByText("登録済みの結果: 問題なし");
+  const put = spy.mock.calls.find((call) => call[1]?.method === "PUT")!;
+  expect(JSON.parse(String(put[1]?.body))).toEqual({ result_code: "no_issue" });
+});
+
+test("例3: A01=Yes・A03=No で全行グレー。それでも、結果と、変更した回答（A01・A03）を、API経由で保存する", async () => {
+  const spy = stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "PUT /api/cases/CASE-X/judgment": { status: 204 },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  answer("A01", "Yes");
+  answer("A03", "No");
+  expect(rules(display)).toEqual(["gray", "gray", "gray"]);
+  expect(screen.getByTestId("rule-count").textContent).toBe("照合 0／3件");
+  choose("問題なし");
+  submit();
+  await screen.findByText("登録済みの結果: 問題なし");
+  const put = spy.mock.calls.find((call) => call[1]?.method === "PUT")!;
+  expect(JSON.parse(String(put[1]?.body))).toEqual({ result_code: "no_issue", answers: { A01: "yes", A03: "no" } });
+});
+
+test("ルールを取得できなければ、エラーを表示し、判定の操作を出さない", async () => {
+  stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() }, "GET /api/rules": { status: 500 } });
+  render(<CaseDetail caseId="CASE-X" />);
+  const alert = await screen.findByTestId("rules-error");
+  expect(alert.textContent).toContain("HTTP 500");
+  expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+});
+
+test("ルールの形が不正（条件の値が yes／no でない）・通信できないときも、エラーを表示し、判定の操作を出さない", async () => {
+  const lacking = { A05: "maybe" };
+  stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: lacking }] },
+  });
+  const { unmount } = render(<CaseDetail caseId="CASE-X" />);
+  expect((await screen.findByTestId("rules-error")).textContent).toContain("取得できませんでした");
+  expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+  unmount();
+  stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() }, "GET /api/rules": new TypeError("fetch failed") });
+  render(<CaseDetail caseId="CASE-X" />);
+  expect((await screen.findByTestId("rules-error")).textContent).toContain("接続できませんでした");
+  expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+});
+
+test("案件が見つからない（404）ときは、ルールの取得に失敗していても、見つからない旨を表示する", async () => {
+  stubFetch({ "GET /api/cases/CASE-NONE": { status: 404, body: {} }, "GET /api/rules": { status: 500 } });
+  render(<CaseDetail caseId="CASE-NONE" />);
+  expect(await screen.findByTestId("case-not-found")).toBeTruthy();
+  expect(screen.queryByTestId("rules-error")).toBeNull();
+});
+
+test("ルールの取得中は、読み込み中を表示する（案件だけ取得できていても）", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string) =>
+      url === "/api/rules"
+        ? new Promise<Response>(() => {})
+        : Promise.resolve(new Response(JSON.stringify(apiCase()), { status: 200 })),
+    ),
+  );
+  render(<CaseDetail caseId="CASE-X" />);
+  // 案件の応答が届いたあと（fetch が両方呼ばれたあと）も、ルールが未着なら、読み込み中のまま。
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  await act(async () => {});
+  expect(screen.getByTestId("case-loading")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+});
+
+test("一部の設問だけに条件があるルールは、その設問だけで照合し、ほかは「問わない」と表示する", async () => {
+  stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() }, // A09=Yes
+    "GET /api/rules": {
+      body: [
+        { rule_id: "P1", revision: 1, result_code: "caution", conditions: { A03: "no", A09: "yes" } },
+        { rule_id: "P2", revision: 1, result_code: "no_issue", conditions: { A09: "no" } },
+      ],
+    },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  // A09=Yes: P1 は食い違わない（A03は未回答）、P2 は食い違う。
+  expect(display("P1")).toBe("normal");
+  expect(display("P2")).toBe("gray");
+  expect(screen.getByTestId("cond-P1-A01").textContent).toContain("問わない");
+  expect(screen.getByTestId("cond-P1-A03").textContent).toContain("No");
+  expect(matched("P1", "A09")).toBe(true);
+  expect(matched("P1", "A01")).toBe(false); // 問わない設問は緑にしない
+  answer("A01", "No"); // 問わない設問の回答では、行は変わらない
+  expect(display("P1")).toBe("normal");
+  answer("A03", "Yes"); // 条件のある設問が食い違えば、グレー
+  expect(display("P1")).toBe("gray");
 });

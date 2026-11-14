@@ -9,7 +9,7 @@
 | ドメイン | `domain`、`rule_matching`、`question_validation` | 定数・例外・ID生成・照合・設問案の検証。純粋で、DBにもHTTPにも依存しない | 標準ライブラリだけ（検査しているのは、`fastapi`・`starlette`・`pydantic`・`psycopg` と、アプリ内の他モジュールを取り込まないこと） |
 | 保存先の実装 | `db_store`（PostgreSQL） | SQLとトランザクション | `domain`、`psycopg` |
 | 設問案の保存先・AIモック | `question_store`（メモリ）、`question_proposer`（モック） | デモの設問一覧と提案の保存・承認、AIの応答のモック。DBなし | `domain`、`question_validation`（型）、標準ライブラリ |
-| HTTP層 | `cases`、`intake`、`mock_api`、`question_admin` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
+| HTTP層 | `cases`、`intake`、`mock_api`、`question_admin`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
 | 組み立て | `main` | 保存先・AIモックを選び、ルーターをつなぐ | すべて |
 
 - HTTP層は、保存先の実装（`db_store`）、設問案の保存先・AIモック（`question_store`・`question_proposer`）と `psycopg` を取り込まない。保存先は、`main` で組み立て、`app.state`（`case_store`・`question_store`・`question_proposer`）から受け取る。

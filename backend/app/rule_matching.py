@@ -26,6 +26,7 @@ class ConditionState(StrEnum):
     MISMATCH = "mismatch"  # Yes／Noが条件と食い違う
     UNANSWERED = "unanswered"  # 未回答のため判断できない
     PENDING = "pending"  # 確認待ちのため判断できない（未回答・No とは別）
+    ANY = "any"  # ルールに条件がない設問（問わない）。どの回答でも食い違いにしない
 
 
 class RowDisplay(StrEnum):
@@ -46,7 +47,7 @@ class Result(StrEnum):
 class Rule:
     rule_id: str
     result: Result
-    conditions: dict[str, Answer]  # A01〜A12すべてのYes／No
+    conditions: dict[str, Answer]  # 条件のある設問だけのYes／No。ない設問は「問わない」
 
 
 def _parse(pattern: str) -> dict[str, Answer]:
@@ -110,7 +111,11 @@ def match_rules(
     matches = []
     for rule in rules:
         states = {
-            q: _state(answers.get(q, Answer.UNANSWERED), rule.conditions[q])
+            q: (
+                _state(answers.get(q, Answer.UNANSWERED), rule.conditions[q])
+                if q in rule.conditions
+                else ConditionState.ANY
+            )
             for q in QUESTION_IDS
         }
         gray = ConditionState.MISMATCH in states.values()

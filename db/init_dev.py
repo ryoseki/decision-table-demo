@@ -1,6 +1,6 @@
 """開発用DBの初期化（docker compose up のときに1回だけ動く）。
 
-テーブルがまだ無いときだけ、docs のDDLと架空データ（設問・判定ルール）を
+テーブルがまだ無いときだけ、docs のDDLと架空データ（設問と、開発用の判定ルール）を
 1トランザクションで適用する。すでに初期化済みなら何もしない。
 DDLや架空データを更新したときは、`docker compose down -v` で開発用DBの
 ボリュームを消してから `docker compose up` し直す。
@@ -44,6 +44,10 @@ def main() -> int:
     sample = json.loads(
         (DOCS / "decision-support-sample.json").read_text(encoding="utf-8")
     )
+    # 判定ルールは、スキーマ検証用のサンプルではなく、画面の受入例用の開発用ルールを入れる。
+    demo_rules = json.loads(
+        (DOCS / "decision-support-demo-rules.json").read_text(encoding="utf-8")
+    )["decision_rules"]
     with connect() as conn:  # 成功時にコミット、例外時にロールバック
         if conn.execute("SELECT to_regclass('review_questions')").fetchone()[0]:
             print("開発用DB: 初期化済み（DDLを更新したときは docker compose down -v）")
@@ -59,7 +63,7 @@ def main() -> int:
                 " %(revision)s)",
                 q,
             )
-        for rule in sample["decision_rules"]:
+        for rule in demo_rules:
             conn.execute(
                 "INSERT INTO decision_rules (rule_id, revision, result_code,"
                 " conditions, created_at)"
@@ -75,7 +79,7 @@ def main() -> int:
     print(
         f"開発用DB: DDLと架空データを適用しました"
         f"（設問{len(sample['review_questions'])}件、"
-        f"判定ルール{len(sample['decision_rules'])}件）"
+        f"判定ルール{len(demo_rules)}件）"
     )
     return 0
 
