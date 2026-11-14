@@ -168,6 +168,7 @@ class TestInvalidModelOutput(unittest.TestCase):
         "文言が空": a13(text="  "),
         "文言が文字列でない": a13(text=["x"]),
         "文言の重複": a13(text="対象期間にAPIキーが新しく発行されたか？"),
+        "文言の重複（前後空白）": a13(text=" 対象期間にAPIキーが新しく発行されたか？ "),
         "文言が長すぎる": a13(text="あ" * 201),
         "文言に制御文字": a13(text="対象期間\nにAPIキーが失効されたか？"),
     }
