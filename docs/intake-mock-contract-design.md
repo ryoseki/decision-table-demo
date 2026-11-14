@@ -212,7 +212,7 @@ FastAPI側の事実確認: エンドポイントの失敗は`HTTPException`を�
 - ルール集合の版を明示的に記録する構造は持たない。必要になった場合は後続で設計する。
 - 版の公開と、進行中の案件への適用は未決。
 
-注意: 画面の照合は、`decision_rules` のルールを `GET /api/rules` で取得して使う（2026-11-14に決定。開発用DBには `docs/decision-support-demo-rules.json` のR01〜R03を入れる）。画面は、A01〜A12すべての条件を持つルールだけを扱う（一部の設問だけの条件を持つルールは、エラーにする）。バックエンドの `rule_matching.py` は、画面からは使わない。保存する`result_code`は、表示名ではなくコードにする案とし、仮に`account_deletion`・`account_suspension`・`caution`・`no_issue`とする（値の確定は未合意）。
+注意: 画面の照合は、`decision_rules` のルールを `GET /api/rules` で取得して使う（2026-11-14に決定。開発用DBには `docs/decision-support-demo-rules.json` のR01〜R03を入れる）。ルールは、一部の設問だけに条件を持ってよい。条件のない設問は「問わない」とし、どの回答でも食い違いにしない（画面とバックエンドの照合は同じ規則）。バックエンドの `rule_matching.py` は、画面からは使わない。保存する`result_code`は、表示名ではなくコードにする案とし、仮に`account_deletion`・`account_suspension`・`caution`・`no_issue`とする（値の確定は未合意）。
 
 **採用ルールの記録**
 

@@ -220,7 +220,7 @@ export function Review({
                   {questions.map((q) => (
                     <div key={q.id} className={states[q.id] === "match" ? "matched" : undefined} data-testid={`cond-${rule.id}-${q.id}`}>
                       <dt>{q.id}</dt>
-                      <dd>{rule.expected[q.id] === "yes" ? "Yes" : "No"}{states[q.id] === "match" && <span className="sr-only">（入力済みの回答と一致）</span>}</dd>
+                      <dd>{states[q.id] === "any" ? "問わない" : rule.expected[q.id] === "yes" ? "Yes" : "No"}{states[q.id] === "match" && <span className="sr-only">（入力済みの回答と一致）</span>}</dd>
                     </div>
                   ))}
                 </dl>

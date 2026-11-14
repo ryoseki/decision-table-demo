@@ -90,15 +90,18 @@ type ApiRule = {
   conditions: Record<string, string>;
 };
 
-/** APIのルールを、照合用の形にする。この画面の照合は、A01〜A12すべての条件を持つルールだけを扱う。 */
+/** APIのルールを、照合用の形にする。 */
 function toRule(r: ApiRule): Rule {
-  const expected = {} as Record<QuestionId, "yes" | "no">;
-  for (const q of QUESTION_IDS) {
-    const value = r.conditions[q];
-    if (value !== "yes" && value !== "no") {
-      throw new Error(`ルール${r.rule_id}の条件に、${q}のYes／Noがありません（この画面は12問すべての条件を持つルールだけを扱います）`);
+  // 条件のある設問だけを持つ。ない設問は「問わない」。条件の値は yes／no だけ、設問は A01〜A12 だけ。
+  const expected: Partial<Record<QuestionId, "yes" | "no">> = {};
+  for (const [q, value] of Object.entries(r.conditions)) {
+    if (!(QUESTION_IDS as readonly string[]).includes(q)) {
+      throw new Error(`ルール${r.rule_id}の条件に、未知の設問${q}があります`);
     }
-    expected[q] = value;
+    if (value !== "yes" && value !== "no") {
+      throw new Error(`ルール${r.rule_id}の条件${q}が、yes／no ではありません`);
+    }
+    expected[q as QuestionId] = value;
   }
   return { id: r.rule_id, result: resultNameOf(r.result_code), expected };
 }

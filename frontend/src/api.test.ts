@@ -108,11 +108,22 @@ test("ルール: APIの行を、照合用の形（id・結果の表示名・12�
   expect(rules[1].expected.A01).toBe("no");
 });
 
-test("ルール: 12問の条件がそろわないルールは、黙って使わず、エラーにする", async () => {
-  const conditions = allConditions("yes");
-  delete conditions.A05;
-  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions }] } });
+test("ルール: 一部の設問だけに条件があるルールは、その設問だけを期待値にする（ない設問は問わない）", async () => {
+  stubFetch({
+    "GET /api/rules": {
+      body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: { A03: "no", A09: "yes" } }],
+    },
+  });
+  const [rule] = await listRules();
+  expect(rule.expected).toEqual({ A03: "no", A09: "yes" });
+  expect(rule.expected).not.toHaveProperty("A01");
+});
+
+test("ルール: 条件の値が yes／no でない・A01〜A12にない設問は、黙って使わず、エラーにする", async () => {
+  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: { A05: "maybe" } }] } });
   await expect(listRules()).rejects.toThrow(/R09.*A05/);
+  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R08", revision: 1, result_code: "caution", conditions: { A99: "yes" } }] } });
+  await expect(listRules()).rejects.toThrow(/R08.*A99/);
 });
 
 test("ルール: 定義にない結果コードは、エラーにする", async () => {

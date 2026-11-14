@@ -57,3 +57,25 @@ test("左側の不要判定: 他が同じでYes・Noの結果が同じなら不�
   assert.equal(canSkipQuestion("A12", {}, rules), true);
   assert.equal(canSkipQuestion("A11", {}, rules), false);
 });
+
+test("条件のない設問は「問わない」: どの回答でも食い違いにせず、条件のある設問だけで決まる", () => {
+  const partial = [{ id: "P1", result: "注意" as const, expected: { A03: "no" as const, A09: "yes" as const } }];
+  const row = (a: AnswerMap) => matchRules(a, partial)[0];
+  assert.equal(row({}).states.A01, "any");
+  assert.equal(row({ A01: "yes", A02: "no", A12: "pending" }).gray, false); // 問わない設問は無関係
+  assert.equal(row({ A03: "yes" }).gray, true); // 条件のある設問の食い違いはグレー
+  assert.equal(row({ A03: "no", A09: "yes" }).states.A03, "match");
+  assert.equal(row({ A03: "pending" }).gray, false); // 確認待ちは食い違いにしない
+});
+
+test("左側の不要判定: 条件のない設問は、Yes・Noの両方に当てはまるものとして扱う", () => {
+  // A12 に条件がないルールだけ → A12 の答えで結果は変わらない → 不要。
+  const same = [{ id: "P1", result: "注意" as const, expected: { A01: "yes" as const } }];
+  assert.equal(canSkipQuestion("A12", {}, same), true);
+  // A12=Yes のルールと、A12 に条件のないルール（結果が違う）→ No側にだけ、結果Aがある → 不要でない。
+  const differ = [
+    { id: "P1", result: "注意" as const, expected: { A01: "yes" as const, A12: "yes" as const } },
+    { id: "P2", result: "問題なし" as const, expected: { A01: "yes" as const } },
+  ];
+  assert.equal(canSkipQuestion("A12", {}, differ), false);
+});

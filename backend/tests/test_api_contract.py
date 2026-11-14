@@ -76,7 +76,8 @@ class ContractStore(intake.InMemoryCaseStore):
         """rule_id ごとに最新の revision の行。並びは rule_id 順。"""
         latest: dict[str, dict] = {}
         for row in self.rule_rows:
-            if row["rule_id"] not in latest or row["revision"] > latest[row["rule_id"]]["revision"]:
+            current = latest.get(row["rule_id"])
+            if current is None or row["revision"] > current["revision"]:
                 latest[row["rule_id"]] = row
         return [latest[rule_id] for rule_id in sorted(latest)]
 

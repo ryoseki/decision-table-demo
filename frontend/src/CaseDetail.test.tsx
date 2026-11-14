@@ -549,10 +549,8 @@ test("ルールを取得できなければ、エラーを表示し、判定の�
   expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
 });
 
-test("ルールの形が不正（12問の条件がそろわない）・通信できないときも、エラーを表示し、判定の操作を出さない", async () => {
-  const { conditions: all } = apiRules()[0];
-  const lacking: Record<string, string> = { ...all };
-  delete lacking.A05;
+test("ルールの形が不正（条件の値が yes／no でない）・通信できないときも、エラーを表示し、判定の操作を出さない", async () => {
+  const lacking = { A05: "maybe" };
   stubFetch({
     "GET /api/cases/CASE-X": { body: apiCase() },
     "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: lacking }] },
@@ -589,4 +587,29 @@ test("ルールの取得中は、読み込み中を表示する（案件だけ�
   await act(async () => {});
   expect(screen.getByTestId("case-loading")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+});
+
+test("一部の設問だけに条件があるルールは、その設問だけで照合し、ほかは「問わない」と表示する", async () => {
+  stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() }, // A09=Yes
+    "GET /api/rules": {
+      body: [
+        { rule_id: "P1", revision: 1, result_code: "caution", conditions: { A03: "no", A09: "yes" } },
+        { rule_id: "P2", revision: 1, result_code: "no_issue", conditions: { A09: "no" } },
+      ],
+    },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  // A09=Yes: P1 は食い違わない（A03は未回答）、P2 は食い違う。
+  expect(display("P1")).toBe("normal");
+  expect(display("P2")).toBe("gray");
+  expect(screen.getByTestId("cond-P1-A01").textContent).toContain("問わない");
+  expect(screen.getByTestId("cond-P1-A03").textContent).toContain("No");
+  expect(matched("P1", "A09")).toBe(true);
+  expect(matched("P1", "A01")).toBe(false); // 問わない設問は緑にしない
+  answer("A01", "No"); // 問わない設問の回答では、行は変わらない
+  expect(display("P1")).toBe("normal");
+  answer("A03", "Yes"); // 条件のある設問が食い違えば、グレー
+  expect(display("P1")).toBe("gray");
 });

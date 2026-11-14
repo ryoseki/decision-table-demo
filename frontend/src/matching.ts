@@ -1,4 +1,4 @@
-// 回答とルールの照合（画面表示用の純粋関数）。backend/app/rule_matching.py と同じ規則。
+// 回答とルールの照合（画面表示用の純粋関数）。backend/app/rule_matching.py と同じ規則。条件のない設問は「問わない」。
 // ルールは API から取得して渡す（GET /api/rules）。業務上の認定ルールではなく、架空の組み合わせ。
 // 照合結果は表示（通常／グレー）の判断材料であり、人が選べる判定結果を制限しない。
 // HTTP・DB・保存は扱わない。
@@ -18,13 +18,14 @@ export type Expected = "yes" | "no";
 export type Rule = {
   id: string;
   result: ResultName;
-  expected: Readonly<Record<QuestionId, Expected>>;
+  /** 条件のある設問だけ。ない設問は「問わない」（どの回答でも食い違いにしない）。 */
+  expected: Readonly<Partial<Record<QuestionId, Expected>>>;
 };
 
 /** 回答。未回答は undefined。確認待ちは "pending"。 */
 export type AnswerMap = Partial<Record<QuestionId, Answer>>;
 
-export type ConditionState = "match" | "mismatch" | "unanswered" | "pending";
+export type ConditionState = "match" | "mismatch" | "unanswered" | "pending" | "any";
 
 export function conditionState(answer: Answer | undefined, expected: Expected): ConditionState {
   if (answer === undefined) return "unanswered";
@@ -42,7 +43,10 @@ export type RuleRow = {
 export function matchRules(answers: AnswerMap, rules: readonly Rule[]): RuleRow[] {
   return rules.map((rule) => {
     const states = Object.fromEntries(
-      QUESTION_IDS.map((q) => [q, conditionState(answers[q], rule.expected[q])]),
+      QUESTION_IDS.map((q) => {
+        const expected = rule.expected[q];
+        return [q, expected === undefined ? "any" : conditionState(answers[q], expected)];
+      }),
     ) as Record<QuestionId, ConditionState>;
     return { rule, gray: QUESTION_IDS.some((q) => states[q] === "mismatch"), states };
   });
@@ -62,13 +66,18 @@ export function canSkipQuestion(
   if (live.length === 0) return false;
   const branches = new Map<string, { yes: Set<string>; no: Set<string> }>();
   for (const rule of live) {
-    const key = QUESTION_IDS.filter((q) => q !== question).map((q) => rule.expected[q]).join("");
+    // 他の設問の条件が同じ組にまとめる。条件のない設問は "-"（問わない）として、別の組にする。
+    const key = QUESTION_IDS.filter((q) => q !== question).map((q) => rule.expected[q] ?? "-").join("");
     let b = branches.get(key);
     if (b === undefined) {
       b = { yes: new Set(), no: new Set() };
       branches.set(key, b);
     }
-    b[rule.expected[question]].add(rule.result);
+    // 当該設問の条件がないルールは、Yesでも Noでも当てはまるので、両方に数える。
+    const expected = rule.expected[question];
+    for (const side of expected === undefined ? (["yes", "no"] as const) : ([expected] as const)) {
+      b[side].add(rule.result);
+    }
   }
   return [...branches.values()].every(
     (b) => b.yes.size === b.no.size && [...b.yes].every((r) => b.no.has(r)),

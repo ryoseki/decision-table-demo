@@ -20,7 +20,7 @@ from unittest import mock
 from app.rule_matching import DEMO_RULES, Result
 from tests.test_db_store import DOCS, HAVE_DB, _connect
 
-# 照合ロジックの結果（表示名）と、DBの結果コードの対応（画面の resultCodes.ts と同じ4つ）。
+# 照合ロジックの結果（表示名）と、DBの結果コードの対応（画面と同じ4つ）。
 CODE_OF_RESULT = {
     Result.ACCOUNT_DELETION: "account_deletion",
     Result.ACCOUNT_SUSPENSION: "account_suspension",
@@ -100,7 +100,7 @@ class DevInit(unittest.TestCase):
             [q[0] for q in questions],
             sorted(q["question_code"] for q in sample["review_questions"]),
         )
-        # 判定ルールは、画面の受入例用の開発用ルール（R01〜R03）で、スキーマ検証用のサンプルではない。
+        # 判定ルールは、画面の受入例用の開発用ルール（R01〜R03）。
         self.assertEqual([r[0] for r in rules], ["R01", "R02", "R03"])
         self.assertEqual(
             [r[2] for r in rules], ["caution", "no_issue", "account_suspension"]

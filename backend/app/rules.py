@@ -1,6 +1,7 @@
 """判定ルールの一覧（架空）。HTTPモックは呼ばない。
 
-ルールは不変の行（rule_id と revision の組）で、条件を変えるときは新しい revision を足す。
+ルールは不変の行（rule_id と revision の組）で、条件を変えるときは
+新しい revision を足す。
 一覧は、rule_id ごとに最新の revision の行だけを返す（rule_id 順）。
 """
 
