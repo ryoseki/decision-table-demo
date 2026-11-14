@@ -120,6 +120,13 @@ class ContractStore(intake.InMemoryCaseStore):
             if answer not in (*HUMAN_ANSWERS, "pending"):
                 raise InvalidJudgment(f"{code}: 回答が不正です")
         rule_id, rule_revision = adopted_rule if adopted_rule else (None, None)
+        if adopted_rule is not None and not any(
+            row["rule_id"] == rule_id and row["revision"] == rule_revision
+            for row in self.rule_rows
+        ):
+            raise InvalidJudgment(
+                f"採用ルールが存在しません: {rule_id} の版 {rule_revision}"
+            )
         stored["result"] = {
             "result_code": result_code,
             "adopted_rule": (
@@ -271,6 +278,7 @@ class CasesApiContract(unittest.TestCase):
         self.assertEqual(len(self.mock_calls), calls, "保存でHTTPを呼ばない")
 
     def test_put_records_the_adopted_rule_only_when_both_fields_are_sent(self):
+        self.store.rule_rows = [rule_row("R01", 1, "caution", A01="yes")]
         case_id = self.intake()
         self.judge(case_id, {"result_code": "caution"})
         self.assertIsNone(self.get(case_id)["result"]["adopted_rule"])
@@ -283,6 +291,26 @@ class CasesApiContract(unittest.TestCase):
             self.get(case_id)["result"]["adopted_rule"],
             {"rule_id": "R01", "rule_revision": 1},
         )
+
+    def test_put_rejects_an_adopted_rule_that_does_not_exist_and_saves_nothing(self):
+        self.store.rule_rows = [rule_row("R01", 1, "caution", A01="yes")]
+        case_id = self.intake()
+        self.judge(case_id, {"result_code": "caution"})
+        before = self.get(case_id)
+        for rule_id, revision in (("NOPE", 1), ("R01", 2)):  # 別のルール、ない版
+            with self.subTest(rule_id=rule_id, revision=revision):
+                status, body = self.judge(
+                    case_id,
+                    {
+                        "result_code": "no_issue",
+                        "rule_id": rule_id,
+                        "rule_revision": revision,
+                        "answers": {"A01": "yes"},
+                    },
+                )
+                self.assertEqual(status, 422)
+                self.assertIn("採用ルールが存在しません", body["detail"])
+                self.assertEqual(self.get(case_id), before)  # 結果も回答も変わらない
 
     def test_put_updates_only_the_given_answers(self):
         case_id = self.intake()
@@ -438,6 +466,7 @@ class CasesApiContract(unittest.TestCase):
     # --- HTTP層が保存先を呼ぶ回数と引数 ---------------------------------------------
 
     def test_put_calls_the_store_once_with_the_given_arguments(self):
+        self.store.rule_rows = [rule_row("R01", 2, "caution", A01="yes")]
         case_id = self.intake()
         before = len(self.store.save_calls)
         self.judge(case_id, {"result_code": "caution", "answers": {"A01": "yes"}})

@@ -156,3 +156,7 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
   .warn { grid-column: 2; }
 }
 @media (pointer: coarse) { .answers button, .rule summary { min-height: 44px; } }
+
+.btn.ghost { background: transparent; color: var(--accent); }
+.rule-actions { padding: 4px 12px 12px; }
+.adopted-badge { margin-inline-start: 8px; font-size: 0.8rem; font-weight: 700; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 1px 8px; }

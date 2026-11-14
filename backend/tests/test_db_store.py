@@ -347,19 +347,47 @@ class DbFlow(unittest.TestCase):
 
     # --- 結果・採用ルール・検査 -------------------------------------------------------
 
+    def add_rule(self, rule_id, revision):
+        with _connect(self.schema) as conn:
+            conn.execute(
+                "INSERT INTO decision_rules (rule_id, revision, result_code,"
+                " conditions, created_at) VALUES (%s, %s, 'caution', %s, now())",
+                (rule_id, revision, json.dumps({"A01": "yes"})),
+            )
+
+    def test_adopting_a_rule_that_does_not_exist_is_rejected_and_nothing_changes(self):
+        self.add_rule("R01", 1)
+        case_id, _ = self.intake("456")
+        self.judge(case_id, {"result_code": "caution"})
+        before = self.get(case_id)
+        for rule_id, revision in (("NO-SUCH-RULE", 1), ("R01", 2)):
+            status, body = self.judge(
+                case_id,
+                {
+                    "result_code": "no_issue",
+                    "rule_id": rule_id,
+                    "rule_revision": revision,
+                    "answers": {"A01": "yes"},
+                },
+            )
+            self.assertEqual(status, 422, (rule_id, revision))
+            self.assertIn("採用ルールが存在しません", body["detail"])
+            self.assertEqual(self.get(case_id), before)  # 結果も回答も変わらない
+
     def test_s9_s10_adopted_rule_is_recorded_only_when_given(self):
+        self.add_rule("R01", 7)
         case_id, _ = self.intake("456")
         self.judge(case_id, {"result_code": "no_issue"})  # S9: 結果だけ
         self.assertIsNone(self.get(case_id)["result"]["adopted_rule"])
         # S10: 採用ルールの結果と違う結果でも保存できる（参考の記録）
         status, _ = self.judge(
             case_id,
-            {"result_code": "no_issue", "rule_id": "NO-SUCH-RULE", "rule_revision": 7},
+            {"result_code": "no_issue", "rule_id": "R01", "rule_revision": 7},
         )
         self.assertEqual(status, 204)
         self.assertEqual(
             self.get(case_id)["result"]["adopted_rule"],
-            {"rule_id": "NO-SUCH-RULE", "rule_revision": 7},
+            {"rule_id": "R01", "rule_revision": 7},
         )
         # 再保存で採用を渡さなければ、最新の状態として空になる
         self.judge(case_id, {"result_code": "no_issue"})

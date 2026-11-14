@@ -2,9 +2,9 @@ import { useState, type FormEvent } from "react";
 import { AnswerCounts } from "./AnswerCounts";
 import { ApiError, describeError, saveJudgment, type HumanAnswers } from "./api";
 import { StatusBadge } from "./Badges";
-import { statusOf, tally, type Answer, type ResultName, type ReviewCase } from "./data/cases";
+import { statusOf, tally, type AdoptedRule, type Answer, type ResultName, type ReviewCase } from "./data/cases";
 import { questions, type QuestionId } from "./data/questions";
-import { RESULTS, canSkipQuestion, matchRules, type AnswerMap, type Rule } from "./matching";
+import { RESULTS, canSkipQuestion, matchRules, type AnswerMap, type Rule, type RuleRow } from "./matching";
 import { useCase, useRules } from "./useApi";
 
 // 案件はAPIから取得し、［判定する］で、結果と、変更した回答だけを保存する（途中の自動保存はない）。
@@ -67,7 +67,7 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
     );
   }
   if (rulesRemote.status !== "ok") return null; // 読み込み中は上で返している（型の絞り込み用）
-  return <Review c={remote.data} rules={rulesRemote.data} save={(result, answers) => saveJudgment(caseId, result, answers)} />;
+  return <Review c={remote.data} rules={rulesRemote.data} save={(result, answers, adopted) => saveJudgment(caseId, result, answers, adopted)} />;
 }
 
 export function Review({
@@ -77,7 +77,7 @@ export function Review({
 }: {
   c: ReviewCase;
   rules: readonly Rule[];
-  save: (result: ResultName, answers: HumanAnswers) => Promise<void>;
+  save: (result: ResultName, answers: HumanAnswers, adopted: AdoptedRule | null) => Promise<void>;
 }) {
   const [answers, setAnswers] = useState<AnswerMap>(c.answers);
   // 保存済みの回答（開いたときの値。保存に成功したら更新する）。送るのは、これと違う設問だけ。
@@ -89,10 +89,16 @@ export function Review({
   // 保存済みの結果（開いたときの値。保存に成功したら更新する）と、今回の保存の状態。
   const [saved, setSaved] = useState<ResultName | "">(c.result ?? "");
   const [justSaved, setJustSaved] = useState<ResultName | "">("");
+  // 採用ルール（参考の記録）。保存した値で始める。採用した行が食い違う（グレー）ようになったら外す。
+  const [adopted, setAdopted] = useState<AdoptedRule | null>(c.adopted ?? null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
 
   const rows = matchRules(answers, rules);
+  const isAdopted = (rule: Rule) => adopted?.ruleId === rule.id && adopted.revision === rule.revision;
+  // 採用が有効なのは、画面に表示している、食い違わない（通常表示の）行だけ。
+  const adoptedRow = adopted === null ? undefined : rows.find((r) => isAdopted(r.rule) && !r.gray);
+  const effectiveAdopted = adoptedRow === undefined ? null : adopted;
   const matchingCount = rows.filter((r) => !r.gray).length;
   const answeredCount = questions.filter((q) => answers[q.id] === "yes" || answers[q.id] === "no").length;
   const current = { ...c, answers };
@@ -105,6 +111,17 @@ export function Review({
     setAnswers(next);
     setEdited(new Set(edited).add(id));
     if (changed) setOpen(openState(next, rules));
+    // 採用した行が、回答の訂正でグレーになったら、採用は自動で外れる（戻しても、採用し直すまで戻らない）。
+    if (adopted !== null) {
+      const row = matchRules(next, rules).find((r) => isAdopted(r.rule));
+      if (row === undefined || row.gray) setAdopted(null);
+    }
+  };
+
+  const toggleAdopt = (row: RuleRow) => {
+    // 採用できるのは通常表示の行だけ。グレーの行を採用しようとしたら、採用は外れる。
+    if (row.gray || isAdopted(row.rule)) setAdopted(null);
+    else setAdopted({ ruleId: row.rule.id, revision: row.rule.revision });
   };
 
   const submit = async (e: FormEvent) => {
@@ -119,7 +136,7 @@ export function Review({
         const value = answers[q.id];
         if ((value === "yes" || value === "no") && baseline[q.id] !== value) changed[q.id] = value;
       }
-      await save(outcome, changed);
+      await save(outcome, changed, effectiveAdopted);
       setSaved(outcome);
       setBaseline(answers);
       setJustSaved(outcome);
@@ -200,7 +217,9 @@ export function Review({
             <span role="status" data-testid="rule-count">照合 {matchingCount}／{rows.length}件</span>
           </div>
           <div className="rule-list">
-            {rows.map(({ rule, gray, states }) => (
+            {rows.map((row) => {
+              const { rule, gray, states } = row;
+              return (
               <details
                 key={rule.id}
                 className={`rule${gray ? " gray" : ""}`}
@@ -214,6 +233,7 @@ export function Review({
               >
                 <summary>
                   <strong>{rule.id}</strong>{rule.result}
+                  {isAdopted(rule) && !gray && <span className="adopted-badge" data-testid={`adopted-${rule.id}`}>採用中</span>}
                   {gray && <span className="sr-only">（入力済みの回答と異なる条件があります）</span>}
                 </summary>
                 <dl className="conditions">
@@ -224,8 +244,16 @@ export function Review({
                     </div>
                   ))}
                 </dl>
+                {!gray && (
+                  <div className="rule-actions">
+                    <button type="button" className="btn ghost" data-testid={`adopt-${rule.id}`} onClick={() => toggleAdopt(row)}>
+                      {isAdopted(rule) ? "採用を外す" : "このルールを採用"}
+                    </button>
+                  </div>
+                )}
               </details>
-            ))}
+              );
+            })}
           </div>
         </section>
       </div>
@@ -245,6 +273,11 @@ export function Review({
         <button className="btn action" type="submit" disabled={saving}>{saving ? "保存中…" : "判定する"}</button>
         {justSaved !== "" && <p className="saved" role="status" data-testid="registered">保存しました。登録結果: {justSaved}</p>}
         {saveError !== "" && <p className="error-inline" role="alert" data-testid="save-error">保存できませんでした。{saveError}。もう一度［判定する］を押してください。</p>}
+        <p className="note note-inline" data-testid="adopted-note">
+          {effectiveAdopted === null
+            ? "採用ルール: なし（参考の記録。結果を選んだだけでは記録されません）"
+            : `採用ルール: ${effectiveAdopted.ruleId}（版 ${effectiveAdopted.revision}）。参考の記録で、選んだ結果は変わりません。`}
+        </p>
         <p className="note note-inline">
           結果は照合にかかわらず、未回答・確認待ちが残っていても選べます。［判定する］は結果を保存します。実際の処置は行いません（未実装）。
         </p>

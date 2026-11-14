@@ -98,6 +98,46 @@ test("例1〜3: DBのルールを取得して照合する。訂正で表示が�
   expect(byCode).toMatchObject({ A01: "yes", A03: "no", A09: "yes" });
 });
 
+test("例8〜10: 通常表示の行だけ採用でき、結果と違っても保存され、再表示で残る。訂正でグレーになると、採用は外れ、外した状態で保存すると空になる", async ({ page, request }) => {
+  const { case_id } = await intake(request, "456");
+  await page.goto(`/#/cases/${case_id}`);
+  await expect(page.getByTestId("save-note")).toBeVisible();
+  await click(page, "A01", "Yes");
+  await click(page, "A03", "Yes");
+
+  // 例9: グレー表示のR03には、「このルールを採用」が出ない。通常表示のR01・R02には出る。
+  await expectDisplay(page, "R03", "gray");
+  await expect(page.getByTestId("adopt-R03")).toHaveCount(0);
+  await expect(page.getByTestId("adopt-R01")).toBeVisible();
+
+  // 例8: R01（結果は注意）を採用して、結果は違う「問題なし」を選んで保存。開き直すと、採用ルールが残る。
+  await page.getByTestId("adopt-R01").click();
+  await expect(page.getByTestId("adopted-R01")).toBeVisible();
+  await page.getByRole("radio", { name: "問題なし" }).check();
+  await page.getByRole("button", { name: "判定する" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 問題なし");
+  await page.reload();
+  await expect(page.getByTestId("adopted-R01")).toBeVisible();
+  await expect(page.getByTestId("adopted-note")).toContainText("R01（版 1）");
+  await expect(page.getByText("登録済みの結果: 問題なし")).toBeVisible();
+  let saved = await (await request.get(`${backendUrl}/api/cases/${case_id}`)).json();
+  expect(saved.result.result_code).toBe("no_issue"); // 結果は、選んだものがそのまま
+  expect(saved.result.adopted_rule).toEqual({ rule_id: "R01", rule_revision: 1 });
+
+  // 例10: A01をNoに訂正すると、R01がグレーになり、採用が自動で外れる。外した状態で保存すると、採用ルールは空。
+  await click(page, "A01", "No");
+  await expectDisplay(page, "R01", "gray");
+  await expect(page.getByTestId("adopted-R01")).toHaveCount(0);
+  await expect(page.getByTestId("adopted-note")).toContainText("採用ルール: なし");
+  await page.getByRole("button", { name: "判定する" }).click();
+  await expect(page.getByTestId("registered")).toBeVisible();
+  await page.reload();
+  await expect(page.getByTestId("adopted-R01")).toHaveCount(0);
+  saved = await (await request.get(`${backendUrl}/api/cases/${case_id}`)).json();
+  expect(saved.result.adopted_rule).toBeNull();
+  expect(saved.result.result_code).toBe("no_issue");
+});
+
 test("例4〜6: 取得に失敗した案件は確認待ち。結果だけ保存しても確認待ちのまま。手入力で解消して保存すると上書きされ、保存しない変更は残らない", async ({ page, request }) => {
   const { case_id, answers } = await intake(request, "458", ["A09"]); // A09 の取得を失敗させる
   expect(answers).toEqual({ A09: "pending" });

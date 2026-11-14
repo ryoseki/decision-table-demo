@@ -114,7 +114,7 @@ CREATE TABLE case_checks (
 );
 ```
 
-`case_results`の採用ルール`(rule_id, rule_revision)`は、オペレータが「このルールを採用」を操作したときだけ記録する参考の記録で、結論は選んだ`result_code`です。両方NULLか両方非NULLかをCHECKで揃えます。`decision_rules`への外部キーは持たず、DBは採用ルールの実在も、採用ルールの結果と選んだ結果の一致も検査しません（結果が違っても保存できます）。選んだ`result_code`が定義済みのコードかは、保存処理側で検査します。結果コード表や不正を認定するルールは、この案では定めません。判定結果の3列（`result_code`・`recorded_by`・`recorded_at`）は、受付時は空で、全部空か全部入っているかのどちらかだけを許します。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)
+`case_results`の採用ルール`(rule_id, rule_revision)`は、オペレータが「このルールを採用」を操作したときだけ記録する参考の記録で、結論は選んだ`result_code`です。両方NULLか両方非NULLかをCHECKで揃えます。`decision_rules`への外部キーは持たず、DBは採用ルールの実在も、採用ルールの結果と選んだ結果の一致も検査しません（結果が違っても保存できます）。選んだ`result_code`が定義済みのコードか、採用ルールが`decision_rules`に実在するか（なければ422）は、保存処理側で検査します。結果コード表や不正を認定するルールは、この案では定めません。判定結果の3列（`result_code`・`recorded_by`・`recorded_at`）は、受付時は空で、全部空か全部入っているかのどちらかだけを許します。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)
 
 受領資料を見て答える設問は、設問マスターの`source_kind`と`source_field`で見るべき資料と欄を示します。どの経路で答えた場合も、担当者が登録する結果は`answer`に入れます。回答の行がない設問は未回答、`pending`は確認待ちとして登録した状態です。
 
