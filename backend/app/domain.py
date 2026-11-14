@@ -29,5 +29,24 @@ class InvalidJudgment(Exception):
     """入力が保存の条件を満たさない（案件は変更しない）。"""
 
 
+# --- 管理者AIの試作（設問の追加案）。docs/admin-question-proposal-demo.md ---
+
+
+class InvalidProposal(Exception):
+    """AIの出力（モック）が、アプリ側の検証を満たさない。現行データは変えない。"""
+
+
+class ProposerUnavailable(Exception):
+    """AIの応答を得られない（接続エラーなど）。成功した応答に見せない。"""
+
+
+class ProposalNotFound(Exception):
+    """提案がない（未知のID、または承認・却下済みで再利用できない）。"""
+
+
+class ProposalConflict(Exception):
+    """提案の基準にした一覧が、その後に変わっている。反映しない。"""
+
+
 def new_case_id() -> str:
     return f"CASE-{uuid.uuid4().hex[:8].upper()}"  # 仮の形式（採番形式は未決）

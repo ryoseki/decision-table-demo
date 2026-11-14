@@ -23,6 +23,13 @@ test("形式の違うハッシュは一覧に戻す", () => {
   }
 });
 
+test("#/admin/questions は設問管理（デモ）。末尾のスラッシュは許す。ほかの #/admin/... は一覧に戻す", () => {
+  expect(parseHash("#/admin/questions")).toEqual({ name: "questions" });
+  expect(parseHash("#/admin/questions/")).toEqual({ name: "questions" });
+  expect(parseHash("#/admin/other")).toEqual({ name: "list" });
+  expect(parseHash("#/admin/questions/x")).toEqual({ name: "list" });
+});
+
 test("detailHref は案件IDをエンコードし、parseHash で元に戻る", () => {
   expect(detailHref("CASE-B")).toBe("#/cases/CASE-B");
   const id = "CASE 日本語/1";
