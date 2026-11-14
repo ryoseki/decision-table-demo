@@ -825,3 +825,43 @@ test("「このルールを採用」は、役割と名前で取れる。グレ�
   expect(screen.getAllByRole("button", { name: "このルールを採用" })).toHaveLength(2); // R01・R02
   expect(within(screen.getByTestId("rule-R03")).queryByRole("button")).toBeNull();
 });
+
+// ---- 採用ルールと同じ結果に、印を付ける（結果は自動で選ばない） --------------------------
+
+const hintOn = () => ["アカウント削除", "アカウント一時凍結", "注意", "問題なし"].filter((r) => within(screen.getByTestId(`outcome-${r}`)).queryByTestId("outcome-hint") !== null);
+
+test("ルールを採用すると、そのルールの結果の選択肢に印が付く。結果は自動で選ばない", () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  expect(hintOn()).toEqual([]); // 採用前は、印なし
+  clickAdopt("R01"); // R01 の結果は「注意」
+  expect(hintOn()).toEqual(["注意"]);
+  expect((screen.getByRole("radio", { name: "注意" }) as HTMLInputElement).checked).toBe(false); // 選ばれてはいない
+  expect(screen.getByRole("radio", { name: "注意" }).getAttribute("aria-describedby")).toBe("outcome-hint");
+});
+
+test("採用を付け替えると、印も移る。採用を外す・グレーになると、印は消える。選んだ結果とは独立", () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  choose("問題なし"); // 採用ルールと違う結果を選ぶ
+  expect(hintOn()).toEqual(["注意"]); // 印は、選んだ結果ではなく、採用ルールの結果
+  expect((screen.getByRole("radio", { name: "問題なし" }) as HTMLInputElement).checked).toBe(true);
+  clickAdopt("R02"); // R02 の結果は「問題なし」
+  expect(hintOn()).toEqual(["問題なし"]);
+  clickAdopt("R02"); // 採用を外す
+  expect(hintOn()).toEqual([]);
+  clickAdopt("R01");
+  answer("A01", "No"); // R01 がグレーになり、採用が外れる
+  expect(hintOn()).toEqual([]);
+});
+
+test("結果の選択肢の名前は、印があっても変わらない（結果の名前だけで取れる）", () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  expect(screen.getByRole("radio", { name: "注意" })).toBeTruthy();
+});

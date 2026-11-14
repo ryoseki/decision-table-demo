@@ -271,12 +271,23 @@ export function Review({
         <fieldset>
           <legend>判定結果</legend>
           <div className="outcomes">
-            {RESULTS.map((r) => (
-              <label key={r}>
-                <input type="radio" name="outcome" value={r} required checked={outcome === r} onChange={() => setOutcome(r)} />
-                {r}
-              </label>
-            ))}
+            {RESULTS.map((r) => {
+              // 採用ルールの結果に印を付ける。選ぶ結果は変えない（採用は参考の記録）。
+              const hinted = adoptedRow?.rule.result === r;
+              return (
+                <div key={r} className={`outcome${hinted ? " from-rule" : ""}`} data-testid={`outcome-${r}`}>
+                  <label>
+                    <input
+                      type="radio" name="outcome" value={r} required checked={outcome === r}
+                      aria-describedby={hinted ? "outcome-hint" : undefined}
+                      onChange={() => setOutcome(r)}
+                    />
+                    {r}
+                  </label>
+                  {hinted && <span className="outcome-hint" id="outcome-hint" data-testid="outcome-hint">採用ルールの結果</span>}
+                </div>
+              );
+            })}
           </div>
         </fieldset>
         <button className="btn action" type="submit" disabled={saving}>{saving ? "保存中…" : "判定する"}</button>

@@ -113,6 +113,9 @@ test("例8〜10: 通常表示の行だけ採用でき、結果と違っても保
   // 例8: R01（結果は注意）を採用して、結果は違う「問題なし」を選んで保存。開き直すと、採用ルールが残る。
   await page.getByTestId("adopt-R01").click();
   await expect(page.getByTestId("adopted-R01")).toBeVisible();
+  // 採用したR01の結果（注意）の選択肢に、印が付く。結果は自動では選ばれない。
+  await expect(page.getByTestId("outcome-注意").getByTestId("outcome-hint")).toBeVisible();
+  await expect(page.getByRole("radio", { name: "注意" })).not.toBeChecked();
   await page.getByRole("radio", { name: "問題なし" }).check();
   await page.getByRole("button", { name: "判定する" }).click();
   await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 問題なし");
