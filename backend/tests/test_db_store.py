@@ -374,6 +374,42 @@ class DbFlow(unittest.TestCase):
             self.assertIn("採用ルールが存在しません", body["detail"])
             self.assertEqual(self.get(case_id), before)  # 結果も回答も変わらない
 
+    def test_an_older_revision_of_an_existing_rule_can_be_adopted(self):
+        # 検査するのは、(rule_id, revision) の行があるかだけ。最新の版かどうかは見ない。
+        self.add_rule("R01", 1)
+        self.add_rule("R01", 2)
+        case_id, _ = self.intake("456")
+        status, _ = self.judge(
+            case_id, {"result_code": "no_issue", "rule_id": "R01", "rule_revision": 1}
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(
+            self.get(case_id)["result"]["adopted_rule"],
+            {"rule_id": "R01", "rule_revision": 1},
+        )
+
+    def test_adopting_and_reopening_do_not_call_the_mock_again(self):
+        self.add_rule("R01", 1)
+        case_id, _ = self.intake("456")
+        calls = len(self.mock_calls)
+        self.judge(
+            case_id, {"result_code": "no_issue", "rule_id": "R01", "rule_revision": 1}
+        )
+        self.get(case_id)
+        self.get(case_id)
+        self.assertEqual(len(self.mock_calls), calls)  # 受付のときの呼び出しだけ
+
+    def test_resaving_without_an_adopted_rule_clears_it(self):
+        self.add_rule("R01", 1)
+        case_id, _ = self.intake("456")
+        self.judge(
+            case_id, {"result_code": "no_issue", "rule_id": "R01", "rule_revision": 1}
+        )
+        self.assertIsNotNone(self.get(case_id)["result"]["adopted_rule"])
+        self.judge(case_id, {"result_code": "no_issue"})
+        self.assertIsNone(self.get(case_id)["result"]["adopted_rule"])
+        self.assertEqual(self.get(case_id)["result"]["result_code"], "no_issue")
+
     def test_s9_s10_adopted_rule_is_recorded_only_when_given(self):
         self.add_rule("R01", 7)
         case_id, _ = self.intake("456")

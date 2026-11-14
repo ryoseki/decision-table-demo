@@ -90,7 +90,16 @@ export function Review({
   const [saved, setSaved] = useState<ResultName | "">(c.result ?? "");
   const [justSaved, setJustSaved] = useState<ResultName | "">("");
   // 採用ルール（参考の記録）。保存した値で始める。採用した行が食い違う（グレー）ようになったら外す。
-  const [adopted, setAdopted] = useState<AdoptedRule | null>(c.adopted ?? null);
+  // 開いた時点で有効（いまのルールの版があり、通常表示）なものだけを持つ。無効なものを持ち続けると、
+  // あとの訂正で通常表示に戻ったときに、押していない採用が復活してしまう。
+  const [adopted, setAdopted] = useState<AdoptedRule | null>(() => {
+    const saved = c.adopted;
+    if (saved === undefined) return null;
+    const live = matchRules(c.answers, rules).some(
+      (r) => r.rule.id === saved.ruleId && r.rule.revision === saved.revision && !r.gray,
+    );
+    return live ? saved : null;
+  });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
 

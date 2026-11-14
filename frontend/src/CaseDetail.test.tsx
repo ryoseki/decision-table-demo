@@ -776,3 +776,52 @@ test("サーバーが採用ルールを拒否した（422）ときは、エラ�
   expect(screen.queryByTestId("registered")).toBeNull();
   expect(screen.queryByText(/登録済みの結果/)).toBeNull();
 });
+
+test("開いた時点でグレーだった保存済みの採用は、あとで通常表示に戻っても、復活しない（押していない採用は送らない）", async () => {
+  // R03（A01=No を期待）の採用が保存されているが、いまの回答 A01=Yes ではグレー。
+  const c = { ...fixture("CASE-B"), answers: { A01: "yes", A03: "yes" } as const, result: "注意" as const, adopted: { ruleId: "R03", revision: 1 } };
+  render(<Review c={c} rules={DEMO_RULES} save={save} />);
+  expect(screen.queryByTestId("adopted-R03")).toBeNull();
+  answer("A01", "No"); // R03 が通常表示になる
+  expect(display("R03")).toBe("normal");
+  expect(screen.queryByTestId("adopted-R03")).toBeNull(); // 採用は戻らない
+  expect(adoptNote()).toContain("採用ルール: なし");
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenLastCalledWith("注意", { A01: "no" }, null);
+});
+
+test("保存済みの採用が、保存後の訂正でグレーになると、採用が外れる。外した状態で保存すると、採用なしで送る", async () => {
+  const c = { ...fixture("CASE-B"), answers: { A01: "yes", A03: "yes" } as const, result: "問題なし" as const, adopted: { ruleId: "R01", revision: 1 } };
+  render(<Review c={c} rules={DEMO_RULES} save={save} />);
+  expect(screen.getByTestId("adopted-R01")).toBeTruthy();
+  answer("A01", "No");
+  expect(screen.queryByTestId("adopted-R01")).toBeNull();
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenLastCalledWith("問題なし", { A01: "no" }, null);
+});
+
+test("採用して保存に失敗したら、採用の表示を保ち、もう一度押すと、同じ採用ルールを送る", async () => {
+  save.mockRejectedValueOnce(new ApiError(422, "サーバーがエラーを返しました（HTTP 422）"));
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  choose("注意");
+  submit();
+  await screen.findByTestId("save-error");
+  expect(screen.getByTestId("adopted-R01")).toBeTruthy();
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenNthCalledWith(1, "注意", { A01: "yes", A03: "yes" }, { ruleId: "R01", revision: 1 });
+  expect(save).toHaveBeenNthCalledWith(2, "注意", { A01: "yes", A03: "yes" }, { ruleId: "R01", revision: 1 });
+});
+
+test("「このルールを採用」は、役割と名前で取れる。グレー行の中にはない", () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  expect(screen.getAllByRole("button", { name: "このルールを採用" })).toHaveLength(2); // R01・R02
+  expect(within(screen.getByTestId("rule-R03")).queryByRole("button")).toBeNull();
+});
