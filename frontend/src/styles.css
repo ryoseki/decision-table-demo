@@ -179,3 +179,7 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
 @media (max-width: 720px) {
   .diff { grid-template-columns: minmax(0, 1fr); }
 }
+
+.outcome { display: inline-flex; align-items: center; gap: 6px; }
+.outcome.from-rule { padding-inline: 8px; border: 2px solid var(--accent); border-radius: 6px; background: var(--accent-soft); }
+.outcome-hint { font-size: 0.8rem; font-weight: 700; color: var(--accent); }
