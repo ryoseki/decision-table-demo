@@ -1,21 +1,47 @@
 import { useState, type FormEvent } from "react";
 import { AnswerCounts } from "./AnswerCounts";
+import { ApiError, describeError, saveJudgment } from "./api";
 import { StatusBadge } from "./Badges";
-import { cases, statusOf, type Answer, type ResultName } from "./data/cases";
+import { statusOf, tally, type Answer, type ResultName, type ReviewCase } from "./data/cases";
 import { questions, type QuestionId } from "./data/questions";
 import { RESULTS, canSkipQuestion, matchRules, type AnswerMap } from "./matching";
+import { useCase } from "./useApi";
 
-// 状態はこのコンポーネントのメモリ上だけに持つ。保存・永続化・通信は行わない（契約は未合意）。
-// ページを開き直すと初期状態に戻る。
+// 案件はAPIから取得し、［判定する］で結果だけを保存する（途中の自動保存はない）。
+// 回答の変更は、この画面のメモリ上だけに持つ（保存は、別のスライスで扱う）。
 
 function openState(answers: AnswerMap): Record<string, boolean> {
   return Object.fromEntries(matchRules(answers).map((r) => [r.rule.id, !r.gray]));
 }
 
-export default function CaseDetail({ caseId }: { caseId: string }) {
-  const c = cases.find((x) => x.caseId === caseId);
+const backLink = (
+  <a className="back" href="#/"><span aria-hidden="true">←</span> 一覧へ戻る</a>
+);
 
-  if (c === undefined) {
+export default function CaseDetail({ caseId }: { caseId: string }) {
+  const remote = useCase(caseId);
+
+  if (remote.status === "loading") {
+    return (
+      <section aria-busy="true">
+        {backLink}
+        <p role="status" data-testid="case-loading">案件を読み込み中…</p>
+      </section>
+    );
+  }
+  if (remote.status === "error" && !(remote.error instanceof ApiError && remote.error.status === 404)) {
+    return (
+      <section aria-labelledby="err-title">
+        {backLink}
+        <div className="error" role="alert" data-testid="case-error">
+          <h2 id="err-title" tabIndex={-1}>案件を取得できませんでした</h2>
+          <p>{describeError(remote.error)}</p>
+          <a className="btn" href="#/">一覧へ戻る</a>
+        </div>
+      </section>
+    );
+  }
+  if (remote.status === "error") {
     return (
       <section aria-labelledby="err-title">
         <a className="back" href="#/"><span aria-hidden="true">←</span> 一覧へ戻る</a>
@@ -27,21 +53,27 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
       </section>
     );
   }
-  return <Review c={c} />;
+  return <Review c={remote.data} save={(result) => saveJudgment(caseId, result)} />;
 }
 
-function Review({ c }: { c: (typeof cases)[number] }) {
+export function Review({ c, save }: { c: ReviewCase; save: (result: ResultName) => Promise<void> }) {
   const [answers, setAnswers] = useState<AnswerMap>(c.answers);
   const [edited, setEdited] = useState<ReadonlySet<QuestionId>>(new Set());
   // 行の開閉。初期は食い違わない行を開く。回答が変わったときだけ同じ規則で更新し、手動の開閉はそれまで保つ。
   const [open, setOpen] = useState<Record<string, boolean>>(() => openState(c.answers));
   const [outcome, setOutcome] = useState<ResultName | "">(c.result ?? "");
-  const [registered, setRegistered] = useState<ResultName | "">("");
+  // 保存済みの結果（開いたときの値。保存に成功したら更新する）と、今回の保存の状態。
+  const [saved, setSaved] = useState<ResultName | "">(c.result ?? "");
+  const [justSaved, setJustSaved] = useState<ResultName | "">("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const rows = matchRules(answers);
   const matchingCount = rows.filter((r) => !r.gray).length;
   const answeredCount = questions.filter((q) => answers[q.id] === "yes" || answers[q.id] === "no").length;
   const current = { ...c, answers };
+  const counts = tally(current);
+  const status = statusOf({ result: saved === "" ? undefined : saved, counts });
 
   const choose = (id: QuestionId, value: "yes" | "no") => {
     const changed = answers[id] !== value;
@@ -51,9 +83,22 @@ function Review({ c }: { c: (typeof cases)[number] }) {
     if (changed) setOpen(openState(next));
   };
 
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (outcome !== "") setRegistered(outcome);
+    if (outcome === "" || saving) return; // 二重送信しない
+    setSaving(true);
+    setSaveError("");
+    try {
+      await save(outcome);
+      setSaved(outcome);
+      setJustSaved(outcome);
+    } catch (error) {
+      // 失敗したときは、保存済みの表示を変えない。
+      setJustSaved("");
+      setSaveError(describeError(error));
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -66,8 +111,8 @@ function Review({ c }: { c: (typeof cases)[number] }) {
           <p className="sub-row">{c.caseId} ／ user_id {c.userId}</p>
         </div>
         <div className="detail-status">
-          <StatusBadge status={statusOf(current)} />
-          {c.result !== undefined && <span className="result">登録済みの結果: {c.result}</span>}
+          <StatusBadge status={status} />
+          {saved !== "" && <span className="result">登録済みの結果: {saved}</span>}
         </div>
       </div>
 
@@ -76,8 +121,8 @@ function Review({ c }: { c: (typeof cases)[number] }) {
         <p>{c.inquiry}</p>
       </div>
 
-      <p className="note note-top" data-testid="preview-note">
-        画面案：保存はまだ行いません。回答と結果の選択は、このページを開いている間だけの表示用で、開き直すと初期状態に戻ります。
+      <p className="note note-top" data-testid="save-note">
+        結果は［判定する］で保存されます。回答の変更は、まだ保存されません（このページを開いている間だけの表示用で、開き直すと戻ります）。
       </p>
 
       <div className="columns">
@@ -86,7 +131,7 @@ function Review({ c }: { c: (typeof cases)[number] }) {
             <h3 id="q-title">設問と回答</h3>
             <span role="status" data-testid="progress">{answeredCount}／{questions.length}問 入力済み</span>
           </div>
-          <div className="pane-counts"><AnswerCounts c={current} /></div>
+          <div className="pane-counts"><AnswerCounts counts={counts} /></div>
           <ol className="question-list">
             {questions.map((q) => {
               const a: Answer | undefined = answers[q.id];
@@ -166,10 +211,11 @@ function Review({ c }: { c: (typeof cases)[number] }) {
             ))}
           </div>
         </fieldset>
-        <button className="btn action" type="submit">判定する</button>
-        {registered !== "" && <p className="saved" role="status" data-testid="registered">登録結果（画面例） {registered}</p>}
+        <button className="btn action" type="submit" disabled={saving}>{saving ? "保存中…" : "判定する"}</button>
+        {justSaved !== "" && <p className="saved" role="status" data-testid="registered">保存しました。登録結果: {justSaved}</p>}
+        {saveError !== "" && <p className="error-inline" role="alert" data-testid="save-error">保存できませんでした。{saveError}。もう一度［判定する］を押してください。</p>}
         <p className="note note-inline">
-          結果は照合にかかわらず、未回答・確認待ちが残っていても選べます。［判定する］は画面に結果例を出すだけで、保存・実際の処置は行いません（未実装）。
+          結果は照合にかかわらず、未回答・確認待ちが残っていても選べます。［判定する］は結果を保存します。実際の処置は行いません（未実装）。
         </p>
       </form>
 

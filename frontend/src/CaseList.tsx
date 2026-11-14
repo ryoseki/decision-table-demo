@@ -1,8 +1,10 @@
 import { useMemo } from "react";
 import { AnswerCounts } from "./AnswerCounts";
 import { StatusBadge } from "./Badges";
-import { caseStatuses, cases, statusOf, type CaseStatus } from "./data/cases";
+import { describeError } from "./api";
+import { caseStatuses, statusOf, type CaseStatus } from "./data/cases";
 import { detailHref } from "./route";
+import { useCaseList } from "./useApi";
 
 const normalize = (s: string) => s.normalize("NFKC").toLowerCase();
 
@@ -14,6 +16,9 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
   const setQuery = (q: string) => onFilterChange({ ...filter, query: q });
   const setStatus = (s: CaseStatus | "all") => onFilterChange({ ...filter, status: s });
 
+  const remote = useCaseList();
+  const cases = useMemo(() => (remote.status === "ok" ? remote.data : []), [remote]);
+
   const filtered = useMemo(() => {
     const words = normalize(query).split(/\s+/).filter((w) => w !== "");
     return cases.filter((c) => {
@@ -22,7 +27,7 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
       const haystack = normalize(`${c.caseId} ${c.userId} user_id ${c.summary} ${c.inquiry}`);
       return words.every((w) => haystack.includes(w));
     });
-  }, [query, status]);
+  }, [cases, query, status]);
 
   const filtering = query.trim() !== "" || status !== "all";
   const reset = () => onFilterChange({ query: "", status: "all" });
@@ -34,6 +39,16 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
         <p className="lead">受領したアカウント乗っ取りの申告を確認します。</p>
       </div>
 
+      {remote.status === "loading" && (
+        <p className="count" role="status" data-testid="list-loading">読み込み中…</p>
+      )}
+      {remote.status === "error" && (
+        <div className="error" role="alert" data-testid="list-error">
+          <p className="empty-title">案件の一覧を取得できませんでした</p>
+          <p>{describeError(remote.error)}</p>
+        </div>
+      )}
+      {remote.status === "ok" && (<>
       <div className="toolbar" role="search">
         <label className="sr-only" htmlFor="case-search">案件ID・ユーザーID・申告内容で検索</label>
         <input
@@ -87,7 +102,7 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
                   <td role="cell" data-label="対象">user_id {c.userId}</td>
                   <td role="cell" data-label="申告内容">
                     <span className="case-summary">{c.summary}</span>
-                    <AnswerCounts c={c} />
+                    <AnswerCounts counts={c.counts} />
                   </td>
                   <td role="cell" data-label="状態"><StatusBadge status={statusOf(c)} /></td>
                   <td role="cell" className="op">
@@ -101,6 +116,7 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
           </table>
         </div>
       )}
+      </>)}
     </section>
   );
 }

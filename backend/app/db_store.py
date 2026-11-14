@@ -165,6 +165,49 @@ class PostgresCaseStore:
             ),
         }
 
+    def list_cases(self) -> list[dict[str, Any]]:
+        """一覧の各行。並びは案件ID順（受付日時の列がないため）。HTTPモックは呼ばない。
+
+        状態（登録済み・取得エラー・未審査）は返さず、結果と回答の件数から画面側で導く。
+        """
+        with self._connect() as conn:
+            cases = conn.execute(
+                "SELECT c.case_id, c.summary, c.user_data, c.inquiry_data,"
+                " r.result_code"
+                " FROM review_cases c LEFT JOIN case_results r"
+                " ON r.case_id = c.case_id ORDER BY c.case_id"
+            ).fetchall()
+            totals = dict(
+                conn.execute(
+                    "SELECT case_id, count(*) FROM case_questions GROUP BY case_id"
+                ).fetchall()
+            )
+            answered: dict[tuple[str, str], int] = {
+                (case_id, answer): count
+                for case_id, answer, count in conn.execute(
+                    "SELECT case_id, answer, count(*) FROM case_checks"
+                    " GROUP BY case_id, answer"
+                ).fetchall()
+            }
+        rows = []
+        for case_id, summary, user_data, inquiry_data, result_code in cases:
+            counts = {
+                answer: answered.get((case_id, answer), 0)
+                for answer in ("yes", "no", "pending")
+            }
+            counts["unanswered"] = totals.get(case_id, 0) - sum(counts.values())
+            rows.append(
+                {
+                    "case_id": case_id,
+                    "summary": summary,
+                    "user_id": user_data["user_id"],
+                    "inquiry": inquiry_data,
+                    "result_code": result_code,
+                    "counts": counts,
+                }
+            )
+        return rows
+
     # --- ［判定する］ ---------------------------------------------------------
 
     def save_judgment(

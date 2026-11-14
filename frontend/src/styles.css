@@ -71,6 +71,7 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
 .empty-title { font-weight: 700; font-size: 1.05rem; margin: 0 0 4px; }
 .error { border: 2px solid var(--danger); background: var(--danger-bg); text-align: left; }
 .error h2 { color: var(--danger); font-size: 1.25rem; }
+.error-inline { color: var(--danger); font-weight: 700; margin: 8px 0 0; }
 .btn { display: inline-block; font: inherit; font-size: 0.9rem; font-weight: 700; padding: 6px 16px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; text-decoration: none; }
 .error .btn, .empty .btn { margin-top: 8px; }
 

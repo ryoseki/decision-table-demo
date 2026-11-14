@@ -1,7 +1,7 @@
-import { tally, type ReviewCase } from "./data/cases";
+import type { Tally } from "./data/cases";
 
-export function AnswerCounts({ c }: { c: ReviewCase }) {
-  const t = tally(c);
+export function AnswerCounts({ counts }: { counts: Tally }) {
+  const t = counts;
   return (
     <span className="counts" role="group" aria-label={`Yes ${t.yes}、No ${t.no}、確認待ち ${t.pending}、未回答 ${t.unanswered}`}>
       <span className="count-item c-yes">Yes {t.yes}</span>
