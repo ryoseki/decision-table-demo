@@ -54,6 +54,49 @@ test("ハッシュを変えると、一覧と詳細が切り替わる", async ()
   expect(await screen.findByText("CASE-B")).toBeTruthy();
 });
 
+test("ヘッダーの「設問管理」から設問管理（デモ）へ入り、「案件一覧」で戻れる", async () => {
+  render(<App />);
+  await screen.findByText("CASE-B");
+  const link = screen.getByRole("link", { name: "設問管理" });
+  expect(link.getAttribute("href")).toBe("#/admin/questions");
+  stubFetch({ "GET /api/admin/questions": { body: { revision: 1, questions: [{ id: "A01", text: "設問？" }] } } });
+  goTo("#/admin/questions");
+  expect(screen.getByRole("heading", { name: "設問管理（デモ）" })).toBeTruthy();
+  expect(await screen.findByText("設問？")).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "審査対象一覧" })).toBeNull();
+  expect(screen.getByRole("link", { name: "案件一覧" }).getAttribute("href")).toBe("#/");
+});
+
+test("設問管理で作った未承認の追加案は、画面を切り替えて戻ると破棄され、現行の一覧は変わらない", async () => {
+  const q = Array.from({ length: 12 }, (_, i) => ({ id: `A${String(i + 1).padStart(2, "0")}`, text: `設問${i + 1}？` }));
+  const added = { id: "A13", text: "追加の設問？" };
+  const spy = stubFetch({
+    "GET /api/cases": { body: [apiRow({ case_id: "CASE-B" })] },
+    "GET /api/admin/questions": { body: { revision: 1, questions: q } },
+    "POST /api/admin/question-proposals": {
+      status: 201,
+      body: { proposal_id: "p1", before: q, after: [...q, added], added },
+    },
+  });
+  render(<App />);
+  await screen.findByText("CASE-B");
+  goTo("#/admin/questions");
+  await screen.findByText("設問12？");
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "依頼" } });
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  await screen.findByTestId("proposal");
+
+  goTo("#/"); // 承認せずに別の画面へ
+  await screen.findByText("CASE-B");
+  expect(screen.queryByTestId("proposal")).toBeNull();
+  goTo("#/admin/questions");
+  await screen.findByText("設問12？");
+  expect(screen.queryByTestId("proposal")).toBeNull();
+  expect(screen.queryByText("追加の設問？")).toBeNull();
+  // 決定は一度も送っていない。
+  expect(spy.mock.calls.some(([url]) => String(url).endsWith("/decision"))).toBe(false);
+});
+
 test("詳細から一覧へ戻っても、検索語は保たれる", async () => {
   render(<App />);
   await screen.findByText("CASE-B");

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getCase, listCases, type CaseListRow } from "./api";
 import type { ReviewCase } from "./data/cases";
+import { getDemoQuestions, type DemoQuestionList } from "./questionsApi";
 
 // 画面の部品から使うフック（Reactに依存する）。読み込み中・成功・失敗を返す。
 export type Remote<T> =
@@ -28,6 +29,11 @@ function useRemote<T>(load: () => Promise<T>, key: string): Remote<T> {
 
 export function useCaseList(): Remote<CaseListRow[]> {
   return useRemote(listCases, "list");
+}
+
+/** デモの設問一覧（設問管理）。version を変えると、取り直す。 */
+export function useDemoQuestions(version: number): Remote<DemoQuestionList> {
+  return useRemote(getDemoQuestions, `demo-questions:${version}`);
 }
 
 export function useCase(caseId: string): Remote<ReviewCase> {

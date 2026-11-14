@@ -104,6 +104,16 @@ Each run adds new cases. To start over, run `docker compose down -v` (it deletes
 
 The result is saved by "判定する" (`PUT /api/cases/{id}/judgment`) and shown again when the case is reopened. Answer edits on the screen are not saved yet. The API contract is in [intake-mock-contract-design.md](docs/intake-mock-contract-design.md) (section 2.8).
 
+### Question management demo (mock, no database)
+
+The header link "設問管理" opens `#/admin/questions`, a first vertical slice of the administrator-AI prototype. An administrator types a natural-language request (for example "APIキーの失効履歴を確認する設問を追加して"), sees the full Before and After lists with the added row marked (background and a "追加" label), and answers "反映しますか？" with Yes or No. Only Yes changes the demo list.
+
+- **The AI is a mock.** A fixed rule returns a fictional proposal (question A13). Nothing connects to Bedrock or any real AI. The app still validates the output (format, the one allowed ID, duplicates, required fields) and rejects an invalid response with 422 without changing anything.
+- **No database.** The demo list lives in the backend process memory. It survives a page reload but is reset to A01–A12 when the backend restarts. It is not persistent storage, and it does not touch the cases, their questions or answers, or the database. An unapproved preview is only held by the screen and is dismissed on reload.
+- **Not decided yet:** deleting questions, editing decision rules, keeping or retiring past versions, physical deletion, and persistent storage.
+
+The endpoints, error statuses and layer boundaries are in [admin-question-proposal-demo.md](docs/admin-question-proposal-demo.md).
+
 ### Local database
 
 `docker compose up -d` also starts a development PostgreSQL 16 (`db`). It uses trust authentication (no password), and **its port is not published to the host**; only containers in the same Compose project can connect. Do not add `ports:` to `db` in `compose.yaml`, because that would expose a passwordless database. `backend` saves to it when `DB_HOST` is set (the Compose file sets it), so saving and redisplaying a judgment work with plain `docker compose up`.
@@ -259,9 +269,9 @@ bash scripts/e2e.sh                  # normal run, expected to succeed
 bash scripts/e2e.sh --force-failure  # intentionally fail by changing the expected /health value
 ```
 
-Compose starts frontend (Vite) and backend (FastAPI) under a dedicated project name (`decision-table-demo-e2e`), waits on healthchecks, and then runs Playwright (`e2e/`). Afterward, it stops and removes only that project's containers and network. Host ports are not published, so you can run it while the normal development environment (`docker compose up`) is up, and it does not affect that environment. The exit code is 0 on success and non-zero on failure. Startup or wait failures also give a non-zero code. On failure, check the reason in the report at `e2e/playwright-report/index.html` and the traces in `e2e/test-results/`. CI also calls the same `bash scripts/e2e.sh`. The CI workflow and check names will be decided in a separate issue.
+Compose starts frontend (Vite) and backend (FastAPI) under a dedicated project name (`decision-table-demo-e2e`; set `E2E_PROJECT` to use another name when two working copies run E2E at the same time), waits on healthchecks, and then runs Playwright (`e2e/`). Afterward, it stops and removes only that project's containers and network. Host ports are not published, so you can run it while the normal development environment (`docker compose up`) is up, and it does not affect that environment. The exit code is 0 on success and non-zero on failure. Startup or wait failures also give a non-zero code. On failure, check the reason in the report at `e2e/playwright-report/index.html` and the traces in `e2e/test-results/`. CI also calls the same `bash scripts/e2e.sh`. The CI workflow and check names will be decided in a separate issue.
 
-The environment smoke tests (`e2e/tests/smoke.spec.ts`) check only the initial screen display and the `GET /health` response. The business E2E tests (`e2e/tests/review.spec.ts`) go through the screen, the API and the database: open a case created through the intake API, choose a result, press "判定する", reload and check the saved result (acceptance example 7), the list and the not-found display, and the mobile width. The screen reaches the API through the Vite proxy (`/api` to the `backend` service). Business results are recorded apart from the environment smoke results. Behavior that does not need a real browser is checked by the component tests (`frontend/src/*.test.tsx`).
+The environment smoke tests (`e2e/tests/smoke.spec.ts`) check only the initial screen display and the `GET /health` response. The business E2E tests (`e2e/tests/review.spec.ts`) go through the screen, the API and the database: open a case created through the intake API, choose a result, press "判定する", reload and check the saved result (acceptance example 7), the list and the not-found display, and the mobile width. The screen reaches the API through the Vite proxy (`/api` to the `backend` service). `e2e/tests/question-admin.spec.ts` covers the question management demo (create a proposal, check the diff, No leaves the list unchanged, create again, Yes applies, reload keeps it). Business results are recorded apart from the environment smoke results. Behavior that does not need a real browser is checked by the component tests (`frontend/src/*.test.tsx`).
 
 ## CI (GitHub Actions)
 
