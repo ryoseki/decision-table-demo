@@ -14,7 +14,7 @@ function parse(pattern: string): Record<QuestionId, Expected> {
 }
 
 export const DEMO_RULES: readonly Rule[] = [
-  { id: "R01", result: "注意", expected: parse("Y Y Y Y Y N Y Y Y N Y Y") },
-  { id: "R02", result: "問題なし", expected: parse("Y N Y Y Y Y Y Y Y Y Y N") },
-  { id: "R03", result: "アカウント一時凍結", expected: parse("N Y Y Y Y N Y Y Y N Y Y") },
+  { id: "R01", revision: 1, result: "注意", expected: parse("Y Y Y Y Y N Y Y Y N Y Y") },
+  { id: "R02", revision: 1, result: "問題なし", expected: parse("Y N Y Y Y Y Y Y Y Y Y N") },
+  { id: "R03", revision: 1, result: "アカウント一時凍結", expected: parse("N Y Y Y Y N Y Y Y N Y Y") },
 ];

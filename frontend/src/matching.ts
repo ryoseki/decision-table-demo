@@ -17,6 +17,8 @@ export const RESULTS: readonly ResultName[] = [
 export type Expected = "yes" | "no";
 export type Rule = {
   id: string;
+  /** ルールの版（不変の行。条件を変えるときは新しい版が増える） */
+  revision: number;
   result: ResultName;
   /** 条件のある設問だけ。ない設問は「問わない」（どの回答でも食い違いにしない）。 */
   expected: Readonly<Partial<Record<QuestionId, Expected>>>;

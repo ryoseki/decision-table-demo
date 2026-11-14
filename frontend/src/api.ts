@@ -1,7 +1,7 @@
 // APIの呼び出し（画面は相対パス /api/... を呼ぶ。開発とE2EではViteが中継し、本番は同じオリジン）。
 // Reactに依存しない。通信の失敗は ApiError にそろえる（status 0 は、通信できなかった場合）。
 import { RESULT_CODE_BY_NAME, resultNameOf } from "./resultCodes";
-import type { Answer, ResultName, ReviewCase, Tally } from "./data/cases";
+import type { AdoptedRule, Answer, ResultName, ReviewCase, Tally } from "./data/cases";
 import type { QuestionId } from "./data/questions";
 import { QUESTION_IDS, type Rule } from "./matching";
 
@@ -63,7 +63,7 @@ type ApiCase = {
   user: { user_id: string };
   inquiry: { subject: string; body: string };
   questions: { question_code: string; answer: Answer | null }[];
-  result: { result_code: string } | null;
+  result: { result_code: string; adopted_rule: { rule_id: string; rule_revision: number } | null } | null;
 };
 
 /** 案件の詳細。未回答（回答の行がない）は、answers に入れない。 */
@@ -80,6 +80,9 @@ export async function getCase(caseId: string): Promise<ReviewCase> {
     inquiry: c.inquiry.body,
     answers,
     ...(c.result === null ? {} : { result: resultNameOf(c.result.result_code) }),
+    ...(c.result?.adopted_rule == null
+      ? {}
+      : { adopted: { ruleId: c.result.adopted_rule.rule_id, revision: c.result.adopted_rule.rule_revision } }),
   };
 }
 
@@ -103,7 +106,7 @@ function toRule(r: ApiRule): Rule {
     }
     expected[q as QuestionId] = value;
   }
-  return { id: r.rule_id, result: resultNameOf(r.result_code), expected };
+  return { id: r.rule_id, revision: r.revision, result: resultNameOf(r.result_code), expected };
 }
 
 /** 照合に使うルール。APIが返す順（rule_id順）のまま。 */
@@ -115,10 +118,24 @@ export async function listRules(): Promise<Rule[]> {
 /** 人が選んだ回答（Yes・No）。確認待ち・未回答に戻す操作はない。 */
 export type HumanAnswers = Partial<Record<QuestionId, "yes" | "no">>;
 
-/** ［判定する］。結果と、**変更した回答だけ**を保存する（変更がなければ answers は送らない）。 */
-export async function saveJudgment(caseId: string, result: ResultName, answers: HumanAnswers = {}): Promise<void> {
-  const body: { result_code: string; answers?: HumanAnswers } = { result_code: RESULT_CODE_BY_NAME[result] };
+/**
+ * ［判定する］。結果と、**変更した回答だけ**を保存する（変更がなければ answers は送らない）。
+ * 採用ルールは、採用しているときだけ rule_id と rule_revision を送る（結果を選んだだけでは送らない）。
+ */
+export async function saveJudgment(
+  caseId: string,
+  result: ResultName,
+  answers: HumanAnswers = {},
+  adopted: AdoptedRule | null = null,
+): Promise<void> {
+  const body: { result_code: string; answers?: HumanAnswers; rule_id?: string; rule_revision?: number } = {
+    result_code: RESULT_CODE_BY_NAME[result],
+  };
   if (Object.keys(answers).length > 0) body.answers = answers;
+  if (adopted !== null) {
+    body.rule_id = adopted.ruleId;
+    body.rule_revision = adopted.revision;
+  }
   await request(`/api/cases/${encodeURIComponent(caseId)}/judgment`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

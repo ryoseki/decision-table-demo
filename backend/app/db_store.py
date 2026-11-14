@@ -241,7 +241,8 @@ class PostgresCaseStore:
         - 回答の行は削除しない。answers に無い設問は変更しない。
           automated_answerは更新しない。
         - 採用ルールは参考の記録で、渡されたときだけ入れる。
-          結果を選んだだけでは入れない。
+          結果を選んだだけでは入れない。decision_rules にない版は拒否する
+          （結果と違うことは拒否しない）。
         - 失敗すれば結果も回答も保存されない。
         """
         if result_code not in RESULT_CODES:
@@ -260,6 +261,20 @@ class PostgresCaseStore:
                 is None
             ):
                 raise CaseNotFound(case_id)
+            # 採用ルールは参考の記録だが、decision_rules にない版は記録しない
+            # （外部キーは持たないので、ここで検査する）。ルールは不変の行で
+            # 削除もしないので、検査のあとで消えることはない。結果との一致は検査しない。
+            if (
+                adopted_rule is not None
+                and conn.execute(
+                    "SELECT 1 FROM decision_rules WHERE rule_id = %s AND revision = %s",
+                    adopted_rule,
+                ).fetchone()
+                is None
+            ):
+                raise InvalidJudgment(
+                    f"採用ルールが存在しません: {rule_id} の版 {rule_revision}"
+                )
             existing = dict(
                 conn.execute(
                     "SELECT question_code, answer FROM case_checks WHERE case_id = %s",

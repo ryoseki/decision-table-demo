@@ -23,7 +23,12 @@ export type ReviewCase = {
   pendingReasons?: Partial<Record<QuestionId, string>>;
   /** 登録済みの結果。未登録は undefined */
   result?: ResultName;
+  /** 採用ルール（参考の記録）。採用していなければ undefined */
+  adopted?: AdoptedRule;
 };
+
+/** 採用したルールの版。結果とは独立した、参考の記録。 */
+export type AdoptedRule = { ruleId: string; revision: number };
 
 export const cases: readonly ReviewCase[] = [
   {

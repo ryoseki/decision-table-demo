@@ -157,6 +157,10 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
 }
 @media (pointer: coarse) { .answers button, .rule summary { min-height: 44px; } }
 
+.btn.ghost { background: transparent; color: var(--accent); }
+.rule-actions { padding: 4px 12px 12px; }
+.adopted-badge { margin-inline-start: 8px; font-size: 0.8rem; font-weight: 700; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 1px 8px; }
+
 /* 設問管理（デモ）。追加案の差分は、背景色と「追加」ラベルの両方で示す（色だけに頼らない）。 */
 .app-nav { display: flex; gap: 16px; margin-right: auto; margin-left: 8px; }
 .app-nav a { color: var(--header-text); font-weight: 700; }

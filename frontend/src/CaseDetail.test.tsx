@@ -95,7 +95,7 @@ test("未回答のまま、結果を選んで判定できる。選んだ結果�
   submit();
   expect((await screen.findByTestId("registered")).textContent).toBe("保存しました。登録結果: アカウント削除");
   expect(save).toHaveBeenCalledTimes(1);
-  expect(save).toHaveBeenCalledWith("アカウント削除", {}); // 回答を変えていないので、回答は送らない
+  expect(save).toHaveBeenCalledWith("アカウント削除", {}, null); // 回答を変えていないので、回答は送らない
   expect(screen.getByText("登録済みの結果: アカウント削除")).toBeTruthy(); // ヘッダーも更新する
   expect(screen.getByText("登録済み")).toBeTruthy(); // 状態バッジも登録済みになる
 });
@@ -296,8 +296,8 @@ test("保存したあと、別の結果を選んで判定し直すと、保存�
   choose("問題なし");
   submit();
   await screen.findByText("登録済みの結果: 問題なし");
-  expect(save).toHaveBeenNthCalledWith(1, "注意", {});
-  expect(save).toHaveBeenNthCalledWith(2, "問題なし", {});
+  expect(save).toHaveBeenNthCalledWith(1, "注意", {}, null);
+  expect(save).toHaveBeenNthCalledWith(2, "問題なし", {}, null);
   expect(screen.queryByText("登録済みの結果: 注意")).toBeNull();
 });
 
@@ -328,7 +328,7 @@ test("確認待ちを手入力で解消すると、その設問だけを送る�
   choose("問題なし");
   submit();
   await screen.findByTestId("registered");
-  expect(save).toHaveBeenCalledWith("問題なし", { A03: "yes", A09: "no" });
+  expect(save).toHaveBeenCalledWith("問題なし", { A03: "yes", A09: "no" }, null);
 });
 
 test("確認待ちのままの設問は、送らない（回答を変えずに結果だけ選んだとき）", async () => {
@@ -336,7 +336,7 @@ test("確認待ちのままの設問は、送らない（回答を変えずに�
   choose("注意");
   submit();
   await screen.findByTestId("registered");
-  expect(save).toHaveBeenCalledWith("注意", {}); // A09 は確認待ちのまま。確認待ちは、送らない
+  expect(save).toHaveBeenCalledWith("注意", {}, null); // A09 は確認待ちのまま。確認待ちは、送らない
   expect(screen.getByTestId("q-A09").textContent).toContain("確認待ち");
 });
 
@@ -349,8 +349,8 @@ test("保存に成功したあとは、保存済みの値と比べ直す（同�
   choose("問題なし");
   submit();
   await screen.findByText("登録済みの結果: 問題なし");
-  expect(save).toHaveBeenNthCalledWith(1, "注意", { A09: "no" });
-  expect(save).toHaveBeenNthCalledWith(2, "問題なし", {}); // A09 は、すでに保存済み
+  expect(save).toHaveBeenNthCalledWith(1, "注意", { A09: "no" }, null);
+  expect(save).toHaveBeenNthCalledWith(2, "問題なし", {}, null); // A09 は、すでに保存済み
 });
 
 test("保存に失敗したときは、変更が保存済みになっていない（もう一度押すと、同じ変更を送る）", async () => {
@@ -362,8 +362,8 @@ test("保存に失敗したときは、変更が保存済みになっていな�
   await screen.findByTestId("save-error");
   submit();
   await screen.findByTestId("registered");
-  expect(save).toHaveBeenNthCalledWith(1, "注意", { A09: "no" });
-  expect(save).toHaveBeenNthCalledWith(2, "注意", { A09: "no" });
+  expect(save).toHaveBeenNthCalledWith(1, "注意", { A09: "no" }, null);
+  expect(save).toHaveBeenNthCalledWith(2, "注意", { A09: "no" }, null);
 });
 
 test("［判定する］を押さないかぎり、何も送らない（途中の自動保存はない）", async () => {
@@ -440,7 +440,7 @@ test("変えてから、元の値に戻した設問は、変更として送ら�
   choose("注意");
   submit();
   await screen.findByTestId("registered");
-  expect(save).toHaveBeenCalledWith("注意", {});
+  expect(save).toHaveBeenCalledWith("注意", {}, null);
 });
 
 test("回答を変えて保存に失敗したら、エラーを表示し、保存済みの結果は表示しない。回答の変更は画面に残る", async () => {
@@ -469,8 +469,8 @@ test("保存している間に別の設問を変えても、その変更は、�
   await screen.findByTestId("registered");
   submit();
   await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
-  expect(save).toHaveBeenNthCalledWith(1, "注意", { A09: "no" }); // 送った時点の変更だけ
-  expect(save).toHaveBeenNthCalledWith(2, "注意", { A03: "yes" }); // A09 は、保存済み
+  expect(save).toHaveBeenNthCalledWith(1, "注意", { A09: "no" }, null); // 送った時点の変更だけ
+  expect(save).toHaveBeenNthCalledWith(2, "注意", { A03: "yes" }, null); // A09 は、保存済み
 });
 
 // ---- ルールはAPIから取得する（受入例1〜3を、API経由の画面で） ------------------------------
@@ -612,4 +612,216 @@ test("一部の設問だけに条件があるルールは、その設問だけ�
   expect(display("P1")).toBe("normal");
   answer("A03", "Yes"); // 条件のある設問が食い違えば、グレー
   expect(display("P1")).toBe("gray");
+});
+
+// ---- ルールの採用（受入例8〜10） ---------------------------------------------------------
+
+const adoptButton = (r: string) => screen.queryByTestId(`adopt-${r}`);
+const adoptNote = () => screen.getByTestId("adopted-note").textContent;
+const clickAdopt = (r: string) => fireEvent.click(screen.getByTestId(`adopt-${r}`));
+
+test("例9: 「このルールを採用」は、通常表示の行にだけ出る。グレーの行には出ない", () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  expect(adoptButton("R01")).toBeTruthy();
+  expect(adoptButton("R02")).toBeTruthy();
+  expect(adoptButton("R03")).toBeNull(); // グレー
+});
+
+test("例8: 採用して、結果は違うもの（問題なし）を選んで判定すると、採用ルールの版も一緒に送る", async () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01"); // R01 の結果は「注意」
+  expect(screen.getByTestId("adopted-R01")).toBeTruthy();
+  expect(adoptNote()).toContain("R01（版 1）");
+  choose("問題なし");
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenCalledWith("問題なし", { A01: "yes", A03: "yes" }, { ruleId: "R01", revision: 1 });
+});
+
+test("結果を選んだだけでは、採用ルールを送らない", async () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  choose("注意"); // R01 と同じ結果でも、採用にはならない
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenCalledWith("注意", { A01: "yes", A03: "yes" }, null);
+  expect(adoptNote()).toContain("採用ルール: なし");
+});
+
+test("例10: 採用したあと、回答の訂正でその行がグレーになると、採用が外れる。戻しても、採用し直すまで戻らない", async () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  answer("A01", "No"); // R01 がグレーになる
+  expect(display("R01")).toBe("gray");
+  expect(screen.queryByTestId("adopted-R01")).toBeNull();
+  expect(adoptNote()).toContain("採用ルール: なし");
+  answer("A01", "Yes"); // 戻して、R01 が通常に戻っても、採用は戻らない
+  expect(display("R01")).toBe("normal");
+  expect(screen.queryByTestId("adopted-R01")).toBeNull();
+  choose("注意");
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenCalledWith("注意", { A01: "yes", A03: "yes" }, null); // 外した状態で保存すると、採用なし
+});
+
+test("採用した行が、ほかの設問の訂正で、食い違わないままなら、採用は外れない", () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  answer("A02", "Yes"); // R01 は A02=Yes を期待している。食い違わない
+  expect(screen.getByTestId("adopted-R01")).toBeTruthy();
+});
+
+test("採用済みの行で、もう一度押すと、採用が外れる（判定前なら外せる）。別の行を採用すると、置き換わる", async () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  expect(adoptButton("R01")?.textContent).toBe("採用を外す");
+  clickAdopt("R01");
+  expect(screen.queryByTestId("adopted-R01")).toBeNull();
+  clickAdopt("R01");
+  clickAdopt("R02"); // 採用できるのは1つだけ。置き換わる
+  expect(screen.queryByTestId("adopted-R01")).toBeNull();
+  expect(screen.getByTestId("adopted-R02")).toBeTruthy();
+  choose("注意");
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenCalledWith("注意", { A01: "yes", A03: "yes" }, { ruleId: "R02", revision: 1 });
+});
+
+test("保存済みの採用ルールがある案件を開くと、採用中と表示し、変更せずに判定し直しても、採用を保つ", async () => {
+  const c = { ...fixture("CASE-B"), answers: { A01: "yes", A03: "yes" } as const, result: "問題なし" as const, adopted: { ruleId: "R01", revision: 1 } };
+  render(<Review c={c} rules={DEMO_RULES} save={save} />);
+  expect(screen.getByTestId("adopted-R01")).toBeTruthy();
+  expect(adoptNote()).toContain("R01（版 1）");
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenCalledWith("問題なし", {}, { ruleId: "R01", revision: 1 });
+});
+
+test("保存済みの採用ルールが、いまのルール（版）にない・グレーのときは、採用中とせず、送らない", async () => {
+  const base = { ...fixture("CASE-B"), answers: { A01: "yes", A03: "yes" } as const, result: "注意" as const };
+  const { unmount } = render(<Review c={{ ...base, adopted: { ruleId: "R01", revision: 9 } }} rules={DEMO_RULES} save={save} />);
+  expect(screen.queryByTestId("adopted-R01")).toBeNull(); // 版が違う
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenLastCalledWith("注意", {}, null);
+  unmount();
+  render(<Review c={{ ...base, adopted: { ruleId: "R03", revision: 1 } }} rules={DEMO_RULES} save={save} />);
+  expect(screen.queryByTestId("adopted-R03")).toBeNull(); // R03 はグレー
+  expect(adoptNote()).toContain("採用ルール: なし");
+});
+
+test("API経由: 採用して判定すると、PUT の本文に rule_id と rule_revision が入る。再表示で、採用中と表示する", async () => {
+  const spy = stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "PUT /api/cases/CASE-X/judgment": { status: 204 },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  choose("問題なし");
+  submit();
+  await screen.findByTestId("registered");
+  const put = spy.mock.calls.find((call) => call[1]?.method === "PUT")!;
+  expect(JSON.parse(String(put[1]?.body))).toEqual({
+    result_code: "no_issue",
+    answers: { A01: "yes", A03: "yes" },
+    rule_id: "R01",
+    rule_revision: 1,
+  });
+  cleanup();
+  stubFetch({
+    "GET /api/cases/CASE-X": {
+      body: apiCase({
+        questions: apiCase().questions.map((q: { question_code: string }) => ({
+          ...q,
+          answer: q.question_code === "A01" || q.question_code === "A03" ? "yes" : q.question_code === "A09" ? "yes" : null,
+        })),
+        result: { result_code: "no_issue", adopted_rule: { rule_id: "R01", rule_revision: 1 } },
+      }),
+    },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  expect(screen.getByTestId("adopted-R01")).toBeTruthy();
+  expect(screen.getByText("登録済みの結果: 問題なし")).toBeTruthy();
+});
+
+test("サーバーが採用ルールを拒否した（422）ときは、エラーを表示し、保存済みの表示を変えない", async () => {
+  stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "PUT /api/cases/CASE-X/judgment": { status: 422, body: { detail: "採用ルールが存在しません: R01 の版 1" } },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  choose("注意");
+  submit();
+  const error = await screen.findByTestId("save-error");
+  expect(error.textContent).toContain("HTTP 422");
+  expect(screen.queryByTestId("registered")).toBeNull();
+  expect(screen.queryByText(/登録済みの結果/)).toBeNull();
+});
+
+test("開いた時点でグレーだった保存済みの採用は、あとで通常表示に戻っても、復活しない（押していない採用は送らない）", async () => {
+  // R03（A01=No を期待）の採用が保存されているが、いまの回答 A01=Yes ではグレー。
+  const c = { ...fixture("CASE-B"), answers: { A01: "yes", A03: "yes" } as const, result: "注意" as const, adopted: { ruleId: "R03", revision: 1 } };
+  render(<Review c={c} rules={DEMO_RULES} save={save} />);
+  expect(screen.queryByTestId("adopted-R03")).toBeNull();
+  answer("A01", "No"); // R03 が通常表示になる
+  expect(display("R03")).toBe("normal");
+  expect(screen.queryByTestId("adopted-R03")).toBeNull(); // 採用は戻らない
+  expect(adoptNote()).toContain("採用ルール: なし");
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenLastCalledWith("注意", { A01: "no" }, null);
+});
+
+test("保存済みの採用が、保存後の訂正でグレーになると、採用が外れる。外した状態で保存すると、採用なしで送る", async () => {
+  const c = { ...fixture("CASE-B"), answers: { A01: "yes", A03: "yes" } as const, result: "問題なし" as const, adopted: { ruleId: "R01", revision: 1 } };
+  render(<Review c={c} rules={DEMO_RULES} save={save} />);
+  expect(screen.getByTestId("adopted-R01")).toBeTruthy();
+  answer("A01", "No");
+  expect(screen.queryByTestId("adopted-R01")).toBeNull();
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenLastCalledWith("問題なし", { A01: "no" }, null);
+});
+
+test("採用して保存に失敗したら、採用の表示を保ち、もう一度押すと、同じ採用ルールを送る", async () => {
+  save.mockRejectedValueOnce(new ApiError(422, "サーバーがエラーを返しました（HTTP 422）"));
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  clickAdopt("R01");
+  choose("注意");
+  submit();
+  await screen.findByTestId("save-error");
+  expect(screen.getByTestId("adopted-R01")).toBeTruthy();
+  submit();
+  await screen.findByTestId("registered");
+  expect(save).toHaveBeenNthCalledWith(1, "注意", { A01: "yes", A03: "yes" }, { ruleId: "R01", revision: 1 });
+  expect(save).toHaveBeenNthCalledWith(2, "注意", { A01: "yes", A03: "yes" }, { ruleId: "R01", revision: 1 });
+});
+
+test("「このルールを採用」は、役割と名前で取れる。グレー行の中にはない", () => {
+  renderReview("CASE-B");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  expect(screen.getAllByRole("button", { name: "このルールを採用" })).toHaveLength(2); // R01・R02
+  expect(within(screen.getByTestId("rule-R03")).queryByRole("button")).toBeNull();
 });

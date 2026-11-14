@@ -135,3 +135,27 @@ test("ルール: 500 は ApiError にし、statusを保つ", async () => {
   stubFetch({ "GET /api/rules": { status: 500 } });
   await expect(listRules()).rejects.toMatchObject({ name: "ApiError", status: 500 });
 });
+
+test("詳細: 保存済みの採用ルールを、adopted にする。なければ adopted を持たない", async () => {
+  stubFetch({
+    "GET /api/cases/CASE-X": {
+      body: apiCase({ result: { result_code: "no_issue", adopted_rule: { rule_id: "R01", rule_revision: 2 } } }),
+    },
+    "GET /api/cases/CASE-Y": { body: apiCase({ result: { result_code: "no_issue", adopted_rule: null } }) },
+  });
+  expect((await getCase("CASE-X")).adopted).toEqual({ ruleId: "R01", revision: 2 });
+  expect(await getCase("CASE-Y")).not.toHaveProperty("adopted");
+});
+
+test("ルール: 版（revision）を持つ", async () => {
+  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R01", revision: 3, result_code: "caution", conditions: { A01: "yes" } }] } });
+  expect((await listRules())[0].revision).toBe(3);
+});
+
+test("判定: 採用ルールは、採用しているときだけ rule_id と rule_revision を送る。結果だけなら送らない", async () => {
+  const spy = stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 204 } });
+  await saveJudgment("CASE-X", "注意", {}, { ruleId: "R01", revision: 2 });
+  expect(JSON.parse(String(spy.mock.calls[0][1]?.body))).toEqual({ result_code: "caution", rule_id: "R01", rule_revision: 2 });
+  await saveJudgment("CASE-X", "注意", {});
+  expect(JSON.parse(String(spy.mock.calls[1][1]?.body))).toEqual({ result_code: "caution" });
+});
