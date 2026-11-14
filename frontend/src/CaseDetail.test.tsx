@@ -2,7 +2,7 @@
 // Review（画面の本体）は、固定の架空案件と、保存の関数（モック）で確認する。CaseDetail（取得と保存の
 // つなぎ）は、fetch のスタブで確認する。サーバーには接続しない。
 // モバイル幅の横はみ出しは、実際のレイアウト計算が要るため、E2Eだけで確認する。
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError } from "./api";
 import CaseDetail, { Review } from "./CaseDetail";
@@ -511,11 +511,34 @@ test("ルールが0件でも、4つの結果をすべて選べて、保存でき
   for (const name of ["アカウント削除", "アカウント一時凍結", "注意", "問題なし"]) {
     expect(screen.getByRole("radio", { name })).toBeTruthy();
   }
+  // 0件の表示。照合を絞る意味がないので、未回答の設問を「省略できる」とはしない。
+  expect(screen.getByTestId("rule-count").textContent).toBe("照合 0／0件");
+  expect(screen.queryByTestId("rule-R01")).toBeNull();
+  expect(screen.getByTestId("q-A01").className).not.toContain("gray");
+  expect(screen.getByRole("radio", { name: "アカウント削除" }).hasAttribute("disabled")).toBe(false);
   choose("問題なし");
   submit();
   await screen.findByText("登録済みの結果: 問題なし");
   const put = spy.mock.calls.find((call) => call[1]?.method === "PUT")!;
   expect(JSON.parse(String(put[1]?.body))).toEqual({ result_code: "no_issue" });
+});
+
+test("例3: A01=Yes・A03=No で全行グレー。それでも、結果と、変更した回答（A01・A03）を、API経由で保存する", async () => {
+  const spy = stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "PUT /api/cases/CASE-X/judgment": { status: 204 },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  answer("A01", "Yes");
+  answer("A03", "No");
+  expect(rules(display)).toEqual(["gray", "gray", "gray"]);
+  expect(screen.getByTestId("rule-count").textContent).toBe("照合 0／3件");
+  choose("問題なし");
+  submit();
+  await screen.findByText("登録済みの結果: 問題なし");
+  const put = spy.mock.calls.find((call) => call[1]?.method === "PUT")!;
+  expect(JSON.parse(String(put[1]?.body))).toEqual({ result_code: "no_issue", answers: { A01: "yes", A03: "no" } });
 });
 
 test("ルールを取得できなければ、エラーを表示し、判定の操作を出さない", async () => {
@@ -524,6 +547,31 @@ test("ルールを取得できなければ、エラーを表示し、判定の�
   const alert = await screen.findByTestId("rules-error");
   expect(alert.textContent).toContain("HTTP 500");
   expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+});
+
+test("ルールの形が不正（12問の条件がそろわない）・通信できないときも、エラーを表示し、判定の操作を出さない", async () => {
+  const { conditions: all } = apiRules()[0];
+  const lacking: Record<string, string> = { ...all };
+  delete lacking.A05;
+  stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: lacking }] },
+  });
+  const { unmount } = render(<CaseDetail caseId="CASE-X" />);
+  expect((await screen.findByTestId("rules-error")).textContent).toContain("取得できませんでした");
+  expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+  unmount();
+  stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() }, "GET /api/rules": new TypeError("fetch failed") });
+  render(<CaseDetail caseId="CASE-X" />);
+  expect((await screen.findByTestId("rules-error")).textContent).toContain("接続できませんでした");
+  expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+});
+
+test("案件が見つからない（404）ときは、ルールの取得に失敗していても、見つからない旨を表示する", async () => {
+  stubFetch({ "GET /api/cases/CASE-NONE": { status: 404, body: {} }, "GET /api/rules": { status: 500 } });
+  render(<CaseDetail caseId="CASE-NONE" />);
+  expect(await screen.findByTestId("case-not-found")).toBeTruthy();
+  expect(screen.queryByTestId("rules-error")).toBeNull();
 });
 
 test("ルールの取得中は、読み込み中を表示する（案件だけ取得できていても）", async () => {
@@ -536,7 +584,9 @@ test("ルールの取得中は、読み込み中を表示する（案件だけ�
     ),
   );
   render(<CaseDetail caseId="CASE-X" />);
-  await new Promise((r) => setTimeout(r, 20));
+  // 案件の応答が届いたあと（fetch が両方呼ばれたあと）も、ルールが未着なら、読み込み中のまま。
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  await act(async () => {});
   expect(screen.getByTestId("case-loading")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
 });

@@ -535,6 +535,11 @@ class RuleList(unittest.TestCase):
             ],
         )
 
+    def test_rules_are_read_only(self):
+        for method in ("POST", "PUT", "DELETE"):
+            status, _ = send(method, f"{self.server.base_url}/api/rules", {})
+            self.assertEqual(status, 405, method)
+
     def test_listing_rules_does_not_call_the_mock(self):
         self.get_rules()
         self.assertEqual(self.mock_calls, [])

@@ -52,8 +52,9 @@ test("例7: 受付 → 画面で開く → 結果を選んで判定 → 開き�
 });
 
 const click = (page: import("@playwright/test").Page, q: string, v: "Yes" | "No") => pressed(page, q, v).click();
-const display = (page: import("@playwright/test").Page, rule: string) =>
-  page.getByTestId(`rule-${rule}`).getAttribute("data-display");
+// 表示が変わるまで待つ（再描画が遅れても、不安定にならない）。
+const expectDisplay = (page: import("@playwright/test").Page, rule: string, value: "normal" | "gray") =>
+  expect(page.getByTestId(`rule-${rule}`)).toHaveAttribute("data-display", value);
 
 test("例1〜3: DBのルールを取得して照合する。訂正で表示が変わり、全行グレーでも結果を選んで保存でき、開き直すと保存済み", async ({ page, request }) => {
   // 画面が使うルールは、DBのルール（開発用の架空R01〜R03）をAPIから取得したもの。
@@ -67,20 +68,20 @@ test("例1〜3: DBのルールを取得して照合する。訂正で表示が�
   // 例1: A01=Yes、A03=Yes → R01・R02が通常、R03がグレー
   await click(page, "A01", "Yes");
   await click(page, "A03", "Yes");
-  expect(await display(page, "R01")).toBe("normal");
-  expect(await display(page, "R02")).toBe("normal");
-  expect(await display(page, "R03")).toBe("gray");
+  await expectDisplay(page, "R01", "normal");
+  await expectDisplay(page, "R02", "normal");
+  await expectDisplay(page, "R03", "gray");
 
   // 例2: A01をNoに訂正 → R01・R02がグレー、R03が通常
   await click(page, "A01", "No");
-  expect(await display(page, "R01")).toBe("gray");
-  expect(await display(page, "R02")).toBe("gray");
-  expect(await display(page, "R03")).toBe("normal");
+  await expectDisplay(page, "R01", "gray");
+  await expectDisplay(page, "R02", "gray");
+  await expectDisplay(page, "R03", "normal");
 
   // 例3: A01=Yes、A03=No → 全行グレー。それでも結果「問題なし」を選んで保存できる
   await click(page, "A01", "Yes");
   await click(page, "A03", "No");
-  for (const rule of ["R01", "R02", "R03"]) expect(await display(page, rule)).toBe("gray");
+  for (const rule of ["R01", "R02", "R03"]) await expectDisplay(page, rule, "gray");
   await page.getByRole("radio", { name: "問題なし" }).check();
   await page.getByRole("button", { name: "判定する" }).click();
   await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 問題なし");
@@ -89,7 +90,7 @@ test("例1〜3: DBのルールを取得して照合する。訂正で表示が�
   await expect(page.getByText("登録済みの結果: 問題なし")).toBeVisible();
   await expect(pressed(page, "A01", "Yes")).toHaveAttribute("aria-pressed", "true");
   await expect(pressed(page, "A03", "No")).toHaveAttribute("aria-pressed", "true");
-  for (const rule of ["R01", "R02", "R03"]) expect(await display(page, rule)).toBe("gray");
+  for (const rule of ["R01", "R02", "R03"]) await expectDisplay(page, rule, "gray");
 
   const saved = await (await request.get(`${backendUrl}/api/cases/${case_id}`)).json();
   expect(saved.result.result_code).toBe("no_issue");
