@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app import cases, db_store, intake, mock_api
+from app import cases, db_store, intake, mock_api, rules
 
 app = FastAPI(title="不正審査デモ API")
 # DB_HOST があればPostgreSQLに保存し、なければ開発用の仮のメモリ保存（受付のみ）にする。
@@ -18,6 +18,7 @@ app.state.case_store = (
 app.include_router(mock_api.router)
 app.include_router(intake.router)
 app.include_router(cases.router)
+app.include_router(rules.router)
 
 _SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 

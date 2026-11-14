@@ -1,9 +1,12 @@
 // 実行: npm test（Vitest）。APIの呼び出しを、fetch のスタブで確認する（サーバーに接続しない）。
 import { afterEach, expect, test, vi } from "vitest";
-import { ApiError, describeError, getCase, listCases, saveJudgment } from "./api";
+import { ApiError, describeError, getCase, listCases, listRules, saveJudgment } from "./api";
 import { apiCase, apiRow, stubFetch } from "./testing";
 
 afterEach(() => vi.unstubAllGlobals());
+
+const allConditions = (v: "yes" | "no"): Record<string, string> =>
+  Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`A${String(i + 1).padStart(2, "0")}`, v]));
 
 test("一覧: 行を、画面の形に変換する。結果コードは表示名にする。並びは返された順", async () => {
   stubFetch({
@@ -87,4 +90,48 @@ test("保存: 変更した回答があれば、answers として一緒に送る"
   await saveJudgment("CASE-X", "問題なし", { A09: "no", A03: "yes" });
   const init = spy.mock.calls[0][1] as RequestInit;
   expect(JSON.parse(init.body as string)).toEqual({ result_code: "no_issue", answers: { A09: "no", A03: "yes" } });
+});
+
+test("ルール: APIの行を、照合用の形（id・結果の表示名・12問の期待値）にする。順はAPIのまま", async () => {
+  stubFetch({
+    "GET /api/rules": {
+      body: [
+        { rule_id: "R01", revision: 2, result_code: "caution", conditions: allConditions("yes") },
+        { rule_id: "R02", revision: 1, result_code: "account_deletion", conditions: allConditions("no") },
+      ],
+    },
+  });
+  const rules = await listRules();
+  expect(rules.map((r) => [r.id, r.result])).toEqual([["R01", "注意"], ["R02", "アカウント削除"]]);
+  expect(Object.keys(rules[0].expected)).toHaveLength(12);
+  expect(rules[0].expected.A12).toBe("yes");
+  expect(rules[1].expected.A01).toBe("no");
+});
+
+test("ルール: 一部の設問だけに条件があるルールは、その設問だけを期待値にする（ない設問は問わない）", async () => {
+  stubFetch({
+    "GET /api/rules": {
+      body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: { A03: "no", A09: "yes" } }],
+    },
+  });
+  const [rule] = await listRules();
+  expect(rule.expected).toEqual({ A03: "no", A09: "yes" });
+  expect(rule.expected).not.toHaveProperty("A01");
+});
+
+test("ルール: 条件の値が yes／no でない・A01〜A12にない設問は、黙って使わず、エラーにする", async () => {
+  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: { A05: "maybe" } }] } });
+  await expect(listRules()).rejects.toThrow(/R09.*A05/);
+  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R08", revision: 1, result_code: "caution", conditions: { A99: "yes" } }] } });
+  await expect(listRules()).rejects.toThrow(/R08.*A99/);
+});
+
+test("ルール: 定義にない結果コードは、エラーにする", async () => {
+  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "demo_result", conditions: allConditions("yes") }] } });
+  await expect(listRules()).rejects.toThrow(/demo_result/);
+});
+
+test("ルール: 500 は ApiError にし、statusを保つ", async () => {
+  stubFetch({ "GET /api/rules": { status: 500 } });
+  await expect(listRules()).rejects.toMatchObject({ name: "ApiError", status: 500 });
 });

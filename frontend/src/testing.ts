@@ -1,11 +1,26 @@
 // テスト用の補助（fetch のスタブ）。本番のコードからは取り込まない。
 import { vi } from "vitest";
+import { DEMO_RULES } from "./data/demoRules";
+import { RESULT_CODE_BY_NAME } from "./resultCodes";
 
 export type Reply = { status?: number; body?: unknown } | Error;
 export type Routes = Record<string, Reply | ((init?: RequestInit) => Reply)>;
 
-/** URL（メソッド付き。例: "GET /api/cases"）ごとの応答を返す fetch をスタブにする。 */
+/** API のルール一覧（GET /api/rules）。架空のR01〜R03（テスト用の固定の組み合わせ）。 */
+export const apiRules = () =>
+  DEMO_RULES.map((r) => ({
+    rule_id: r.id,
+    revision: 1,
+    result_code: RESULT_CODE_BY_NAME[r.result],
+    conditions: r.expected,
+  }));
+
+/**
+ * URL（メソッド付き。例: "GET /api/cases"）ごとの応答を返す fetch をスタブにする。
+ * "GET /api/rules" は、指定がなければ、架空のR01〜R03を返す（指定すれば、その応答になる）。
+ */
 export function stubFetch(routes: Routes) {
+  routes = { "GET /api/rules": { body: apiRules() }, ...routes };
   const spy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const key = `${init?.method ?? "GET"} ${String(input)}`;
     const route = routes[key];
