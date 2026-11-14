@@ -7,12 +7,14 @@ import { backendUrl } from "../playwright.config";
 // 画面は相対パス（/api/...）でAPIを呼ぶ。開発とE2Eでは、Viteが backend サービスへ中継する。
 // 照合・確認待ち・訂正などの細かい挙動は、画面の部品テスト（frontend/src/*.test.tsx）で確認する。
 // モバイル幅の横はみ出しは、実際のレイアウト計算が要るため、ここで確認する。
-const intake = async (request: APIRequestContext, userId: string) => {
+// failQuestions: デモ用の失敗指示（demo_controls.fault_questions）。その設問の自動回答の取得を失敗させ、確認待ちにする。
+const intake = async (request: APIRequestContext, userId: string, failQuestions: string[] = []) => {
   const response = await request.post(`${backendUrl}/api/intake/cases`, {
     data: {
       summary: "心当たりのないログインについて問い合わせが届いた。（架空・E2E）",
       user: { user_id: userId },
       inquiry: { subject: "心当たりのないログイン", body: "架空の問い合わせ。" },
+      ...(failQuestions.length > 0 ? { demo_controls: { fault_questions: failQuestions } } : {}),
     },
   });
   expect(response.status()).toBe(201);
@@ -47,6 +49,47 @@ test("例7: 受付 → 画面で開く → 結果を選んで判定 → 開き�
   // 再表示でHTTPモックの呼び出しが増えないことは、ここでは確認できない（モックを呼ぶのはサーバー側で、
   // ブラウザの通信には現れない）。実HTTPのAPI統合テスト（backend/tests/test_db_store.py の
   // test_s1_... と test_list_cases_...）が、モックの呼び出し回数を数えて確認している。
+});
+
+test("例4〜6: 取得に失敗した案件は確認待ち。結果だけ保存しても確認待ちのまま。手入力で解消して保存すると上書きされ、保存しない変更は残らない", async ({ page, request }) => {
+  const { case_id, answers } = await intake(request, "458", ["A09"]); // A09 の取得を失敗させる
+  expect(answers).toEqual({ A09: "pending" });
+  const q09 = page.getByTestId("q-A09");
+
+  // 例4: 確認待ちのまま、結果「注意」を選んで［判定する］。開き直しても、確認待ちのまま。
+  await page.goto(`/#/cases/${case_id}`);
+  await expect(q09).toContainText("確認待ち");
+  await expect(pressed(page, "A09", "Yes")).toHaveAttribute("aria-pressed", "false");
+  await expect(pressed(page, "A09", "No")).toHaveAttribute("aria-pressed", "false");
+  await page.getByRole("radio", { name: "注意" }).check();
+  await page.getByRole("button", { name: "判定する" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 注意");
+  await page.reload();
+  await expect(page.getByText("登録済みの結果: 注意")).toBeVisible();
+  await expect(q09).toContainText("確認待ち");
+
+  // 例5: 資料で確認し、手入力でNo。結果「問題なし」で［判定する］。開き直すと、Noと問題なしで上書きされている。
+  await pressed(page, "A09", "No").click();
+  await expect(q09).not.toContainText("確認待ち");
+  await page.getByRole("radio", { name: "問題なし" }).check();
+  await page.getByRole("button", { name: "判定する" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 問題なし");
+  await page.reload();
+  await expect(page.getByText("登録済みの結果: 問題なし")).toBeVisible();
+  await expect(pressed(page, "A09", "No")).toHaveAttribute("aria-pressed", "true");
+  await expect(q09).not.toContainText("確認待ち");
+  const saved = await (await request.get(`${backendUrl}/api/cases/${case_id}`)).json();
+  expect(saved.result.result_code).toBe("no_issue");
+  expect(saved.questions.find((q: { question_code: string }) => q.question_code === "A09").answer).toBe("no");
+
+  // 例6: 保存したあとに画面で変更し、［判定する］を押さずに開き直す。最後に保存した値が表示される。
+  await pressed(page, "A01", "Yes").click();
+  await page.getByRole("radio", { name: "アカウント削除" }).check();
+  await page.reload();
+  await expect(pressed(page, "A01", "Yes")).toHaveAttribute("aria-pressed", "false"); // 未保存の回答は残らない
+  await expect(page.getByText("登録済みの結果: 問題なし")).toBeVisible(); // 結果も、最後の保存値
+  await expect(page.getByRole("radio", { name: "問題なし" })).toBeChecked();
+  await expect(pressed(page, "A09", "No")).toHaveAttribute("aria-pressed", "true"); // 保存済みの A09 も、そのまま
 });
 
 test("一覧に、受付した案件が出て、そこから詳細を開ける", async ({ page, request }) => {

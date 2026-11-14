@@ -82,12 +82,17 @@ export async function getCase(caseId: string): Promise<ReviewCase> {
   };
 }
 
-/** ［判定する］。結果だけを保存する（回答の保存は、別のスライスで扱う）。 */
-export async function saveJudgment(caseId: string, result: ResultName): Promise<void> {
+/** 人が選んだ回答（Yes・No）。確認待ち・未回答に戻す操作はない。 */
+export type HumanAnswers = Partial<Record<QuestionId, "yes" | "no">>;
+
+/** ［判定する］。結果と、**変更した回答だけ**を保存する（変更がなければ answers は送らない）。 */
+export async function saveJudgment(caseId: string, result: ResultName, answers: HumanAnswers = {}): Promise<void> {
+  const body: { result_code: string; answers?: HumanAnswers } = { result_code: RESULT_CODE_BY_NAME[result] };
+  if (Object.keys(answers).length > 0) body.answers = answers;
   await request(`/api/cases/${encodeURIComponent(caseId)}/judgment`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ result_code: RESULT_CODE_BY_NAME[result] }),
+    body: JSON.stringify(body),
   });
 }
 
