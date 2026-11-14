@@ -176,6 +176,38 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(user_data, {"user_id": "456"})
         self.assertEqual(set(inquiry_data), {"subject", "body"})
 
+    def test_list_rules_returns_the_latest_revision_of_each_rule_in_rule_id_order(self):
+        with _connect(self.schema) as conn:
+            for rule_id, revision, code, conditions in [
+                ("R02", 1, "no_issue", {"A01": "yes"}),
+                ("R01", 1, "caution", {"A01": "yes", "A02": "yes"}),
+                ("R01", 2, "no_issue", {"A01": "no"}),
+            ]:
+                conn.execute(
+                    "INSERT INTO decision_rules (rule_id, revision, result_code,"
+                    " conditions, created_at) VALUES (%s, %s, %s, %s, now())",
+                    (rule_id, revision, code, json.dumps(conditions)),
+                )
+        status, body = send("GET", f"{self.server.base_url}/api/rules")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            body,
+            [
+                {
+                    "rule_id": "R01",
+                    "revision": 2,
+                    "result_code": "no_issue",
+                    "conditions": {"A01": "no"},
+                },
+                {
+                    "rule_id": "R02",
+                    "revision": 1,
+                    "result_code": "no_issue",
+                    "conditions": {"A01": "yes"},
+                },
+            ],
+        )
+
     def test_list_cases_returns_summary_rows_in_case_id_order(self):
         first, _ = self.intake("456")  # A09 は yes
         second, _ = self.intake("457")  # A09 は no

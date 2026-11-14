@@ -50,6 +50,8 @@ class ContractStore(intake.InMemoryCaseStore):
     def __init__(self) -> None:
         super().__init__()
         self.save_calls: list[tuple] = []
+        # 不変の行。条件を変えるときは新しい revision の行を足す（旧版は残る）。
+        self.rule_rows: list[dict] = []
 
     def get_case(self, case_id: str) -> dict:
         stored = self.cases.get(case_id)
@@ -69,6 +71,14 @@ class ContractStore(intake.InMemoryCaseStore):
             ],
             "result": stored.get("result"),
         }
+
+    def list_rules(self) -> list[dict]:
+        """rule_id ごとに最新の revision の行。並びは rule_id 順。"""
+        latest: dict[str, dict] = {}
+        for row in self.rule_rows:
+            if row["rule_id"] not in latest or row["revision"] > latest[row["rule_id"]]["revision"]:
+                latest[row["rule_id"]] = row
+        return [latest[rule_id] for rule_id in sorted(latest)]
 
     def list_cases(self) -> list[dict]:
         """一覧の各行。並びは案件ID順（受付日時の列がないため）。"""
@@ -465,6 +475,71 @@ class CasesApiContract(unittest.TestCase):
         self.assertEqual(len(self.store.save_calls), before)
 
 
+def rule_row(rule_id: str, revision: int, result_code: str, **conditions: str) -> dict:
+    return {
+        "rule_id": rule_id,
+        "revision": revision,
+        "result_code": result_code,
+        "conditions": conditions,
+    }
+
+
+class RuleList(unittest.TestCase):
+    """GET /api/rules: rule_id ごとに最新の revision の行を、rule_id 順に返す。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.store = ContractStore()
+        cls.mock_calls: list[str] = []
+        cls.server = _Server(make_app(cls.store, cls.mock_calls)).__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.__exit__()
+
+    def setUp(self) -> None:
+        self.store.rule_rows = []
+
+    def get_rules(self) -> list[dict]:
+        status, body = send("GET", f"{self.server.base_url}/api/rules")
+        self.assertEqual(status, 200, body)
+        return body
+
+    def test_no_rules_is_an_empty_array(self):
+        self.assertEqual(self.get_rules(), [])
+
+    def test_rows_carry_id_revision_result_code_and_conditions_in_rule_id_order(self):
+        self.store.rule_rows = [
+            rule_row("R02", 1, "no_issue", A01="yes", A02="no"),
+            rule_row("R01", 1, "caution", A01="yes", A02="yes"),
+        ]
+        self.assertEqual(
+            self.get_rules(),
+            [
+                rule_row("R01", 1, "caution", A01="yes", A02="yes"),
+                rule_row("R02", 1, "no_issue", A01="yes", A02="no"),
+            ],
+        )
+
+    def test_only_the_latest_revision_of_each_rule_is_returned(self):
+        self.store.rule_rows = [
+            rule_row("R01", 1, "caution", A01="yes"),
+            rule_row("R01", 2, "no_issue", A01="no"),
+            rule_row("R02", 1, "caution", A01="yes"),
+        ]
+        self.assertEqual(
+            self.get_rules(),
+            [
+                rule_row("R01", 2, "no_issue", A01="no"),
+                rule_row("R02", 1, "caution", A01="yes"),
+            ],
+        )
+
+    def test_listing_rules_does_not_call_the_mock(self):
+        self.get_rules()
+        self.assertEqual(self.mock_calls, [])
+
+
 class EmptyList(unittest.TestCase):
     """案件が1件もないときの一覧は、空の配列（200）。"""
 
@@ -495,6 +570,7 @@ class WithoutDatabase(unittest.TestCase):
         base = f"{self.server.base_url}/api/cases/CASE-ANY"
         self.assertEqual(send("GET", base)[0], 503)
         self.assertEqual(send("GET", f"{self.server.base_url}/api/cases")[0], 503)
+        self.assertEqual(send("GET", f"{self.server.base_url}/api/rules")[0], 503)
         self.assertEqual(
             send("PUT", f"{base}/judgment", {"result_code": "caution"})[0], 503
         )

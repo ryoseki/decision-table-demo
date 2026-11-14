@@ -212,7 +212,7 @@ FastAPI側の事実確認: エンドポイントの失敗は`HTTPException`を�
 - ルール集合の版を明示的に記録する構造は持たない。必要になった場合は後続で設計する。
 - 版の公開と、進行中の案件への適用は未決。
 
-注意: 現在の照合ロジックはコード内にR01〜R03を持つ。`decision_rules`に投入する値と二重管理になるため、同じ定義から投入するか、一致を確認するテストを置く（実装担当の確認事項）。保存する`result_code`は、表示名ではなくコードにする案とし、仮に`account_deletion`・`account_suspension`・`caution`・`no_issue`とする（値の確定は未合意）。
+注意: 画面の照合は、`decision_rules` のルールを `GET /api/rules` で取得して使う（2026-11-14に決定。開発用DBには `docs/decision-support-demo-rules.json` のR01〜R03を入れる）。画面は、A01〜A12すべての条件を持つルールだけを扱う（一部の設問だけの条件を持つルールは、エラーにする）。バックエンドの `rule_matching.py` は、画面からは使わない。保存する`result_code`は、表示名ではなくコードにする案とし、仮に`account_deletion`・`account_suspension`・`caution`・`no_issue`とする（値の確定は未合意）。
 
 **採用ルールの記録**
 
@@ -237,6 +237,7 @@ FastAPI側の事実確認: エンドポイントの失敗は`HTTPException`を�
 | 操作 | 呼び出し | 応答 |
 | --- | --- | --- |
 | 一覧 | `GET /api/cases` | 200。配列。1行は `case_id`、`summary`、`user_id`、`inquiry`（`subject`・`body`）、`result_code`（未判定は `null`）、`counts`（`yes`・`no`・`pending`・`unanswered`）。案件がなければ空の配列。並びは案件ID順（受付日時の列がないため仮。スキーマは変更しない） |
+| ルール | `GET /api/rules` | 200。配列。`rule_id` ごとに最新の `revision` の行だけで、並びは `rule_id` 順。1行は `rule_id`、`revision`、`result_code`、`conditions`（キーは設問コード、値は `yes`・`no`）。ルールがなければ空の配列。保存先がDBでなければ503。HTTPモックは呼ばない。 |
 | 再表示 | `GET /api/cases/{case_id}` | 200。`case_id`、`summary`、`user`、`inquiry`、期間、設問ごとの `answer`（`yes`・`no`・`pending`。回答の行がない未回答は `null`）、`result`（未判定は `null`）。案件がなければ404 |
 | 判定 | `PUT /api/cases/{case_id}/judgment` | 204。本文は `result_code`（必須）、`answers`（変更する設問だけ）、`rule_id` と `rule_revision`（両方あるときだけ記録）。不正は422（理由は `detail`）、案件がなければ404 |
 

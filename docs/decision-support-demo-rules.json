@@ -1,0 +1,65 @@
+{
+  "_note": "開発用DB（docker compose up）に入れる架空の判定ルール。画面の受入例1〜3用の組み合わせで、業務上の不正認定ルールではない。スキーマ検証用の docs/decision-support-sample.json とは別。",
+  "decision_rules": [
+    {
+      "rule_id": "R01",
+      "revision": 1,
+      "result_code": "caution",
+      "conditions": {
+        "A01": "yes",
+        "A02": "yes",
+        "A03": "yes",
+        "A04": "yes",
+        "A05": "yes",
+        "A06": "no",
+        "A07": "yes",
+        "A08": "yes",
+        "A09": "yes",
+        "A10": "no",
+        "A11": "yes",
+        "A12": "yes"
+      },
+      "created_at": "2026-10-01T09:00:00+09:00"
+    },
+    {
+      "rule_id": "R02",
+      "revision": 1,
+      "result_code": "no_issue",
+      "conditions": {
+        "A01": "yes",
+        "A02": "no",
+        "A03": "yes",
+        "A04": "yes",
+        "A05": "yes",
+        "A06": "yes",
+        "A07": "yes",
+        "A08": "yes",
+        "A09": "yes",
+        "A10": "yes",
+        "A11": "yes",
+        "A12": "no"
+      },
+      "created_at": "2026-10-01T09:00:00+09:00"
+    },
+    {
+      "rule_id": "R03",
+      "revision": 1,
+      "result_code": "account_suspension",
+      "conditions": {
+        "A01": "no",
+        "A02": "yes",
+        "A03": "yes",
+        "A04": "yes",
+        "A05": "yes",
+        "A06": "no",
+        "A07": "yes",
+        "A08": "yes",
+        "A09": "yes",
+        "A10": "no",
+        "A11": "yes",
+        "A12": "yes"
+      },
+      "created_at": "2026-10-01T09:00:00+09:00"
+    }
+  ]
+}

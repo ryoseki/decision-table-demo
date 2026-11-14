@@ -7,7 +7,8 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError } from "./api";
 import CaseDetail, { Review } from "./CaseDetail";
 import { cases } from "./data/cases";
-import { apiCase, stubFetch } from "./testing";
+import { DEMO_RULES } from "./data/demoRules";
+import { apiCase, apiRules, stubFetch } from "./testing";
 
 afterEach(() => {
   cleanup();
@@ -30,7 +31,7 @@ let save: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   save = vi.fn().mockResolvedValue(undefined);
 });
-const renderReview = (id: string) => render(<Review c={fixture(id)} save={save} />);
+const renderReview = (id: string) => render(<Review c={fixture(id)} rules={DEMO_RULES} save={save} />);
 
 test("開いた直後は、結果と変更した回答が［判定する］で保存される旨と、離れると保存されない旨を表示する", () => {
   renderReview("CASE-B");
@@ -249,12 +250,11 @@ test("詳細で、定義にない結果コードが返ったら、エラーを�
   expect(screen.queryByTestId("save-note")).toBeNull();
 });
 
-test("取得の呼び出しは、案件IDのURLに1回だけ行う", async () => {
+test("取得の呼び出しは、案件のURLとルールのURLに、1回ずつ行う", async () => {
   const spy = stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() } });
   render(<CaseDetail caseId="CASE-X" />);
   await screen.findByTestId("save-note");
-  expect(spy).toHaveBeenCalledTimes(1);
-  expect(String(spy.mock.calls[0][0])).toBe("/api/cases/CASE-X");
+  expect(spy.mock.calls.map((call) => String(call[0])).sort()).toEqual(["/api/cases/CASE-X", "/api/rules"]);
 });
 
 test("保存の通信エラー（PUT）は、接続できなかった旨を表示し、保存済みの表示を変えない", async () => {
@@ -310,6 +310,7 @@ test("案件を切り替えたあとに、古い案件の応答が遅れて届�
   const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
   const { rerender } = render(<CaseDetail caseId="CASE-A" />);
   rerender(<CaseDetail caseId="CASE-B" />);
+  await act(async () => pending["/api/rules"](json(apiRules())));
   await act(async () => pending["/api/cases/CASE-B"](json(apiCase({ case_id: "CASE-B", summary: "案件Bの概要" }))));
   expect(await screen.findByRole("heading", { name: /案件Bの概要/ })).toBeTruthy();
   await act(async () => pending["/api/cases/CASE-A"](json(apiCase({ case_id: "CASE-A", summary: "案件Aの概要" }))));
@@ -372,7 +373,8 @@ test("［判定する］を押さないかぎり、何も送らない（途中�
   answer("A01", "Yes");
   answer("A02", "No");
   choose("注意");
-  expect(spy).toHaveBeenCalledTimes(1); // 取得（GET）だけ
+  expect(spy.mock.calls.every((call) => (call[1]?.method ?? "GET") === "GET")).toBe(true); // 取得（GET）だけ
+  expect(spy).toHaveBeenCalledTimes(2); // 案件とルール
 });
 
 test("保存しなかった変更は、開き直すと残らない（取得した値を表示する）", async () => {
@@ -469,4 +471,72 @@ test("保存している間に別の設問を変えても、その変更は、�
   await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
   expect(save).toHaveBeenNthCalledWith(1, "注意", { A09: "no" }); // 送った時点の変更だけ
   expect(save).toHaveBeenNthCalledWith(2, "注意", { A03: "yes" }); // A09 は、保存済み
+});
+
+// ---- ルールはAPIから取得する（受入例1〜3を、API経由の画面で） ------------------------------
+
+test("取得したルールで、照合の通常・グレーが決まる（例1→例2。A01を訂正）", async () => {
+  stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() } });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  answer("A01", "Yes");
+  answer("A03", "Yes");
+  expect(rules(display)).toEqual(["normal", "normal", "gray"]); // 例1
+  answer("A01", "No");
+  expect(rules(display)).toEqual(["gray", "gray", "normal"]); // 例2
+  expect(screen.getByTestId("rule-count").textContent).toBe("照合 1／3件");
+});
+
+test("ルールが、APIが返したものだけになる（固定のルールを使わない）", async () => {
+  const { conditions } = apiRules()[0];
+  stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "GET /api/rules": { body: [{ rule_id: "R77", revision: 3, result_code: "account_deletion", conditions }] },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  expect(screen.getByTestId("rule-R77")).toBeTruthy();
+  expect(screen.queryByTestId("rule-R01")).toBeNull();
+  expect(screen.getByTestId("rule-count").textContent).toBe("照合 1／1件");
+});
+
+test("ルールが0件でも、4つの結果をすべて選べて、保存できる", async () => {
+  const spy = stubFetch({
+    "GET /api/cases/CASE-X": { body: apiCase() },
+    "GET /api/rules": { body: [] },
+    "PUT /api/cases/CASE-X/judgment": { status: 204 },
+  });
+  render(<CaseDetail caseId="CASE-X" />);
+  await screen.findByTestId("save-note");
+  for (const name of ["アカウント削除", "アカウント一時凍結", "注意", "問題なし"]) {
+    expect(screen.getByRole("radio", { name })).toBeTruthy();
+  }
+  choose("問題なし");
+  submit();
+  await screen.findByText("登録済みの結果: 問題なし");
+  const put = spy.mock.calls.find((call) => call[1]?.method === "PUT")!;
+  expect(JSON.parse(String(put[1]?.body))).toEqual({ result_code: "no_issue" });
+});
+
+test("ルールを取得できなければ、エラーを表示し、判定の操作を出さない", async () => {
+  stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() }, "GET /api/rules": { status: 500 } });
+  render(<CaseDetail caseId="CASE-X" />);
+  const alert = await screen.findByTestId("rules-error");
+  expect(alert.textContent).toContain("HTTP 500");
+  expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
+});
+
+test("ルールの取得中は、読み込み中を表示する（案件だけ取得できていても）", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string) =>
+      url === "/api/rules"
+        ? new Promise<Response>(() => {})
+        : Promise.resolve(new Response(JSON.stringify(apiCase()), { status: 200 })),
+    ),
+  );
+  render(<CaseDetail caseId="CASE-X" />);
+  await new Promise((r) => setTimeout(r, 20));
+  expect(screen.getByTestId("case-loading")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "判定する" })).toBeNull();
 });

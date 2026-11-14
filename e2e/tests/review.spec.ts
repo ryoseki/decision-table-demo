@@ -51,6 +51,52 @@ test("例7: 受付 → 画面で開く → 結果を選んで判定 → 開き�
   // test_s1_... と test_list_cases_...）が、モックの呼び出し回数を数えて確認している。
 });
 
+const click = (page: import("@playwright/test").Page, q: string, v: "Yes" | "No") => pressed(page, q, v).click();
+const display = (page: import("@playwright/test").Page, rule: string) =>
+  page.getByTestId(`rule-${rule}`).getAttribute("data-display");
+
+test("例1〜3: DBのルールを取得して照合する。訂正で表示が変わり、全行グレーでも結果を選んで保存でき、開き直すと保存済み", async ({ page, request }) => {
+  // 画面が使うルールは、DBのルール（開発用の架空R01〜R03）をAPIから取得したもの。
+  const rules = await (await request.get(`${backendUrl}/api/rules`)).json();
+  expect(rules.map((r: { rule_id: string }) => r.rule_id)).toEqual(["R01", "R02", "R03"]);
+
+  const { case_id } = await intake(request, "456");
+  await page.goto(`/#/cases/${case_id}`);
+  await expect(page.getByTestId("save-note")).toBeVisible();
+
+  // 例1: A01=Yes、A03=Yes → R01・R02が通常、R03がグレー
+  await click(page, "A01", "Yes");
+  await click(page, "A03", "Yes");
+  expect(await display(page, "R01")).toBe("normal");
+  expect(await display(page, "R02")).toBe("normal");
+  expect(await display(page, "R03")).toBe("gray");
+
+  // 例2: A01をNoに訂正 → R01・R02がグレー、R03が通常
+  await click(page, "A01", "No");
+  expect(await display(page, "R01")).toBe("gray");
+  expect(await display(page, "R02")).toBe("gray");
+  expect(await display(page, "R03")).toBe("normal");
+
+  // 例3: A01=Yes、A03=No → 全行グレー。それでも結果「問題なし」を選んで保存できる
+  await click(page, "A01", "Yes");
+  await click(page, "A03", "No");
+  for (const rule of ["R01", "R02", "R03"]) expect(await display(page, rule)).toBe("gray");
+  await page.getByRole("radio", { name: "問題なし" }).check();
+  await page.getByRole("button", { name: "判定する" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 問題なし");
+
+  await page.reload(); // 開き直す
+  await expect(page.getByText("登録済みの結果: 問題なし")).toBeVisible();
+  await expect(pressed(page, "A01", "Yes")).toHaveAttribute("aria-pressed", "true");
+  await expect(pressed(page, "A03", "No")).toHaveAttribute("aria-pressed", "true");
+  for (const rule of ["R01", "R02", "R03"]) expect(await display(page, rule)).toBe("gray");
+
+  const saved = await (await request.get(`${backendUrl}/api/cases/${case_id}`)).json();
+  expect(saved.result.result_code).toBe("no_issue");
+  const byCode = Object.fromEntries(saved.questions.map((q: { question_code: string; answer: string | null }) => [q.question_code, q.answer]));
+  expect(byCode).toMatchObject({ A01: "yes", A03: "no", A09: "yes" });
+});
+
 test("例4〜6: 取得に失敗した案件は確認待ち。結果だけ保存しても確認待ちのまま。手入力で解消して保存すると上書きされ、保存しない変更は残らない", async ({ page, request }) => {
   const { case_id, answers } = await intake(request, "458", ["A09"]); // A09 の取得を失敗させる
   expect(answers).toEqual({ A09: "pending" });

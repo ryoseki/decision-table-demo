@@ -4,14 +4,14 @@ import { ApiError, describeError, saveJudgment, type HumanAnswers } from "./api"
 import { StatusBadge } from "./Badges";
 import { statusOf, tally, type Answer, type ResultName, type ReviewCase } from "./data/cases";
 import { questions, type QuestionId } from "./data/questions";
-import { RESULTS, canSkipQuestion, matchRules, type AnswerMap } from "./matching";
-import { useCase } from "./useApi";
+import { RESULTS, canSkipQuestion, matchRules, type AnswerMap, type Rule } from "./matching";
+import { useCase, useRules } from "./useApi";
 
 // 案件はAPIから取得し、［判定する］で、結果と、変更した回答だけを保存する（途中の自動保存はない）。
 // 保存するまで、回答の変更は、この画面のメモリ上だけに持つ。開き直すと、最後に保存した値に戻る。
 
-function openState(answers: AnswerMap): Record<string, boolean> {
-  return Object.fromEntries(matchRules(answers).map((r) => [r.rule.id, !r.gray]));
+function openState(answers: AnswerMap, rules: readonly Rule[]): Record<string, boolean> {
+  return Object.fromEntries(matchRules(answers, rules).map((r) => [r.rule.id, !r.gray]));
 }
 
 const backLink = (
@@ -20,8 +20,9 @@ const backLink = (
 
 export default function CaseDetail({ caseId }: { caseId: string }) {
   const remote = useCase(caseId);
+  const rulesRemote = useRules();
 
-  if (remote.status === "loading") {
+  if (remote.status === "loading" || (remote.status === "ok" && rulesRemote.status === "loading")) {
     return (
       <section aria-busy="true">
         {backLink}
@@ -53,14 +54,29 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
       </section>
     );
   }
-  return <Review c={remote.data} save={(result, answers) => saveJudgment(caseId, result, answers)} />;
+  if (rulesRemote.status === "error") {
+    return (
+      <section aria-labelledby="err-title">
+        {backLink}
+        <div className="error" role="alert" data-testid="rules-error">
+          <h2 id="err-title" tabIndex={-1}>照合に使うルールを取得できませんでした</h2>
+          <p>{describeError(rulesRemote.error)}</p>
+          <a className="btn" href="#/">一覧へ戻る</a>
+        </div>
+      </section>
+    );
+  }
+  if (rulesRemote.status !== "ok") return null; // 読み込み中は上で返している（型の絞り込み用）
+  return <Review c={remote.data} rules={rulesRemote.data} save={(result, answers) => saveJudgment(caseId, result, answers)} />;
 }
 
 export function Review({
   c,
+  rules,
   save,
 }: {
   c: ReviewCase;
+  rules: readonly Rule[];
   save: (result: ResultName, answers: HumanAnswers) => Promise<void>;
 }) {
   const [answers, setAnswers] = useState<AnswerMap>(c.answers);
@@ -68,7 +84,7 @@ export function Review({
   const [baseline, setBaseline] = useState<AnswerMap>(c.answers);
   const [edited, setEdited] = useState<ReadonlySet<QuestionId>>(new Set());
   // 行の開閉。初期は食い違わない行を開く。回答が変わったときだけ同じ規則で更新し、手動の開閉はそれまで保つ。
-  const [open, setOpen] = useState<Record<string, boolean>>(() => openState(c.answers));
+  const [open, setOpen] = useState<Record<string, boolean>>(() => openState(c.answers, rules));
   const [outcome, setOutcome] = useState<ResultName | "">(c.result ?? "");
   // 保存済みの結果（開いたときの値。保存に成功したら更新する）と、今回の保存の状態。
   const [saved, setSaved] = useState<ResultName | "">(c.result ?? "");
@@ -76,7 +92,7 @@ export function Review({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
 
-  const rows = matchRules(answers);
+  const rows = matchRules(answers, rules);
   const matchingCount = rows.filter((r) => !r.gray).length;
   const answeredCount = questions.filter((q) => answers[q.id] === "yes" || answers[q.id] === "no").length;
   const current = { ...c, answers };
@@ -88,7 +104,7 @@ export function Review({
     const next = { ...answers, [id]: value };
     setAnswers(next);
     setEdited(new Set(edited).add(id));
-    if (changed) setOpen(openState(next));
+    if (changed) setOpen(openState(next, rules));
   };
 
   const submit = async (e: FormEvent) => {
@@ -150,7 +166,7 @@ export function Review({
           <ol className="question-list">
             {questions.map((q) => {
               const a: Answer | undefined = answers[q.id];
-              const optional = a === undefined && canSkipQuestion(q.id, answers);
+              const optional = a === undefined && canSkipQuestion(q.id, answers, rules);
               const auto = c.autoQuestions?.includes(q.id) === true && !edited.has(q.id);
               return (
                 <li key={q.id} className={`question${optional ? " gray" : ""}${a === "pending" ? " is-pending" : ""}`} data-testid={`q-${q.id}`}>

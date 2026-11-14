@@ -3,6 +3,7 @@
 import { RESULT_CODE_BY_NAME, resultNameOf } from "./resultCodes";
 import type { Answer, ResultName, ReviewCase, Tally } from "./data/cases";
 import type { QuestionId } from "./data/questions";
+import { QUESTION_IDS, type Rule } from "./matching";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -80,6 +81,32 @@ export async function getCase(caseId: string): Promise<ReviewCase> {
     answers,
     ...(c.result === null ? {} : { result: resultNameOf(c.result.result_code) }),
   };
+}
+
+type ApiRule = {
+  rule_id: string;
+  revision: number;
+  result_code: string;
+  conditions: Record<string, string>;
+};
+
+/** APIのルールを、照合用の形にする。この画面の照合は、A01〜A12すべての条件を持つルールだけを扱う。 */
+function toRule(r: ApiRule): Rule {
+  const expected = {} as Record<QuestionId, "yes" | "no">;
+  for (const q of QUESTION_IDS) {
+    const value = r.conditions[q];
+    if (value !== "yes" && value !== "no") {
+      throw new Error(`ルール${r.rule_id}の条件に、${q}のYes／Noがありません（この画面は12問すべての条件を持つルールだけを扱います）`);
+    }
+    expected[q] = value;
+  }
+  return { id: r.rule_id, result: resultNameOf(r.result_code), expected };
+}
+
+/** 照合に使うルール。APIが返す順（rule_id順）のまま。 */
+export async function listRules(): Promise<Rule[]> {
+  const rows = (await (await request("/api/rules")).json()) as ApiRule[];
+  return rows.map(toRule);
 }
 
 /** 人が選んだ回答（Yes・No）。確認待ち・未回答に戻す操作はない。 */

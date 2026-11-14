@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | ドメイン | `domain`、`rule_matching` | 定数・例外・ID生成・照合。純粋で、DBにもHTTPにも依存しない | 標準ライブラリだけ（検査しているのは、`fastapi`・`starlette`・`pydantic`・`psycopg` と、アプリ内の他モジュールを取り込まないこと） |
 | 保存先の実装 | `db_store`（PostgreSQL） | SQLとトランザクション | `domain`、`psycopg` |
-| HTTP層 | `cases`、`intake`、`mock_api` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
+| HTTP層 | `cases`、`intake`、`mock_api`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
 | 組み立て | `main` | 保存先を選び、ルーターをつなぐ | すべて |
 
 - HTTP層は、保存先の実装（`db_store`）と `psycopg` を取り込まない。保存先は、`main` で組み立て、`app.state.case_store` から受け取る。

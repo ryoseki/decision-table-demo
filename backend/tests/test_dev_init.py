@@ -91,7 +91,12 @@ class DevInit(unittest.TestCase):
             [q[0] for q in questions],
             sorted(q["question_code"] for q in sample["review_questions"]),
         )
-        self.assertEqual(len(rules), len(sample["decision_rules"]))  # 判定ルールの件数
+        # 判定ルールは、画面の受入例用の開発用ルール（R01〜R03）で、スキーマ検証用のサンプルではない。
+        self.assertEqual([r[0] for r in rules], ["R01", "R02", "R03"])
+        self.assertEqual(
+            [r[2] for r in rules], ["caution", "no_issue", "account_suspension"]
+        )
+        self.assertTrue(all(len(r[3]) == 12 for r in rules))  # 条件はA01〜A12の12問
         first = (tables, questions, rules)
 
         code, out = self.run_init()  # 2回目
