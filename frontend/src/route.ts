@@ -1,7 +1,11 @@
-// 依存を増やさないため、ハッシュで画面を切り替える。 #/ は一覧、 #/cases/<案件ID> は詳細。
-export type Route = { name: "list" } | { name: "detail"; caseId: string };
+// 依存を増やさないため、ハッシュで画面を切り替える。
+// #/ は一覧、 #/cases/<案件ID> は詳細、 #/admin/questions は設問管理（デモ）。
+export type Route = { name: "list" } | { name: "detail"; caseId: string } | { name: "questions" };
+
+export const QUESTIONS_HREF = "#/admin/questions";
 
 export function parseHash(hash: string): Route {
+  if (/^#\/admin\/questions\/?$/.test(hash)) return { name: "questions" };
   const m = /^#\/cases\/([^/]+)\/?$/.exec(hash);
   if (m !== null) {
     try {

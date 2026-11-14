@@ -6,7 +6,16 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app import cases, db_store, intake, mock_api, rules
+from app import (
+    cases,
+    db_store,
+    intake,
+    mock_api,
+    question_admin,
+    question_proposer,
+    question_store,
+    rules,
+)
 
 app = FastAPI(title="不正審査デモ API")
 # DB_HOST があればPostgreSQLに保存し、なければ開発用の仮のメモリ保存（受付のみ）にする。
@@ -15,6 +24,12 @@ app.state.case_store = (
     if os.environ.get("DB_HOST")
     else intake.InMemoryCaseStore()
 )
+# 管理者AIの試作（設問の追加案）。DBは使わない。
+# 生成はモック、保存はメモリ上（再起動で初期化）。
+# 実装はここで選んで渡す。HTTP層は共通の形（Protocol）だけを呼ぶ。
+app.state.question_proposer = question_proposer.MockQuestionProposer()
+app.state.question_store = question_store.InMemoryQuestionStore()
+app.include_router(question_admin.router)
 app.include_router(mock_api.router)
 app.include_router(intake.router)
 app.include_router(cases.router)

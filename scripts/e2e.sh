@@ -18,7 +18,9 @@ mkdir -p e2e/test-results e2e/playwright-report
 # frontend・backend の起動と healthcheck 待機は compose が担当し、
 # e2e の終了コードをそのまま返す。終了後はE2E専用プロジェクトだけを停止・削除する。
 # 通常の開発環境を止めないよう、E2E専用のプロジェクト名とポート無公開の設定で分離する。
-compose=(docker compose -p decision-table-demo-e2e -f compose.yaml -f compose.e2e.yaml)
+# 別の作業コピーが同じプロジェクト名で動いていても衝突しないよう、E2E_PROJECT で名前を変えられる（既定は従来どおり）。
+project="${E2E_PROJECT:-decision-table-demo-e2e}"
+compose=(docker compose -p "$project" -f compose.yaml -f compose.e2e.yaml)
 "${compose[@]}" up --build --abort-on-container-exit --exit-code-from e2e e2e
 up_code=$?
 
@@ -42,7 +44,7 @@ if [ "$up_code" -ne 0 ]; then
   echo "E2Eスモークテスト: 失敗（テストまたは起動の終了コード $up_code）。e2e/playwright-report と e2e/test-results を確認してください。" >&2
 fi
 if [ "$down_code" -ne 0 ]; then
-  echo "E2Eスモークテスト: 後片付け（docker compose down）に失敗（終了コード $down_code）。プロジェクト decision-table-demo-e2e のコンテナやネットワークが残っている可能性があります。" >&2
+  echo "E2Eスモークテスト: 後片付け（docker compose down）に失敗（終了コード $down_code）。プロジェクト $project のコンテナやネットワークが残っている可能性があります。" >&2
 fi
 if [ "$exit_code" -eq 0 ]; then
   echo "E2Eスモークテスト: 成功"

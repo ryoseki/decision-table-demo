@@ -6,13 +6,14 @@
 
 | 層 | モジュール | 役割 | 取り込んでよいもの |
 | --- | --- | --- | --- |
-| ドメイン | `domain`、`rule_matching` | 定数・例外・ID生成・照合。純粋で、DBにもHTTPにも依存しない | 標準ライブラリだけ（検査しているのは、`fastapi`・`starlette`・`pydantic`・`psycopg` と、アプリ内の他モジュールを取り込まないこと） |
+| ドメイン | `domain`、`rule_matching`、`question_validation` | 定数・例外・ID生成・照合・設問案の検証。純粋で、DBにもHTTPにも依存しない | 標準ライブラリだけ（検査しているのは、`fastapi`・`starlette`・`pydantic`・`psycopg` と、アプリ内の他モジュールを取り込まないこと） |
 | 保存先の実装 | `db_store`（PostgreSQL） | SQLとトランザクション | `domain`、`psycopg` |
-| HTTP層 | `cases`、`intake`、`mock_api`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
-| 組み立て | `main` | 保存先を選び、ルーターをつなぐ | すべて |
+| 設問案の保存先・AIモック | `question_store`（メモリ）、`question_proposer`（モック） | デモの設問一覧と提案の保存・承認、AIの応答のモック。DBなし | `domain`、`question_validation`（型）、標準ライブラリ |
+| HTTP層 | `cases`、`intake`、`mock_api`、`question_admin`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
+| 組み立て | `main` | 保存先・AIモックを選び、ルーターをつなぐ | すべて |
 
-- HTTP層は、保存先の実装（`db_store`）と `psycopg` を取り込まない。保存先は、`main` で組み立て、`app.state.case_store` から受け取る。
-- 保存先の実装は、HTTP層と `fastapi` を取り込まない。
+- HTTP層は、保存先の実装（`db_store`）、設問案の保存先・AIモック（`question_store`・`question_proposer`）と `psycopg` を取り込まない。保存先は、`main` で組み立て、`app.state`（`case_store`・`question_store`・`question_proposer`）から受け取る。
+- 保存先の実装は、HTTP層と `fastapi` を取り込まない。設問案の保存先・AIモックも、HTTP層・`fastapi`・`db_store`・`psycopg` を取り込まない（設問の追加案はDBなしで動く。`docs/admin-question-proposal-demo.md`）。
 - ドメインは、`fastapi`・`starlette`・`pydantic`・`psycopg`・他のアプリ内モジュールを取り込まない。
 - 検査: `docker compose run --rm --no-deps --build backend lint-imports`（`import-linter`。契約は `backend/pyproject.toml`）。契約の名前（違反時に表示される）に、直し方を書いている。
 
