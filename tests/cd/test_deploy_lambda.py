@@ -315,7 +315,7 @@ class FakeAws:
         self.acl = make_web_acl()
         self.policy_doc = make_policy_document()
         # get-function-concurrency の応答（未設定なら実APIはキーを返さない想定）
-        self.concurrency = {"ReservedConcurrentExecutions": 1}
+        self.concurrency = {"ReservedConcurrentExecutions": 3}
 
     # テストから設定を書き換えやすくする入口
     @property
@@ -2107,7 +2107,7 @@ class OidcTrustPolicyTemplate(unittest.TestCase):
 
 
 class ReservedConcurrency(DeployTestCase):
-    """予約済み同時実行数は、変更の前に読み取りでちょうど1を確認する。自動では設定しない。"""
+    """予約済み同時実行数は、変更の前に読み取りでちょうど3を確認する。自動では設定しない。"""
 
     def concurrency_calls(self):
         return [c for c in self.aws.calls if c[1].endswith("function-concurrency")]
@@ -2131,12 +2131,13 @@ class ReservedConcurrency(DeployTestCase):
             ("missing", {}, "missing", "設定されていません"),
             ("null", {"ReservedConcurrentExecutions": None}, "missing", "設定されていません"),
             ("zero", {"ReservedConcurrentExecutions": 0}, "zero", "0です"),
-            ("two", {"ReservedConcurrentExecutions": 2}, "not-one", "1ではありません"),
-            ("large", {"ReservedConcurrentExecutions": 1000}, "not-one", "1ではありません"),
-            ("negative", {"ReservedConcurrentExecutions": -1}, "not-one", "1ではありません"),
-            ("bool-true", {"ReservedConcurrentExecutions": True}, "not-one", "1ではありません"),
-            ("string", {"ReservedConcurrentExecutions": "1"}, "not-one", "1ではありません"),
-            ("float", {"ReservedConcurrentExecutions": 1.0}, "not-one", "1ではありません"),
+            ("one", {"ReservedConcurrentExecutions": 1}, "mismatch", "3ではありません"),
+            ("two", {"ReservedConcurrentExecutions": 2}, "mismatch", "3ではありません"),
+            ("large", {"ReservedConcurrentExecutions": 1000}, "mismatch", "3ではありません"),
+            ("negative", {"ReservedConcurrentExecutions": -1}, "mismatch", "3ではありません"),
+            ("bool-true", {"ReservedConcurrentExecutions": True}, "mismatch", "3ではありません"),
+            ("string", {"ReservedConcurrentExecutions": "3"}, "mismatch", "3ではありません"),
+            ("float", {"ReservedConcurrentExecutions": 3.0}, "mismatch", "3ではありません"),
         ]
         for name, response, state, message in cases:
             with self.subTest(name):
@@ -2180,12 +2181,12 @@ class ReservedConcurrency(DeployTestCase):
         self.assertEqual(self.concurrency_calls(), [])
 
     def test_problem_classifier(self):
-        self.assertIsNone(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 1}))
+        self.assertIsNone(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 3}))
         self.assertEqual(dl.reserved_concurrency_problem({}), "missing")
         self.assertEqual(dl.reserved_concurrency_problem(None), "missing")
         self.assertEqual(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 0}), "zero")
-        self.assertEqual(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 2}), "not-one")
-        self.assertEqual(dl.REQUIRED_RESERVED_CONCURRENCY, 1)
+        self.assertEqual(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 2}), "mismatch")
+        self.assertEqual(dl.REQUIRED_RESERVED_CONCURRENCY, 3)
 
 
 class ActualFourRuleWebAcl(DeployTestCase):
