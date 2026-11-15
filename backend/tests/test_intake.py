@@ -21,6 +21,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from app import cases, intake, mock_api, rules
+from app.domain import StoreBusy
 
 
 class _Server:
@@ -76,18 +77,19 @@ def post(url: str, payload, headers=None) -> tuple[int, dict]:
 
 
 class FailingStore(intake.InMemoryCaseStore):
-    def __init__(self, fail_on: str) -> None:
+    def __init__(self, fail_on: str, error: Exception | None = None) -> None:
         super().__init__()
         self.fail_on = fail_on
+        self.error = error
 
     def create_case(self, case):
         if self.fail_on == "create":
-            raise RuntimeError("1回目の保存の失敗（検証用）")
+            raise self.error or RuntimeError("1回目の保存の失敗（検証用）")
         return super().create_case(case)
 
     def set_auto_answer(self, case_id, question_code, answer):
         if self.fail_on == "set":
-            raise RuntimeError("2回目の保存の失敗（検証用）")
+            raise self.error or RuntimeError("2回目の保存の失敗（検証用）")
         super().set_auto_answer(case_id, question_code, answer)
 
 
@@ -245,6 +247,15 @@ class Intake(unittest.TestCase):
 
     def test_s12_second_save_failure_leaves_pending_without_refetch(self):
         server, _, calls = self.run_intake(FailingStore("set"))
+        status, body = post(f"{server.base_url}/api/intake/cases", case_payload("456"))
+        self.assertEqual(
+            (status, body["answers"], len(calls)), (201, {"A09": "pending"}, 1)
+        )
+
+    def test_second_save_busy_leaves_pending_without_refetch(self):
+        """2回目の保存が衝突で使い切り（StoreBusy）でも、受付は成功し、確認待ちのまま。"""
+        store = FailingStore("set", StoreBusy("検証用"))
+        server, _, calls = self.run_intake(store)
         status, body = post(f"{server.base_url}/api/intake/cases", case_payload("456"))
         self.assertEqual(
             (status, body["answers"], len(calls)), (201, {"A09": "pending"}, 1)

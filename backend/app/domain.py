@@ -29,6 +29,14 @@ class InvalidJudgment(Exception):
     """入力が保存の条件を満たさない（案件は変更しない）。"""
 
 
+class StoreBusy(Exception):
+    """保存先が衝突（OCC。SQLSTATE 40001）で、決めた回数の再試行でも保存できなかった。
+
+    保存は行われていない（1回の操作は1トランザクション）。HTTP層は503にして、
+    利用者には「混み合っている。入力は残っている。もう一度」と伝える。
+    """
+
+
 # --- 管理者AIの試作（設問の追加案）。docs/admin-question-proposal-demo.md ---
 
 

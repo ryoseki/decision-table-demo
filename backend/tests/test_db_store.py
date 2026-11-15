@@ -10,13 +10,15 @@ import json
 import os
 import re
 import secrets
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import psycopg
+import psycopg.errors
 
-from app import db_store
+from app import db_retry, db_store
 from tests.test_intake import _Server, case_payload, make_app, send
 
 DOCS = Path(os.environ.get("DB_DOCS_DIR", "/repo/docs"))
@@ -25,7 +27,7 @@ HAVE_DB = os.environ.get("RUN_DB_TESTS") == "1"
 
 
 def _connect(schema: str | None = None, autocommit: bool = False):
-    return psycopg.connect(
+    conn = psycopg.connect(
         host=os.environ["DB_HOST"],
         port=os.environ.get("DB_PORT", "5432"),
         dbname=os.environ["DB_NAME"],
@@ -34,6 +36,10 @@ def _connect(schema: str | None = None, autocommit: bool = False):
         autocommit=autocommit,
         options=f"-c search_path={schema}" if schema else None,
     )
+    if not autocommit:
+        # アプリの接続と同じ分離レベル（Aurora DSQLはREPEATABLE READだけ）
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+    return conn
 
 
 class _FailingConnection:
@@ -53,6 +59,36 @@ class _FailingConnection:
         if sql.lstrip().startswith(self._fail_prefix):
             raise RuntimeError("検証用の失敗")
         return self._conn.execute(sql, *args)
+
+
+class _ConflictOnceConnection(_FailingConnection):
+    """最初の1回だけ、指定のSQLでOCCの衝突（40001）を起こす接続のラッパー。"""
+
+    def __init__(self, conn, fail_prefix: str, counter: list[int]):
+        super().__init__(conn, fail_prefix)
+        self._counter = counter
+        counter[0] += 1
+
+    def execute(self, sql, *args):
+        if self._counter[0] == 1 and sql.lstrip().startswith(self._fail_prefix):
+            raise psycopg.errors.SerializationFailure("OC000（検証用）")
+        return self._conn.execute(sql, *args)
+
+
+class _PauseAfterLockConnection(_FailingConnection):
+    """行ロック（FOR UPDATE）を取ったあと、合図があるまで止まる接続のラッパー。"""
+
+    def __init__(self, conn, locked: threading.Event, release: threading.Event):
+        super().__init__(conn, "")
+        self._locked, self._release = locked, release
+
+    def execute(self, sql, *args):
+        result = self._conn.execute(sql, *args)
+        if sql.rstrip().endswith("FOR UPDATE"):
+            self._locked.set()
+            if not self._release.wait(10):
+                raise RuntimeError("検証用の待ちが解除されなかった")
+        return result
 
 
 @unittest.skipUnless(HAVE_DB, "RUN_DB_TESTS=1 でないためスキップ（要ローカルDB）")
@@ -507,6 +543,125 @@ class DbFlow(unittest.TestCase):
             ),
             [("pending", None)],
         )
+
+    # --- OCCの衝突と再試行（Aurora DSQLでも成り立つ挙動） ----------------------------
+
+    def _no_wait(self):
+        waits: list[float] = []
+        patch = mock.patch.object(db_retry, "sleep", waits.append)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return waits
+
+    def test_retry_after_conflict_does_not_double_save_judgment(self):
+        case_id, _ = self.intake("456")
+        waits = self._no_wait()
+        counter = [0]
+        flaky = db_store.PostgresCaseStore(
+            lambda: _ConflictOnceConnection(
+                _connect(self.schema), "UPDATE case_results", counter
+            )
+        )
+        flaky.save_judgment(case_id, "caution", {"A01": "yes"}, None)
+        self.assertEqual((counter[0], len(waits)), (2, 1), "1回衝突して再試行")
+        view = self.get(case_id)
+        self.assertEqual(view["result"]["result_code"], "caution")
+        self.assertEqual(self.answers_of(view)["A01"], "yes")
+        self.assertEqual(
+            self.rows(
+                "SELECT count(*) FROM case_checks WHERE case_id = %s"
+                " AND question_code = 'A01'",
+                (case_id,),
+            ),
+            [(1,)],
+        )
+
+    def test_retry_after_conflict_does_not_double_create_case(self):
+        waits = self._no_wait()
+        counter = [0]
+        flaky = db_store.PostgresCaseStore(
+            lambda: _ConflictOnceConnection(
+                _connect(self.schema), "INSERT INTO case_results", counter
+            )
+        )
+        self.start(flaky)
+        case_id, answers = self.intake("456")
+        # 接続: 1回目の保存（衝突→再試行で2回）＋2回目の保存（1回）
+        self.assertEqual((counter[0], len(waits)), (3, 1))
+        self.assertEqual(answers, {"A09": "yes"})
+        self.assertEqual(
+            self.rows("SELECT case_id FROM review_cases"), [(case_id,)], "案件は1件"
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT count(*) FROM case_questions WHERE case_id = %s", (case_id,)
+            ),
+            [(12,)],
+        )
+
+    def test_connect_from_env_uses_repeatable_read(self):
+        """アプリの接続関数が、DSQLと同じ分離レベル（REPEATABLE READ）で接続する。"""
+        env = {"DB_SCHEMA": self.schema}
+        with mock.patch.dict(os.environ, env):
+            with db_store.connect_from_env() as conn:
+                level = conn.execute("SHOW transaction_isolation").fetchone()
+        self.assertEqual(level, ("repeatable read",))
+
+    def test_concurrent_saves_both_succeed_and_last_committed_wins(self):
+        """同じ案件の同時保存。後から入った側は、衝突（40001）を再試行で乗り越える。
+
+        確かめるのは「衝突したら再試行し、後の保存が残る」で、DSQLでも成り立つ。
+        衝突の起こし方（行ロックの待ちと、コミット後の40001）はPostgreSQL固有で、
+        ローカルで衝突を再現するための手段にすぎない。実DSQLの挙動は確認していない。
+
+        Aは行ロックを取って止まる。BはAのロック待ちに入る。AがコミットするとBは
+        40001になり、再試行で保存できる。REPEATABLE READ（DSQLと同じ）で再現する。
+        """
+        case_id, _ = self.intake("456")
+        self._no_wait()
+        locked, release = threading.Event(), threading.Event()
+        store_a = db_store.PostgresCaseStore(
+            lambda: _PauseAfterLockConnection(_connect(self.schema), locked, release)
+        )
+        counter = [0]
+
+        def connect_b():
+            counter[0] += 1
+            return _connect(self.schema)
+
+        store_b = db_store.PostgresCaseStore(connect_b)
+        errors: list[BaseException] = []
+
+        def save(store, result_code, answer):
+            try:
+                store.save_judgment(case_id, result_code, {"A01": answer}, None)
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+
+        thread_a = threading.Thread(target=save, args=(store_a, "caution", "yes"))
+        thread_a.start()
+        self.assertTrue(locked.wait(10), "Aがロックを取った")
+        thread_b = threading.Thread(target=save, args=(store_b, "no_issue", "no"))
+        thread_b.start()
+        # BがAのロック待ちに入ったことを、ロックの待ち状況で確認する
+        for _ in range(100):
+            waiting = self.rows(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+                " AND datname = current_database() AND query LIKE '%%FOR UPDATE%%'"
+            )
+            if waiting[0][0] >= 1:
+                break
+            threading.Event().wait(0.05)
+        else:
+            self.fail("BがAのロックを待つ状態にならなかった")
+        release.set()
+        thread_a.join(20)
+        thread_b.join(20)
+        self.assertEqual(errors, [])
+        self.assertGreaterEqual(counter[0], 2, "Bは衝突して再試行した")
+        view = self.get(case_id)
+        self.assertEqual(view["result"]["result_code"], "no_issue", "後の保存が残る")
+        self.assertEqual(self.answers_of(view)["A01"], "no")
 
     def test_s3_rejected_intake_creates_no_case_and_no_http(self):
         status, _ = send(
