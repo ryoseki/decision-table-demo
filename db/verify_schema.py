@@ -114,23 +114,27 @@ def intake_case(conn, case_id, fetch, user_data='{"user_id": "456"}'):
         return
 
 
+class AlreadyRegistered(Exception):
+    """判定を登録済みの案件は、再保存できない。"""
+
+
 def save(conn, case_id, result_code, rule, checks, now="2026-10-20T13:05:00+09:00"):
     """［判定する］の保存処理案: 1トランザクションで結果を更新し、回答をanswerだけ更新する。
 
     回答を空に戻す操作は許さないため、回答の行は削除しない。automated_answerは触らない。
+    登録は1回だけ（2026-11-15の合意）。未登録（result_codeが空）の行だけを条件付きで更新し、
+    0行なら AlreadyRegistered で全体をロールバックする（回答も書かない）。
     """
     rule_id, rule_rev = rule if rule else (None, None)
     with conn.transaction():
-        conn.execute(
-            """INSERT INTO case_results (case_id, result_code, rule_id, rule_revision,
-                                         recorded_by, recorded_at)
-               VALUES (%s, %s, %s, %s, 'OP-1', %s)
-               ON CONFLICT (case_id) DO UPDATE SET
-                 result_code = EXCLUDED.result_code, rule_id = EXCLUDED.rule_id,
-                 rule_revision = EXCLUDED.rule_revision,
-                 recorded_by = EXCLUDED.recorded_by, recorded_at = EXCLUDED.recorded_at""",
-            (case_id, result_code, rule_id, rule_rev, now),
-        )
+        updated = conn.execute(
+            """UPDATE case_results SET result_code = %s, rule_id = %s, rule_revision = %s,
+                                       recorded_by = 'OP-1', recorded_at = %s
+               WHERE case_id = %s AND result_code IS NULL""",
+            (result_code, rule_id, rule_rev, now, case_id),
+        ).rowcount
+        if updated != 1:
+            raise AlreadyRegistered(case_id)
         for q, ans in checks.items():
             conn.execute(
                 """INSERT INTO case_checks (case_id, question_code, answer) VALUES (%s, %s, %s)
@@ -336,42 +340,48 @@ def run() -> int:
     still = conn.execute("SELECT revision, prompt FROM case_questions WHERE case_id='SAVE-1' AND question_code='A03'").fetchone()
     record("マスターを更新しても、受付済み案件の設問は変わらない", still == got)
 
-    # 保存・再表示・上書き・ロールバック
-    save(conn, "SAVE-1", "demo_manual_result", None, {"A03": "yes", "A09": "no"})
+    # 保存・再表示・登録済みの再保存拒否・ロールバック
+    save(conn, "SAVE-1", "demo_result", ("DEMO-RULE-1", 1), {"A03": "yes", "A09": "no"})
     res, checks = load_state(conn, "SAVE-1")
-    record("保存→再表示: 結果と回答が戻り、受付時の自動回答（automated_answer）は残る",
-           res == ("demo_manual_result", None, None)
+    record("保存→再表示: 結果・採用ルールと回答が戻り、受付時の自動回答（automated_answer）は残る",
+           res == ("demo_result", "DEMO-RULE-1", 1)
            and checks == [("A03", "yes", None), ("A09", "no", "yes")])
-    row = conn.execute("SELECT recorded_by, recorded_at FROM case_results WHERE case_id='SAVE-1'").fetchone()
+    stamp_sql = "SELECT recorded_by, recorded_at FROM case_results WHERE case_id='SAVE-1'"
+    row = conn.execute(stamp_sql).fetchone()
     record("保存: 登録者と登録日時が入り、判定済み（result_codeあり）になる", row[0] == "OP-1" and row[1] is not None)
 
-    save(conn, "SAVE-1", "demo_result", ("DEMO-RULE-1", 1), {"A09": "yes"})
-    res, checks = load_state(conn, "SAVE-1")
+    registered = (load_state(conn, "SAVE-1"), row)
+    try:
+        save(conn, "SAVE-1", "caution", None, {"A03": "no", "A09": "yes", "A01": "yes"}, now="2026-10-21T09:00:00+09:00")
+        rejected = False
+    except AlreadyRegistered:
+        rejected = True
+    after = (load_state(conn, "SAVE-1"), conn.execute(stamp_sql).fetchone())
     n_res = conn.execute("SELECT count(*) FROM case_results WHERE case_id='SAVE-1'").fetchone()[0]
-    record("再保存は上書き: 最新のみ保持（結果・採用ルールの置換、結果の行は1件）、回答の行は削除されない",
-           res == ("demo_result", "DEMO-RULE-1", 1) and n_res == 1
-           and checks == [("A03", "yes", None), ("A09", "yes", "yes")])
+    record("登録済みの再保存は拒否: 結果・採用ルール・登録日時・回答（追加の行を含む）が変わらず、結果の行は1件",
+           rejected and after == registered and n_res == 1)
 
-    save(conn, "SAVE-1", "caution", ("DEMO-RULE-1", 1), {})
-    res, checks = load_state(conn, "SAVE-1")
+    intake_case(conn, "SAVE-3", lambda: "yes", '{"user_id":"10"}')
+    save(conn, "SAVE-3", "caution", ("DEMO-RULE-1", 1), {})
+    res, checks = load_state(conn, "SAVE-3")
     record("採用ルールの結果と違う結果を選んで保存でき、回答0件の保存でも結果が入る",
-           res == ("caution", "DEMO-RULE-1", 1)
-           and checks == [("A03", "yes", None), ("A09", "yes", "yes")])
+           res == ("caution", "DEMO-RULE-1", 1) and checks == [("A09", "yes", "yes")])
 
-    save(conn, "SAVE-1", "no_rule_result", None, {})
-    record("採用ルールを空に戻して保存できる", load_state(conn, "SAVE-1")[0] == ("no_rule_result", None, None))
+    intake_case(conn, "SAVE-4", lambda: "yes", '{"user_id":"12"}')
+    save(conn, "SAVE-4", "no_rule_result", None, {})
+    record("採用ルールなしで保存できる", load_state(conn, "SAVE-4")[0] == ("no_rule_result", None, None))
 
     record("別接続から再表示: 確認待ち（pending）とautomated_answerなしの行が戻る",
            (lambda: (intake_case(conn, "SAVE-2", timeout_fetch), load_checks_other_connection("SAVE-2"))[1])()
            == [("A09", "pending", None)])
 
-    save(conn, "SAVE-1", "keep_me", None, {"A03": "yes", "A09": "no"})
-    before = load_state(conn, "SAVE-1")
+    before = load_state(conn, "SAVE-2")
     try:
-        save(conn, "SAVE-1", "must_not_persist", None, {"A03": "no", "ZZ9": "yes"})
-        record("ロールバック: 子の失敗で親子とも元に戻る", False, "エラーにならなかった")
+        save(conn, "SAVE-2", "must_not_persist", None, {"A03": "no", "ZZ9": "yes"})
+        record("ロールバック: 子の失敗で親子とも元に戻る（未登録のまま）", False, "エラーにならなかった")
     except errors.ForeignKeyViolation:
-        record("ロールバック: 子の失敗で親子とも元に戻る", load_state(conn, "SAVE-1") == before)
+        record("ロールバック: 子の失敗で親子とも元に戻る（未登録のまま）",
+               load_state(conn, "SAVE-2") == before and before[0] == (None, None, None))
 
     # 振り返り: 判定日時以前に作成された最新のルール版を引く
     def rules_as_of(ts):

@@ -383,3 +383,201 @@ test("一覧の取得に失敗したら、エラーを出す", async () => {
   expect((await screen.findByTestId("list-error")).textContent).toContain("取得できませんでした");
   expect(screen.queryByRole("region", { name: "現行のデモの設問一覧" })).toBeNull();
 });
+
+// ---- 設問の廃止案 --------------------------------------------------------------------------------------
+
+const RETIRE_PROMPT = "設問A13を廃止して";
+const withA13 = [...baseQuestions, added];
+const retiredAfter = [...baseQuestions, { ...added, retired: true }];
+const retireBody = (over: Record<string, unknown> = {}) => ({
+  kind: "retire",
+  proposal_id: "r1",
+  base_revision: 2,
+  before: withA13,
+  after: retiredAfter,
+  retired: added,
+  references: [],
+  can_retire: true,
+  impact: {
+    unjudged: [{ case_id: "CASE-U1", summary: "未登録の架空案件", answer: "yes" }],
+    judged: [{ case_id: "CASE-J1", summary: "登録済みの架空案件", answer: "no", result_code: "no_issue" }],
+  },
+  cascade: [],
+  mock: true,
+  ...over,
+});
+const retireRoutes = (body = retireBody()): Routes => ({
+  "GET /api/admin/questions": { body: listBody(withA13, 2) },
+  "POST /api/admin/question-proposals": { status: 201, body },
+});
+
+async function createRetirement() {
+  await screen.findByText(added.text);
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: RETIRE_PROMPT } });
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  return screen.findByTestId("proposal");
+}
+
+test("廃止案: Before／Afterの差分で対象行に「廃止」ラベルを付け、一覧から消さない。現行の一覧は変わらない", async () => {
+  stubFetch(retireRoutes());
+  render(<QuestionAdmin />);
+  const proposal = await createRetirement();
+  expect(within(proposal).getByRole("heading", { name: /廃止案の確認/ })).toBeTruthy();
+  const before = within(proposal).getByRole("region", { name: "Before（現行）" });
+  const after = within(proposal).getByRole("region", { name: "After（反映した場合）" });
+  expect(rowsOf(before)).toBe(13);
+  expect(rowsOf(after)).toBe(13); // 消さずに残す
+  const row = within(after).getByTestId("After（反映した場合）-A13");
+  expect(row.className).toContain("row-retired");
+  expect(within(row).getByText("廃止")).toBeTruthy();
+  expect(row.textContent).toContain(added.text); // 設問文は残る
+  expect(within(before).queryByText("廃止")).toBeNull();
+  expect(within(current()).queryByText("廃止")).toBeNull(); // 承認前は、現行の一覧が変わらない
+  expect(screen.getByText("反映しますか？")).toBeTruthy();
+});
+
+test("廃止案: 参照するルールがなければ、その旨を示す（拒否の警告は出さない）", async () => {
+  stubFetch(retireRoutes());
+  render(<QuestionAdmin />);
+  await createRetirement();
+  const refs = screen.getByRole("region", { name: "参照しているルール" });
+  expect(refs.textContent).toContain("参照するものはありません");
+  expect(screen.queryByTestId("retire-blocked")).toBeNull();
+});
+
+test("廃止案: 参照するルールを、ルールID・版・結果で示し、Yesでも廃止されないと警告する", async () => {
+  const body = retireBody({
+    references: [{ rule_id: "R01", revision: 2, result_code: "caution" }],
+    can_retire: false,
+  });
+  stubFetch(retireRoutes(body));
+  render(<QuestionAdmin />);
+  await createRetirement();
+  const row = screen.getByTestId("reference-R01");
+  expect(row.textContent).toContain("R01");
+  expect(row.textContent).toContain("2");
+  expect(row.textContent).toContain("注意");
+  const warning = screen.getByTestId("retire-blocked");
+  expect(warning.textContent).toContain("参照するルールが1件あります");
+  expect(warning.textContent).toContain("Yesを選んでも");
+  expect(warning.textContent).toContain("廃止されません");
+});
+
+test("廃止案: 参照があって廃止できない案でも、既存案件への影響を同時に示す（案件の一覧は隠さない）", async () => {
+  stubFetch(
+    retireRoutes(
+      retireBody({ references: [{ rule_id: "R01", revision: 1, result_code: "caution" }], can_retire: false }),
+    ),
+  );
+  render(<QuestionAdmin />);
+  await createRetirement();
+  expect(screen.getByTestId("retire-blocked").textContent).toContain("廃止されません");
+  const impact = screen.getByRole("region", { name: "既存案件への影響" });
+  expect(impact.textContent).toContain("判定未登録の案件（1件）");
+  expect(impact.textContent).toContain("判定登録済みの案件（1件）");
+  expect(screen.getByTestId("impact-CASE-U1").textContent).toContain("保存済みの回答: Yes");
+  expect(screen.getByTestId("impact-CASE-J1").textContent).toContain("登録時の結果: 問題なし");
+  expect(screen.getByTestId("no-cascade")).toBeTruthy();
+});
+
+test("廃止案: 既存案件への影響を、判定未登録と判定登録済みに分け、保存済みの回答と登録時の結果を示す。連鎖して変えない旨も示す", async () => {
+  stubFetch(retireRoutes());
+  render(<QuestionAdmin />);
+  await createRetirement();
+  const impact = screen.getByRole("region", { name: "既存案件への影響" });
+  expect(impact.textContent).toContain("判定未登録の案件（1件）");
+  expect(impact.textContent).toContain("判定登録済みの案件（1件）");
+  expect(impact.textContent).toContain("最新のルールで照合します");
+  expect(impact.textContent).toContain("保存済みの設問文と回答は、審査画面で確認できます");
+  expect(impact.textContent).toContain("登録時の結果と、保存済みの設問文・回答を表示します");
+  const unjudged = screen.getByTestId("impact-CASE-U1");
+  expect(unjudged.textContent).toContain("保存済みの回答: Yes");
+  expect(unjudged.textContent).not.toContain("登録時の結果");
+  expect(within(unjudged).getByRole("link", { name: "CASE-U1" }).getAttribute("href")).toBe("#/cases/CASE-U1");
+  const judged = screen.getByTestId("impact-CASE-J1");
+  expect(judged.textContent).toContain("保存済みの回答: No");
+  expect(judged.textContent).toContain("登録時の結果: 問題なし");
+  expect(screen.getByTestId("no-cascade").textContent).toContain("連鎖して変えません");
+});
+
+test("廃止案: 影響を受ける案件がなければ、0件と示す", async () => {
+  stubFetch(retireRoutes(retireBody({ impact: { unjudged: [], judged: [] } })));
+  render(<QuestionAdmin />);
+  await createRetirement();
+  const impact = screen.getByRole("region", { name: "既存案件への影響" });
+  expect(impact.textContent).toContain("判定未登録の案件（0件）");
+  expect(impact.textContent).toContain("判定登録済みの案件（0件）");
+});
+
+test("廃止案 Yes: 廃止を反映し、一覧に設問を「廃止済み」で残す。決定にyesを送る", async () => {
+  const spy = stubFetch({
+    ...retireRoutes(),
+    "POST /api/admin/question-proposals/r1/decision": { body: { applied: true, ...listBody(retiredAfter, 3) } },
+  });
+  render(<QuestionAdmin />);
+  await createRetirement();
+  fireEvent.click(screen.getByRole("button", { name: "Yes" }));
+  await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
+  expect(screen.getByTestId("proposal-notice").textContent).toContain("デモの設問一覧に反映しました（設問A13を廃止");
+  expect(rowsOf(current())).toBe(13);
+  const row = within(current()).getByTestId("現行のデモの設問一覧-A13");
+  expect(within(row).getByText("廃止済み")).toBeTruthy();
+  expect(row.textContent).toContain(added.text);
+  const decision = spy.mock.calls.find(([url]) => String(url).endsWith("/decision"));
+  expect(JSON.parse(String(decision?.[1]?.body))).toEqual({ decision: "yes" });
+});
+
+test("廃止案 No: 現行の一覧は変わらず、「廃止案は反映していません」と示す。決定にnoを送る", async () => {
+  const spy = stubFetch({
+    ...retireRoutes(),
+    "POST /api/admin/question-proposals/r1/decision": { body: { applied: false, ...listBody(withA13, 2) } },
+  });
+  render(<QuestionAdmin />);
+  await createRetirement();
+  fireEvent.click(screen.getByRole("button", { name: "No" }));
+  await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
+  expect(screen.getByTestId("proposal-notice").textContent).toContain("この廃止案は反映していません");
+  expect(within(current()).queryByText("廃止済み")).toBeNull();
+  expect(rowsOf(current())).toBe(13);
+  const decision = spy.mock.calls.find(([url]) => String(url).endsWith("/decision"));
+  expect(JSON.parse(String(decision?.[1]?.body))).toEqual({ decision: "no" });
+});
+
+test("廃止案 Yes が拒否（参照あり・409）されたら、成功と言わず、拒否の理由を出し、一覧は廃止済みにしない", async () => {
+  const detail = "設問A13は、現行の判定ルール（R01）が参照しているため、廃止できません。設問の一覧は変わっていません";
+  stubFetch({
+    ...retireRoutes(retireBody({ references: [{ rule_id: "R01", revision: 2, result_code: "caution" }], can_retire: false })),
+    "POST /api/admin/question-proposals/r1/decision": { status: 409, body: { detail } },
+  });
+  render(<QuestionAdmin />);
+  await createRetirement();
+  fireEvent.click(screen.getByRole("button", { name: "Yes" }));
+  expect((await screen.findByTestId("proposal-error")).textContent).toContain("廃止できません");
+  expect(screen.getByTestId("proposal-error").textContent).toContain("R01");
+  expect(screen.queryByTestId("proposal-notice")).toBeNull();
+  await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
+  await waitFor(() => expect(within(current()).getByTestId("現行のデモの設問一覧-A13")).toBeTruthy());
+  expect(within(current()).queryByText("廃止済み")).toBeNull();
+});
+
+test("設問一覧: 既に廃止済みの設問は「廃止済み」ラベルで示し、設問文を残す", async () => {
+  stubFetch({ "GET /api/admin/questions": { body: listBody(retiredAfter, 3) } });
+  render(<QuestionAdmin />);
+  const region = await screen.findByRole("region", { name: "現行のデモの設問一覧" });
+  const row = await within(region).findByTestId("現行のデモの設問一覧-A13");
+  expect(within(row).getByText("廃止済み")).toBeTruthy();
+  expect(row.className).toContain("row-retired");
+  expect(row.textContent).toContain(added.text);
+  expect(within(region).getAllByText("廃止済み")).toHaveLength(1); // ほかの設問には付けない
+});
+
+test("追加案は、従来どおり（追加ラベル）で、廃止の補足（参照・影響）は出さない", async () => {
+  stubFetch({
+    ...baseRoutes(),
+    "POST /api/admin/question-proposals": { status: 201, body: { ...proposalBody, kind: "add" } },
+  });
+  render(<QuestionAdmin />);
+  await createProposal();
+  expect(screen.queryByTestId("retirement-detail")).toBeNull();
+  expect(within(screen.getByTestId("proposal")).getByText("追加")).toBeTruthy();
+});

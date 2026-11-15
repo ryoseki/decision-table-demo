@@ -1,7 +1,7 @@
 // APIの呼び出し（画面は相対パス /api/... を呼ぶ。開発とE2EではViteが中継し、本番は同じオリジン）。
 // Reactに依存しない。通信の失敗は ApiError にそろえる（status 0 は、通信できなかった場合）。
 import { RESULT_CODE_BY_NAME, resultNameOf } from "./resultCodes";
-import type { AdoptedRule, Answer, ResultName, ReviewCase, Tally } from "./data/cases";
+import type { AdoptedRule, Answer, ResultName, RetiredQuestion, ReviewCase, Tally } from "./data/cases";
 import type { QuestionId } from "./data/questions";
 import { QUESTION_IDS, type Rule } from "./matching";
 
@@ -62,7 +62,7 @@ type ApiCase = {
   summary: string;
   user: { user_id: string };
   inquiry: { subject: string; body: string };
-  questions: { question_code: string; answer: Answer | null }[];
+  questions: { question_code: string; prompt?: string; answer: Answer | null; retired?: boolean }[];
   result: { result_code: string; adopted_rule: { rule_id: string; rule_revision: number } | null } | null;
 };
 
@@ -70,8 +70,18 @@ type ApiCase = {
 export async function getCase(caseId: string): Promise<ReviewCase> {
   const c = (await (await request(`/api/cases/${encodeURIComponent(caseId)}`)).json()) as ApiCase;
   const answers: ReviewCase["answers"] = {};
+  const retiredQuestions: RetiredQuestion[] = [];
   for (const q of c.questions) {
-    if (q.answer !== null) answers[q.question_code as QuestionId] = q.answer;
+    if (q.retired === true) {
+      // 廃止済みの設問は、回答の対象にしない。保存済みの設問文と回答だけ、別に持つ。
+      retiredQuestions.push({
+        id: q.question_code,
+        prompt: q.prompt ?? "",
+        ...(q.answer === null ? {} : { answer: q.answer }),
+      });
+    } else if (q.answer !== null) {
+      answers[q.question_code as QuestionId] = q.answer;
+    }
   }
   return {
     caseId: c.case_id,
@@ -79,6 +89,7 @@ export async function getCase(caseId: string): Promise<ReviewCase> {
     summary: c.summary,
     inquiry: c.inquiry.body,
     answers,
+    ...(retiredQuestions.length === 0 ? {} : { retiredQuestions }),
     ...(c.result === null ? {} : { result: resultNameOf(c.result.result_code) }),
     ...(c.result?.adopted_rule == null
       ? {}

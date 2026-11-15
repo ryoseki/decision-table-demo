@@ -81,6 +81,13 @@ test("保存: 422 などの拒否は ApiError にする", async () => {
   await expect(saveJudgment("CASE-X", "注意")).rejects.toMatchObject({ status: 422 });
 });
 
+test("保存: 登録済みの案件への保存（409）は、status 409 の ApiError にする（画面が、再試行を促さずに扱える）", async () => {
+  stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 409, body: { detail: "登録済み" } } });
+  const error = await saveJudgment("CASE-X", "注意").catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(ApiError);
+  expect(error).toMatchObject({ status: 409 });
+});
+
 test("ApiError でないものは、一般の文言にする", () => {
   expect(describeError(new Error("内部の詳細"))).toBe("予期しないエラーが発生しました");
 });
@@ -158,4 +165,24 @@ test("判定: 採用ルールは、採用しているときだけ rule_id と ru
   expect(JSON.parse(String(spy.mock.calls[0][1]?.body))).toEqual({ result_code: "caution", rule_id: "R01", rule_revision: 2 });
   await saveJudgment("CASE-X", "注意", {});
   expect(JSON.parse(String(spy.mock.calls[1][1]?.body))).toEqual({ result_code: "caution" });
+});
+
+test("詳細: 廃止済みの設問は、回答に入れず、保存済みの設問文と回答を retiredQuestions に持つ（未回答は answer なし）", async () => {
+  const questions = [
+    { question_code: "A09", answer: "yes", retired: false },
+    { question_code: "A13", prompt: "対象期間にAPIキーが失効されたか？", answer: "no", retired: true },
+    { question_code: "A14", prompt: "架空の設問？", answer: null, retired: true },
+  ];
+  stubFetch({ "GET /api/cases/CASE-X": { body: apiCase({ questions }) } });
+  const c = await getCase("CASE-X");
+  expect(c.answers).toEqual({ A09: "yes" });
+  expect(c.retiredQuestions).toEqual([
+    { id: "A13", prompt: "対象期間にAPIキーが失効されたか？", answer: "no" },
+    { id: "A14", prompt: "架空の設問？" },
+  ]);
+});
+
+test("詳細: 廃止済みの設問がなければ、retiredQuestions を持たない", async () => {
+  stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() } });
+  expect((await getCase("CASE-X")).retiredQuestions).toBeUndefined();
 });

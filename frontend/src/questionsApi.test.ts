@@ -68,3 +68,53 @@ test("決定の通信エラーは、反映の有無を言い切らない。提�
   const created = await createQuestionProposal("x").catch((e: unknown) => e);
   expect((created as ApiError).message).toContain("変わっていません");
 });
+
+test("廃止案の作成: 廃止対象・参照ルール・廃止できるか・既存案件への影響を返す（結果コードは表示名にする）", async () => {
+  const retired = { id: "A13", text: "失効？", retired: true };
+  stubFetch({
+    "POST /api/admin/question-proposals": {
+      status: 201,
+      body: {
+        kind: "retire",
+        proposal_id: "p2",
+        before: [{ id: "A13", text: "失効？" }],
+        after: [retired],
+        retired: { id: "A13", text: "失効？" },
+        references: [{ rule_id: "R01", revision: 2, result_code: "caution" }],
+        can_retire: false,
+        impact: {
+          unjudged: [{ case_id: "C1", summary: "概要1", answer: "yes" }],
+          judged: [{ case_id: "C2", summary: "概要2", answer: null, result_code: "no_issue" }],
+        },
+        cascade: [],
+      },
+    },
+  });
+  expect(await createQuestionProposal("設問A13を廃止して")).toEqual({
+    kind: "retire",
+    proposalId: "p2",
+    before: [{ id: "A13", text: "失効？" }],
+    after: [retired],
+    retiredId: "A13",
+    retiredText: "失効？",
+    references: [{ ruleId: "R01", revision: 2, result: "注意" }],
+    canRetire: false,
+    impact: {
+      unjudged: [{ caseId: "C1", summary: "概要1", answer: "yes" }],
+      judged: [{ caseId: "C2", summary: "概要2", answer: null, result: "問題なし" }],
+    },
+  });
+});
+
+test("廃止の拒否（409）は、サーバーの文言を出す。成功にしない", async () => {
+  stubFetch({
+    "POST /api/admin/question-proposals/p2/decision": {
+      status: 409,
+      body: { detail: "設問A09は、現行の判定ルール（R01）が参照しているため、廃止できません。設問の一覧は変わっていません" },
+    },
+  });
+  const error = (await decideQuestionProposal("p2", "yes").catch((e: unknown) => e)) as ApiError;
+  expect(error.status).toBe(409);
+  expect(error.message).toContain("R01");
+  expect(error.message).toContain("廃止できません");
+});

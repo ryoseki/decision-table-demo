@@ -30,6 +30,7 @@ from app.domain import (
     RESULT_CODES,
     CaseNotFound,
     InvalidJudgment,
+    JudgmentAlreadyRecorded,
 )
 from tests.test_intake import _Server, case_payload, make_app, send
 
@@ -108,6 +109,8 @@ class ContractStore(intake.InMemoryCaseStore):
         stored = self.cases.get(case_id)
         if stored is None:
             raise CaseNotFound(case_id)
+        if stored.get("result") is not None:
+            raise JudgmentAlreadyRecorded(case_id)  # 登録済みは何も変えない
         if result_code not in RESULT_CODES:
             raise InvalidJudgment(
                 f"result_code が定義済みのコードではありません: {result_code}"
@@ -279,9 +282,10 @@ class CasesApiContract(unittest.TestCase):
 
     def test_put_records_the_adopted_rule_only_when_both_fields_are_sent(self):
         self.store.rule_rows = [rule_row("R01", 1, "caution", A01="yes")]
+        without_rule = self.intake()
+        self.judge(without_rule, {"result_code": "caution"})
+        self.assertIsNone(self.get(without_rule)["result"]["adopted_rule"])
         case_id = self.intake()
-        self.judge(case_id, {"result_code": "caution"})
-        self.assertIsNone(self.get(case_id)["result"]["adopted_rule"])
         # 採用ルールは参考の記録で、選んだ結果と違っても保存できる（S10）。
         status, _ = self.judge(
             case_id, {"result_code": "no_issue", "rule_id": "R01", "rule_revision": 1}
@@ -295,7 +299,6 @@ class CasesApiContract(unittest.TestCase):
     def test_put_rejects_an_adopted_rule_that_does_not_exist_and_saves_nothing(self):
         self.store.rule_rows = [rule_row("R01", 1, "caution", A01="yes")]
         case_id = self.intake()
-        self.judge(case_id, {"result_code": "caution"})
         before = self.get(case_id)
         for rule_id, revision in (("NOPE", 1), ("R01", 2)):  # 別のルール、ない版
             with self.subTest(rule_id=rule_id, revision=revision):
@@ -323,25 +326,80 @@ class CasesApiContract(unittest.TestCase):
         self.assertIsNone(answers["A03"])  # 渡さない設問は未回答のまま
         self.assertEqual(answers["A09"], "yes")
 
-    def test_put_keeps_only_the_latest_judgment(self):
-        case_id = self.intake()
-        self.judge(case_id, {"result_code": "caution", "answers": {"A01": "yes"}})
-        self.judge(case_id, {"result_code": "no_issue", "answers": {"A01": "no"}})
-        view = self.get(case_id)
-        self.assertEqual(view["result"]["result_code"], "no_issue")
-        self.assertEqual(self.answers_of(view)["A01"], "no")
+    # --- 登録済みの案件は再保存できない（2026-11-15の合意。旧「上書き」を置換） ---
 
-    def test_put_is_idempotent_when_the_same_judgment_is_resent(self):
+    def test_put_is_allowed_once_before_registration(self):
+        # 初回の保存前は、回答を直して結果を選べる。
         case_id = self.intake()
-        payload = {"result_code": "caution", "answers": {"A01": "yes"}}
-        self.assertEqual(self.judge(case_id, payload)[0], 204)
-        first = self.get(case_id)
-        self.assertEqual(self.judge(case_id, payload)[0], 204)
-        second = self.get(case_id)
-        # 登録日時を除いて、同じ状態になる（結果・回答・採用ルールは変わらない）。
-        for view in (first, second):
-            view["result"].pop("recorded_at")
-        self.assertEqual(first, second)
+        self.assertIsNone(self.get(case_id)["result"])
+        status, _ = self.judge(
+            case_id, {"result_code": "caution", "answers": {"A01": "yes"}}
+        )
+        self.assertEqual(status, 204)
+        view = self.get(case_id)
+        self.assertEqual(view["result"]["result_code"], "caution")
+        self.assertEqual(self.answers_of(view)["A01"], "yes")
+
+    def test_put_rejects_a_resave_of_a_registered_case_and_keeps_stored_values(self):
+        case_id = self.intake()
+        self.store.rule_rows = [rule_row("R01", 1, "caution", A01="yes")]
+        first = {
+            "result_code": "caution",
+            "rule_id": "R01",
+            "rule_revision": 1,
+            "answers": {"A01": "yes"},
+        }
+        self.assertEqual(self.judge(case_id, first)[0], 204)
+        before = self.get(case_id)
+        resaves = (
+            first,  # 同じ内容の再送も、成功にしない
+            {"result_code": "no_issue", "answers": {"A01": "no", "A02": "yes"}},
+            {"result_code": "no_issue"},  # 結果だけの変更
+            {"result_code": "caution", "answers": {"A02": "no"}},  # 回答だけの変更
+        )
+        for payload in resaves:
+            with self.subTest(payload=payload):
+                status, body = self.judge(case_id, payload)
+                self.assertEqual(status, 409)
+                self.assertIn("再保存できません", body["detail"])
+                self.assertEqual(self.get(case_id), before)  # 結果も回答も採用も不変
+
+    def test_put_rejects_adding_an_answer_to_a_case_registered_with_only_a_result(self):
+        case_id = self.intake()
+        self.assertEqual(self.judge(case_id, {"result_code": "no_issue"})[0], 204)
+        before = self.get(case_id)
+        status, _ = self.judge(
+            case_id, {"result_code": "no_issue", "answers": {"A03": "yes"}}
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(self.get(case_id), before)
+        self.assertIsNone(self.answers_of(before)["A03"])
+
+    def test_put_rejects_resolving_a_pending_answer_after_registration(self):
+        case_id = self.intake_with_pending_a09()
+        self.assertEqual(self.judge(case_id, {"result_code": "caution"})[0], 204)
+        before = self.get(case_id)
+        status, _ = self.judge(
+            case_id, {"result_code": "caution", "answers": {"A09": "no"}}
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(self.get(case_id), before)
+        self.assertEqual(self.answers_of(before)["A09"], "pending")
+
+    def test_a_registered_case_blocks_only_its_own_resave(self):
+        registered = self.intake()
+        other = self.intake()
+        self.judge(registered, {"result_code": "caution"})
+        self.assertEqual(self.judge(registered, {"result_code": "no_issue"})[0], 409)
+        self.assertEqual(self.judge(other, {"result_code": "no_issue"})[0], 204)
+
+    def test_get_marks_a_registered_case_as_judged_with_its_stored_result(self):
+        case_id = self.intake()
+        self.assertIs(self.get(case_id)["judged"], False)
+        self.judge(case_id, {"result_code": "caution", "answers": {"A01": "yes"}})
+        view = self.get(case_id)
+        self.assertIs(view["judged"], True)
+        self.assertEqual(view["result"]["result_code"], "caution")
 
     def test_put_may_replace_pending_with_a_human_answer(self):
         case_id = self.intake_with_pending_a09()
@@ -468,16 +526,17 @@ class CasesApiContract(unittest.TestCase):
     def test_put_calls_the_store_once_with_the_given_arguments(self):
         self.store.rule_rows = [rule_row("R01", 2, "caution", A01="yes")]
         case_id = self.intake()
+        other = self.intake()
         before = len(self.store.save_calls)
         self.judge(case_id, {"result_code": "caution", "answers": {"A01": "yes"}})
         self.judge(
-            case_id, {"result_code": "no_issue", "rule_id": "R01", "rule_revision": 2}
+            other, {"result_code": "no_issue", "rule_id": "R01", "rule_revision": 2}
         )
         self.assertEqual(
             self.store.save_calls[before:],
             [
                 (case_id, "caution", {"A01": "yes"}, None),
-                (case_id, "no_issue", {}, ("R01", 2)),
+                (other, "no_issue", {}, ("R01", 2)),
             ],
         )
 

@@ -5,6 +5,7 @@
 実接続の実装は、同じ generate の形で差し替える。
 """
 
+import re
 from typing import Any
 
 from app.question_validation import DemoQuestion
@@ -15,10 +16,17 @@ _REVOCATION_TEXT = "対象期間にAPIキーが失効されたか？"
 
 class MockQuestionProposer:
     def generate(self, prompt: str, current: tuple[DemoQuestion, ...]) -> Any:
-        """「失効」と「APIキー」を含む依頼だけ、A13の追加案を返す。
+        """「廃止」と設問ID（例: A13）を含む依頼には、その設問の廃止案を返す。
+
+        それ以外では、「失効」と「APIキー」を含む依頼だけ、A13の追加案を返す。
 
         それ以外の依頼には、操作のない出力を返す（検証で拒否される）。
         """
+        if "廃止" in prompt:
+            found = re.search(r"A[0-9]{2}", prompt)
+            if found:
+                return {"operation": "retire_question", "question_id": found.group()}
+            return {"operation": "none", "question": {}}
         if "失効" in prompt and "APIキー" in prompt:
             return {
                 "operation": "add_question",

@@ -1,35 +1,125 @@
 import { useState } from "react";
 import { ApiError, describeError } from "./api";
+import { answerLabel } from "./data/cases";
 import {
   createQuestionProposal,
   decideQuestionProposal,
   type DemoQuestion,
   type DemoQuestionList,
+  type ImpactCase,
   type QuestionProposal,
+  type RetireProposal,
 } from "./questionsApi";
+import { detailHref } from "./route";
 import { useDemoQuestions } from "./useApi";
 
 type ListState = { status: "loading" } | { status: "ok"; data: DemoQuestionList } | { status: "error"; message: string };
 
-function QuestionTable({ title, questions, addedId }: { title: string; questions: DemoQuestion[]; addedId?: string }) {
+function QuestionTable({
+  title,
+  questions,
+  addedId,
+  retiredId,
+}: {
+  title: string;
+  questions: DemoQuestion[];
+  addedId?: string;
+  /** 廃止案で、これから廃止する設問（プレビューの After に「廃止」ラベルを付ける）。 */
+  retiredId?: string;
+}) {
   return (
     <section className="pane" aria-label={title}>
       <div className="pane-head"><h3>{title}</h3><span>{questions.length}問</span></div>
       <table className="case-table question-table">
         <thead><tr><th scope="col">ID</th><th scope="col">設問</th></tr></thead>
         <tbody>
-          {questions.map((q) => (
-            <tr key={q.id} className={q.id === addedId ? "row-added" : undefined} data-testid={`${title}-${q.id}`}>
-              <th scope="row" className="case-id">{q.id}</th>
-              <td>
-                {q.text}
-                {q.id === addedId && <span className="badge added-label">追加</span>}
-              </td>
-            </tr>
-          ))}
+          {questions.map((q) => {
+            const retiring = q.id === retiredId;
+            const rowClass = q.id === addedId ? "row-added" : retiring || q.retired === true ? "row-retired" : undefined;
+            return (
+              <tr key={q.id} className={rowClass} data-testid={`${title}-${q.id}`}>
+                <th scope="row" className="case-id">{q.id}</th>
+                <td>
+                  {q.text}
+                  {q.id === addedId && <span className="badge added-label">追加</span>}
+                  {retiring && <span className="badge retired-label">廃止</span>}
+                  {!retiring && q.retired === true && <span className="badge retired-label">廃止済み</span>}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </section>
+  );
+}
+
+function CaseImpactList({ title, cases, note }: { title: string; cases: ImpactCase[]; note: string }) {
+  return (
+    <div>
+      <h5>{title}（{cases.length}件）</h5>
+      <p className="hint">{note}</p>
+      {cases.length > 0 && (
+        <ul>
+          {cases.map((c) => (
+            <li key={c.caseId} data-testid={`impact-${c.caseId}`}>
+              <a href={detailHref(c.caseId)}>{c.caseId}</a> {c.summary}
+              <span className="impact-detail"> 保存済みの回答: {answerLabel(c.answer)}</span>
+              {c.result !== undefined && <span className="impact-detail"> 登録時の結果: {c.result}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// 廃止案の差分の補足。現行ルールの参照先と、既存案件への影響を示す（何も変更しない）。
+function RetirementDetail({ proposal }: { proposal: RetireProposal }) {
+  const { references, impact } = proposal;
+  return (
+    <div className="retirement" data-testid="retirement-detail">
+      <section aria-label="参照しているルール">
+        <h4>参照しているルール</h4>
+        {references.length === 0 ? (
+          <p>現行のルールに、設問{proposal.retiredId}を参照するものはありません。</p>
+        ) : (
+          <>
+            <table className="case-table">
+              <thead><tr><th scope="col">ルール</th><th scope="col">版</th><th scope="col">結果</th></tr></thead>
+              <tbody>
+                {references.map((r) => (
+                  <tr key={r.ruleId} data-testid={`reference-${r.ruleId}`}>
+                    <th scope="row" className="case-id">{r.ruleId}</th>
+                    <td>{r.revision}</td>
+                    <td>{r.result}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="warn" role="alert" data-testid="retire-blocked">
+              参照するルールが{references.length}件あります。Yesを選んでも、設問{proposal.retiredId}は廃止されません（ルールは変更しません）。
+            </p>
+          </>
+        )}
+      </section>
+      <section aria-label="既存案件への影響">
+        <h4>既存案件への影響</h4>
+        <CaseImpactList
+          title="判定未登録の案件"
+          cases={impact.unjudged}
+          note="最新のルールで照合します。廃止した設問は、新たな回答の対象から外れます。保存済みの設問文と回答は、審査画面で確認できます。"
+        />
+        <CaseImpactList
+          title="判定登録済みの案件"
+          cases={impact.judged}
+          note="登録時の結果と、保存済みの設問文・回答を表示します。廃止した設問には、新たに回答できません。"
+        />
+      </section>
+      <p className="note" data-testid="no-cascade">
+        この操作で、判定ルールと案件の保存データは変更しません（連鎖して変えません）。
+      </p>
+    </div>
   );
 }
 
@@ -77,7 +167,14 @@ export default function QuestionAdmin() {
       const result = await decideQuestionProposal(proposal.proposalId, decision);
       setLatest({ revision: result.revision, questions: result.questions });
       setProposal(null);
-      setNotice(result.applied ? "デモの設問一覧に反映しました" : "この追加案は反映していません。下の一覧は、サーバーの最新の状態です。");
+      const retiring = proposal.kind === "retire";
+      setNotice(
+        result.applied
+          ? retiring
+            ? `デモの設問一覧に反映しました（設問${proposal.retiredId}を廃止。保存済みの設問文と回答は残ります）`
+            : "デモの設問一覧に反映しました"
+          : `この${retiring ? "廃止案" : "追加案"}は反映していません。下の一覧は、サーバーの最新の状態です。`,
+      );
     } catch (e) {
       setError(describeError(e));
       // 提案が使えなくなった（未知・使用済み・基準の変更）ときは、プレビューを閉じて最新の一覧を出す。
@@ -102,6 +199,7 @@ export default function QuestionAdmin() {
         <strong>モックです。</strong>AIの応答は、固定の規則で作った架空のもので、実際のAIには接続していません。
         反映先は、サーバーのメモリ上のデモの一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
         案件の設問・回答、データベースは変わりません。
+        設問を廃止すると、案件の画面では、その設問が新たな回答の対象から外れます（保存済みの設問文と回答は残ります）。
       </p>
 
       {list.status === "loading" && <p className="count" role="status">読み込み中…</p>}
@@ -127,6 +225,7 @@ export default function QuestionAdmin() {
           onChange={(e) => setPrompt(e.target.value)}
           placeholder="例: APIキーの失効履歴を確認する設問を追加して"
         />
+        <p className="hint">廃止の依頼の例: 設問A13を廃止して</p>
         <div>
           <button type="submit" className="btn" disabled={busy || prompt.trim() === ""}>追加案を作る</button>
         </div>
@@ -137,11 +236,16 @@ export default function QuestionAdmin() {
 
       {proposal !== null && (
         <section className="proposal" aria-labelledby="diff-title" data-testid="proposal">
-          <h3 id="diff-title">追加案の確認（まだ反映していません）</h3>
+          <h3 id="diff-title">{proposal.kind === "retire" ? "廃止案" : "追加案"}の確認（まだ反映していません）</h3>
           <div className="diff">
             <QuestionTable title="Before（現行）" questions={proposal.before} />
-            <QuestionTable title="After（反映した場合）" questions={proposal.after} addedId={proposal.addedId} />
+            {proposal.kind === "retire" ? (
+              <QuestionTable title="After（反映した場合）" questions={proposal.after} retiredId={proposal.retiredId} />
+            ) : (
+              <QuestionTable title="After（反映した場合）" questions={proposal.after} addedId={proposal.addedId} />
+            )}
           </div>
+          {proposal.kind === "retire" && <RetirementDetail proposal={proposal} />}
           <p className="confirm-q" id="confirm-q"><strong>反映しますか？</strong></p>
           <div className="confirm-actions" role="group" aria-labelledby="confirm-q">
             <button type="button" className="btn" disabled={busy} onClick={() => void decide("yes")}>Yes</button>

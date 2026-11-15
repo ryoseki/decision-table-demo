@@ -1,15 +1,37 @@
 // 設問の追加案（管理者AIの試作。モック・DBなし）のAPI呼び出し。Reactに依存しない。
 // 失敗は ApiError にそろえ、画面に出す文言（message）を、原因ごとに変える。
 import { ApiError } from "./api";
+import type { Answer } from "./data/cases";
+import { resultNameOf } from "./resultCodes";
 
-export type DemoQuestion = { id: string; text: string };
+/** 廃止した設問は、一覧に残り、retired が true になる（設問文は保持）。 */
+export type DemoQuestion = { id: string; text: string; retired?: boolean };
 export type DemoQuestionList = { revision: number; questions: DemoQuestion[] };
-export type QuestionProposal = {
+/** 追加案。kind は持たない（既存の形のまま）。 */
+export type AddProposal = {
+  kind?: undefined;
   proposalId: string;
   before: DemoQuestion[];
   after: DemoQuestion[];
   addedId: string;
 };
+/** 廃止案の、参照しているルール（現行の最新の版）。 */
+export type RuleReference = { ruleId: string; revision: number; result: string };
+/** 廃止案の、影響を受ける既存案件。answer が null なら未回答。 */
+export type ImpactCase = { caseId: string; summary: string; answer: Answer | null; result?: string };
+export type RetireProposal = {
+  kind: "retire";
+  proposalId: string;
+  before: DemoQuestion[];
+  after: DemoQuestion[];
+  retiredId: string;
+  retiredText: string;
+  references: RuleReference[];
+  /** 参照が0件のときだけ true。false なら、Yesでも廃止されない。 */
+  canRetire: boolean;
+  impact: { unjudged: ImpactCase[]; judged: ImpactCase[] };
+};
+export type QuestionProposal = AddProposal | RetireProposal;
 export type Decision = "yes" | "no";
 export type DecisionResult = DemoQuestionList & { applied: boolean };
 
@@ -68,9 +90,40 @@ export async function createQuestionProposal(prompt: string): Promise<QuestionPr
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt }),
-  })) as { proposal_id: string; before: DemoQuestion[]; after: DemoQuestion[]; added: DemoQuestion };
+  })) as ApiProposal;
+  if (b.kind === "retire") {
+    const toImpact = (c: ApiImpactCase): ImpactCase => ({
+      caseId: c.case_id,
+      summary: c.summary,
+      answer: c.answer,
+      ...(c.result_code === undefined ? {} : { result: resultNameOf(c.result_code) }),
+    });
+    return {
+      kind: "retire",
+      proposalId: b.proposal_id,
+      before: b.before,
+      after: b.after,
+      retiredId: b.retired.id,
+      retiredText: b.retired.text,
+      references: b.references.map((r) => ({ ruleId: r.rule_id, revision: r.revision, result: resultNameOf(r.result_code) })),
+      canRetire: b.can_retire,
+      impact: { unjudged: b.impact.unjudged.map(toImpact), judged: b.impact.judged.map(toImpact) },
+    };
+  }
   return { proposalId: b.proposal_id, before: b.before, after: b.after, addedId: b.added.id };
 }
+
+type ApiImpactCase = { case_id: string; summary: string; answer: Answer | null; result_code?: string };
+type ApiProposal = { proposal_id: string; before: DemoQuestion[]; after: DemoQuestion[] } & (
+  | { kind?: "add"; added: DemoQuestion }
+  | {
+      kind: "retire";
+      retired: DemoQuestion;
+      references: { rule_id: string; revision: number; result_code: string }[];
+      can_retire: boolean;
+      impact: { unjudged: ApiImpactCase[]; judged: ApiImpactCase[] };
+    }
+);
 
 export async function decideQuestionProposal(proposalId: string, decision: Decision): Promise<DecisionResult> {
   const b = (await call(`/api/admin/question-proposals/${encodeURIComponent(proposalId)}/decision`, {

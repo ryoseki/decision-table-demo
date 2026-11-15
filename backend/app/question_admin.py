@@ -11,6 +11,7 @@
 - AIの応答を得られないときは502（成功した応答に見せない）。
 """
 
+from collections.abc import Callable
 from typing import Annotated, Any, Literal, Protocol
 
 from fastapi import APIRouter, HTTPException, Request
@@ -21,10 +22,14 @@ from app.domain import (
     ProposalConflict,
     ProposalNotFound,
     ProposerUnavailable,
+    RetirementBlocked,
 )
 from app.question_validation import (
     DemoQuestion,
     ValidatedProposal,
+    ValidatedRetirement,
+    find_case_impact,
+    find_rule_references,
     validate_model_output,
 )
 
@@ -45,9 +50,13 @@ class QuestionStore(Protocol):
 
     def snapshot(self) -> tuple[int, tuple[DemoQuestion, ...]]: ...
 
-    def register(self, proposal: ValidatedProposal) -> str: ...
+    def register(self, proposal: ValidatedProposal | ValidatedRetirement) -> str: ...
 
-    def approve(self, proposal_id: str) -> tuple[int, tuple[DemoQuestion, ...]]: ...
+    def approve(
+        self,
+        proposal_id: str,
+        references_of: Callable[[str], tuple[str, ...]] | None = None,
+    ) -> tuple[int, tuple[DemoQuestion, ...]]: ...
 
     def reject(self, proposal_id: str) -> None: ...
 
@@ -65,8 +74,54 @@ class DecisionRequest(BaseModel):
     decision: Literal["yes", "no"]
 
 
-def _rows(questions: tuple[DemoQuestion, ...]) -> list[dict[str, str]]:
-    return [{"id": q.id, "text": q.text} for q in questions]
+def _rows(questions: tuple[DemoQuestion, ...]) -> list[dict[str, Any]]:
+    # 廃止した設問の行だけ、"retired": true を付ける（設問文は残す）。
+    return [
+        {"id": q.id, "text": q.text, **({"retired": True} if q.retired else {})}
+        for q in questions
+    ]
+
+
+def _case_side(request: Request):  # noqa: ANN202
+    """廃止の確認に使う、現行ルールと既存案件の読み取り。DBの有無はここでは決めない。"""
+    store = (
+        request.app.state.case_store
+        if hasattr(request.app.state, "case_store")
+        else None
+    )
+    if store is None or not all(
+        hasattr(store, name) for name in ("list_rules", "list_cases", "get_case")
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="廃止の確認に必要な、ルールと案件の保存先がありません",
+        )
+    return store
+
+
+def _references_of(store: Any) -> Callable[[str], tuple[str, ...]]:
+    def references(question_id: str) -> tuple[str, ...]:
+        rules = find_rule_references(question_id, store.list_rules())
+        return tuple(r["rule_id"] for r in rules)
+
+    return references
+
+
+def _retirement_body(proposal: ValidatedRetirement, store: Any) -> dict[str, Any]:
+    """廃止案の差分。参照先のルールと、既存案件への影響を示す。何も変更しない。"""
+    question_id = proposal.target.id
+    references = find_rule_references(question_id, store.list_rules())
+    cases = [store.get_case(row["case_id"]) for row in store.list_cases()]
+    return {
+        "kind": "retire",
+        "retired": {"id": question_id, "text": proposal.target.text},
+        # 参照が1件以上あれば、Yesでも廃止しない。
+        "references": references,
+        "can_retire": not references,
+        "impact": find_case_impact(question_id, cases),
+        # ルール・案件は、この操作では変更しない（連鎖して変えない）。
+        "cascade": [],
+    }
 
 
 def _notice() -> dict[str, Any]:
@@ -95,12 +150,20 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
         proposal = validate_model_output(raw, current, revision)
     except InvalidProposal as error:
         raise HTTPException(status_code=422, detail=str(error)) from None
+    detail: dict[str, Any]
+    if isinstance(proposal, ValidatedRetirement):
+        detail = _retirement_body(proposal, _case_side(request))
+    else:
+        detail = {
+            "kind": "add",
+            "added": {"id": proposal.added.id, "text": proposal.added.text},
+        }
     return {
         "proposal_id": store.register(proposal),
         "base_revision": proposal.base_revision,
         "before": _rows(proposal.base),
         "after": _rows(proposal.after),
-        "added": {"id": proposal.added.id, "text": proposal.added.text},
+        **detail,
         **_notice(),
     }
 
@@ -120,7 +183,20 @@ def decide_proposal(
                 "questions": _rows(questions),
                 **_notice(),
             }
-        revision, questions = store.approve(proposal_id)
+        # 廃止案だけ、承認の時点の現行ルールを調べ直す（提案後に変わっても拒否する）。
+        revision, questions = store.approve(
+            proposal_id,
+            lambda question_id: _references_of(_case_side(request))(question_id),
+        )
+    except RetirementBlocked as error:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"設問{error.question_id}は、現行の判定ルール"
+                f"（{'、'.join(error.references)}）が参照しているため、廃止できません。"
+                "設問の一覧は変わっていません"
+            ),
+        ) from None
     except ProposalNotFound:
         raise HTTPException(
             status_code=404, detail="提案がありません（未知、または処理済みです）"
