@@ -5,7 +5,7 @@ AWS CLI（`aws lambda ...`）をsubprocessで呼ぶ。初回構築・IAM・関�
 変更はしない（infra/cd/bootstrap.md と infra/cd/cloudfront-plan.md の人の操作）。CloudFront・WAFは
 読み取り（get-*）だけで、公開経路（CloudFront → OAC → AWS_IAMの関数URL）が期待どおりか、AWSの変更の前に
 検証する。公開URLはCloudFrontだけで、関数URLへの直接の公開はフォールバックにもしない。
-予約済み同時実行数は読み取り（get-function-concurrency）でちょうど1であることを確認するだけで、
+予約済み同時実行数は読み取り（get-function-concurrency）でちょうど3であることを確認するだけで、
 設定・削除は自動ではしない（違えば変更の前に止まる）。
 コード更新は検証時に読んだRevisionIdを条件にし、更新の完了を待った後に読み直した設定を、検証時の設定の
 指紋（環境変数を含む版に固定される設定全体。揮発性のメタデータは除く）と照合する。版に固定される設定・
@@ -67,10 +67,12 @@ ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS"}
 # 近似で厳密な保証ではない。全体（CONSTANT）の規則は2026-11-10に要件から外した（受け入れない）。
 RATE_WINDOW_SEC = 300
 IP_RATE_LIMIT = 300
-# 予約済み同時実行数はちょうど1（読み取りで確認するだけ。自動では設定しない）。
-# 関数URLの上限は予約済み同時実行数の10倍のRPS（1なら10RPS、超過は429）で、
+# 予約済み同時実行数はちょうど3（読み取りで確認するだけ。自動では設定しない）。
+# 1から3へ上げたのは、画面のHTML・JS・CSSの並行した読み込みが、コールドスタートで
+# 429（TooManyRequests）になり、配布後のスモーク確認が失敗したため（2026-11-15）。
+# 関数URLの上限は予約済み同時実行数の10倍のRPS（3なら30RPS、超過は429）で、
 # WAFの件数制限や月額の上限の代わりではない（infra/cd/cloudfront-plan.md）。
-REQUIRED_RESERVED_CONCURRENCY = 1
+REQUIRED_RESERVED_CONCURRENCY = 3
 
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -468,27 +470,27 @@ def web_acl_rules_ok(rules: object) -> bool:
 CONCURRENCY_MESSAGES = {
     "missing": "予約済み同時実行数が設定されていません",
     "zero": "予約済み同時実行数が0です（公開停止中の可能性があります）",
-    "not-one": "予約済み同時実行数が1ではありません",
+    "mismatch": "予約済み同時実行数が3ではありません",
 }
 
 
 def reserved_concurrency_problem(response: object) -> str | None:
-    """get-function-concurrency の応答。ちょうど整数の1なら None、違えば問題の種類。
+    """get-function-concurrency の応答。ちょうど整数の3なら None、違えば問題の種類。
 
-    未設定（キーなし・null）は "missing"、0は "zero"、それ以外（2以上・負・bool・文字列・小数）は
-    "not-one"。値は結果に残さず、種類だけ返す。
+    未設定（キーなし・null）は "missing"、0は "zero"、それ以外（3以外の整数・負・bool・文字列・小数）は
+    "mismatch"。値は結果に残さず、種類だけ返す。
     """
     if not isinstance(response, dict):
         return "missing"
     value = response.get("ReservedConcurrentExecutions")
     if value is None:
         return "missing"
-    if type(value) is not int:  # True・"1"・1.0 は整数の1と扱わない
-        return "not-one"
+    if type(value) is not int:  # True・"3"・3.0 は整数の3と扱わない
+        return "mismatch"
     if value == 0:
         return "zero"
     if value != REQUIRED_RESERVED_CONCURRENCY:
-        return "not-one"
+        return "mismatch"
     return None
 
 
@@ -731,7 +733,7 @@ class Deployer:
                 "validation": "not-run",
                 # CloudFront・OAC・WAF・関数のリソースポリシーの読み取り検証（変更なし）の結果
                 "publicPath": "not-run",
-                # 予約済み同時実行数の読み取り検証（変更なし）。passed / missing / zero / not-one /
+                # 予約済み同時実行数の読み取り検証（変更なし）。passed / missing / zero / mismatch /
                 # read-failed（取得に失敗）/ not-run
                 "reservedConcurrency": "not-run",
                 "deployment": "not-started",
@@ -848,7 +850,7 @@ class Deployer:
             raise DeployError("公開経路の設定が期待と一致しません: " + ",".join(sorted(set(problems))))
 
     def _validate_concurrency(self) -> None:
-        """予約済み同時実行数がちょうど1であることを、読み取り（修飾子なしの関数）だけで確認する。
+        """予約済み同時実行数がちょうど3であることを、読み取り（修飾子なしの関数）だけで確認する。
 
         AWSの変更の前に呼ぶ。違えば例外で止まり、put/delete-function-concurrency は呼ばない
         （自動で設定・修正しない。人が確認する）。
@@ -864,7 +866,7 @@ class Deployer:
             self.result.update(reservedConcurrency=problem)
             raise DeployError(
                 CONCURRENCY_MESSAGES[problem]
-                + "。ちょうど1が必要です。配布ヘルパーは同時実行数を変更しません（人が確認してください）"
+                + "。ちょうど3が必要です。配布ヘルパーは同時実行数を変更しません（人が確認してください）"
             )
         self.result.update(reservedConcurrency="passed")
 

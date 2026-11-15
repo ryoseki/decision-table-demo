@@ -7,7 +7,7 @@
 | 区分 | 内容 |
 | --- | --- |
 | 履歴（初回構築の前の確認。現在の状態ではない） | 作成前は、既存のCloudFrontディストリビューションは0件（`null`）、WAF（CLOUDFRONT scope）のWeb ACLは0件（`[]`）だった。この「0件」は現在の状態として扱わない |
-| 履歴（利用者の報告、2026-11-09。2026-11-10の確認で更新） | CloudFrontのディストリビューションは**作成済み**（無効化・`Deployed`、WAFのWeb ACLを紐付け済み）。OACは**作成済み**で、種類`lambda`・署名`sigv4`・署名の動作`always`。コンソールでFreeプランの「$0」の表示を確認した（料金の保証ではない）。WAFには、既知のAWSマネージド規則グループ3種が`OverrideAction=Count`で入っており、当時の必須のレート制限2規則（Block）はまだ無かった。Lambda関数URLは**作成済み**で、認証方式 `AWS_IAM`・`BUFFERED`・エイリアス `demo`。未署名の匿名GETが403になることをCodexが実測した。予約済み同時実行数は1 |
+| 履歴（利用者の報告、2026-11-09。2026-11-10の確認で更新） | CloudFrontのディストリビューションは**作成済み**（無効化・`Deployed`、WAFのWeb ACLを紐付け済み）。OACは**作成済み**で、種類`lambda`・署名`sigv4`・署名の動作`always`。コンソールでFreeプランの「$0」の表示を確認した（料金の保証ではない）。WAFには、既知のAWSマネージド規則グループ3種が`OverrideAction=Count`で入っており、当時の必須のレート制限2規則（Block）はまだ無かった。Lambda関数URLは**作成済み**で、認証方式 `AWS_IAM`・`BUFFERED`・エイリアス `demo`。未署名の匿名GETが403になることをCodexが実測した。予約済み同時実行数は3（2026-11-15に1から3へ変更） |
 | 確認済み（利用者の確認、2026-11-10。現在の状態） | 作成済みのWeb ACLの規則は**4件**: 接続元IPごとのレート制限（Block）1件と、既知のAWSマネージド規則グループ3種（`Count`）。**全体のレート制限の規則は無い**。ディストリビューションは無効のまま。これらのリソースは**再作成・削除せず再利用**する |
 | 方針の変更（利用者の承認、2026-11-10） | 全体1,500件/5分の規則を要件から外す。必須は、実際の接続元IPごとの300件/300秒のBlock **1件だけ**（既知の観測グループ3種の`Count`は任意で0〜3件、合計1〜4件）。経緯（利用者の報告）: 全体の規則（URIパスとHTTPメソッドの条件つき）を保存しようとして、`WAFFeatureNotIncludedInPricingPlanException` で失敗した。**どの機能がプランに含まれないのかは特定していない**ため、原因を断定せず、Freeプランで使える・使えない機能の一般論も主張しない |
 | 合意（利用者の判断） | 関数URLを匿名で直接公開する旧手順（`NONE`）はbotの懸念から採らない。独自ドメインは不要 |
@@ -24,7 +24,7 @@
 
 - 公開URLはCloudFrontの `https://<id>.cloudfront.net` だけ。関数URLを公開URL（`CD_BASE_URL`）にしない。フォールバックも置かない。
 - 新規に作るのは、Web ACL 1件、ディストリビューション 1件と、OAC 1件（**いずれも作成済み。再利用し、新規に作らない・削除しない**。重複作成しない）だけ。**独自ドメイン、S3、NAT、Aurora DSQLは新規に作らない**。既存のLambda・関数URL・実行ロール・ロググループは再作成しない（特に、準備済みの関数URL（AWS_IAM・BUFFERED）を作り直さない）。既存のCloudFront・WAF・Lambdaの他のリソースは変更しない。
-- 公開後も予約済み同時実行数は1を維持する。公開後に異常があれば、人が0にして止める（関数URLは429を返す）。CDは変更の前に、読み取り（`get-function-concurrency`）でちょうど1であることを確認し、違えば止まる（自動では設定しない。下の「同時実行数1の意味」）。
+- 公開後も予約済み同時実行数は3を維持する（2026-11-15に1から3へ変更。理由は`docs/development-workflow.md`の「同時実行数3の意味」）。公開後に異常があれば、人が0にして止める（関数URLは429を返す）。CDは変更の前に、読み取り（`get-function-concurrency`）でちょうど3であることを確認し、違えば止まる（自動では設定しない。下の「同時実行数3の意味」）。
 
 ## 設定（公開の前に、この表と実際の設定が一致することを確認する）
 
@@ -51,13 +51,13 @@
 
 レート制限は近似です（検出に遅れがあり、共有IPなどの巻き添えもあり得る。公式の注意点を参照）。Bot ControlやJavaScriptチャレンジは含めません。しきい値の根拠は、現状のデモの想定負荷に対する独自の判断で、公式の推奨値ではありません。
 
-#### 同時実行数1の意味（全体の規則の代わりではない）
+#### 同時実行数3の意味（全体の規則の代わりではない）
 
-AWSの公式資料（Lambda関数URLのスロットリング。Codexが2026-11-10に公式の本文を確認）では、関数URLの最大のリクエスト数は、予約済み同時実行数の10倍のRPSで、超えたリクエストは429になります。予約済み同時実行数1なら、最大10RPSです。
+AWSの公式資料（Lambda関数URLのスロットリング。Codexが2026-11-10に公式の本文を確認）では、関数URLの最大のリクエスト数は、予約済み同時実行数の10倍のRPSで、超えたリクエストは429になります。予約済み同時実行数3なら、最大30RPSです（2026-11-15に1から3へ変更。最初の実機のCDで、並行した画面の読み込みが429になったため）。
 
-- これは、外した全体1,500件/5分（平均5RPS相当）の規則と同じではありません。上限の考え方も単位も違い、10RPSが続けば計算上は月に約2,592万リクエスト（10 × 86,400秒 × 30日）まで関数に届き得ます。
+- これは、外した全体1,500件/5分（平均5RPS相当）の規則と同じではありません。上限の考え方も単位も違い、30RPSが続けば計算上は月に約7,776万リクエスト（30 × 86,400秒 × 30日）まで関数に届き得ます。
 - 月額の上限でもありません。CloudFront・Lambda・ログなどの料金は、届いたリクエストの量に応じて発生し得ます。
-- IPごとの規則（300件/300秒、平均1RPS相当）は、多数のIPから分散したアクセスでは効きません。10件以上のIPから分散すれば、IPごとの上限内のまま同時実行数1の上限に達し得ます。そのとき正規の利用者にも429が返り得ます。
+- IPごとの規則（300件/300秒、平均1RPS相当）は、多数のIPから分散したアクセスでは効きません。30件以上のIPから分散すれば、IPごとの上限内のまま同時実行数3の上限に達し得ます。そのとき正規の利用者にも429が返り得ます。
 - このため、分散したアクセスや、継続的なアクセスによるオリジン（Lambda）側の料金は残ります。異常時は、これまでどおり人が予約済み同時実行数を0にして止めます。429の応答に料金がかかるかは、この文書では確認していません。
 - CDは予約済み同時実行数を自動で設定・変更しません。読み取りで1でなければ、変更の前に止まります（未設定・0・2以上など。結果JSONの `reservedConcurrency` に種類を記録）。
 
@@ -210,7 +210,7 @@ aws lambda add-permission --function-name "$FN" --qualifier demo --region ap-nor
 
 1. 関数URLへの未署名の直接GETが、引き続き403であること（CloudFront経由だけが許可されること）。
 2. CloudFront経由の初期画面が200、`GET /health` が200で本文 `{"status":"ok"}`、`/release` が承認したSHAであること。`CD_BASE_URL=https://<id>.cloudfront.net CD_EXPECTED_SHA=<40桁のSHA> bash scripts/cd-smoke.sh` で行います（実行は未実施）。
-3. 予約済み同時実行数が1のままであること。
+3. 予約済み同時実行数が3のままであること。
 4. 失敗・異常があれば、直ちに予約済み同時実行数を0にして止めます（`infra/cd/bootstrap.md`「7.」）。許可（リソースポリシー）の削除は、人が必要と判断した場合の別操作で、自動では行いません。
 
 ## 代替（有料）: Web ACLをCLIで単独で作る
@@ -253,7 +253,7 @@ aws cloudfront create-origin-access-control --region us-east-1 --origin-access-c
 - 公開URLはCloudFrontだけ。関数URLのホストは `get-function-url-config`（エイリアス `demo`）の実値から導き、CloudFrontのオリジンと一致することを検証する。
 - リポジトリ変数: `CD_BASE_URL`（CloudFrontのオリジン）、`CLOUDFRONT_DISTRIBUTION_ID`、`CLOUDFRONT_OAC_ID`、`WAF_WEB_ACL_ARN`（us-east-1・globalのWeb ACLのARN）、ほかは従来どおり。**いずれもAWS作成後に人が設定する（未設定）**。
 - 配布用ロールの追加権限は読み取りだけ: `cloudfront:GetDistribution`（対象のディストリビューション）、`cloudfront:GetOriginAccessControl`（OACの読み取りはリソース指定ができないため `Resource: *`）、`wafv2:GetWebACL`（対象のWeb ACL）、`lambda:GetPolicy`（エイリアス `demo`）、`lambda:GetFunctionConcurrency`（修飾子なしの対象関数だけ。別の文 `ReadTheDemoFunctionReservedConcurrencyOnly`）。CloudFront・WAF・IAMの書き込み、同時実行数の設定・削除（`PutFunctionConcurrency`・`DeleteFunctionConcurrency`）と `iam:PassRole` は含めない。
-- 検証が失敗した場合は、AWSの変更を1件もせず、スモーク確認もせずに止まる。予約済み同時実行数がちょうど1でない場合（未設定・0・2以上・取得失敗）も同じで、結果JSONの `reservedConcurrency` に `missing`・`zero`・`not-one`・`read-failed` を記録する。
+- 検証が失敗した場合は、AWSの変更を1件もせず、スモーク確認もせずに止まる。予約済み同時実行数がちょうど3でない場合（未設定・0・3以外・取得失敗）も同じで、結果JSONの `reservedConcurrency` に `missing`・`zero`・`mismatch`・`read-failed` を記録する。
 - 検証コードが拒否する項目（初期構成）: 必須のIPごとの規則の欠落・変更・重複、全体（`CONSTANT`）の規則など未対応の規則、既知の観測グループ（`Count`）3種以外のWAF規則・規則グループ、観測グループの重複・`Count` 以外の動作・絞り込みや上書き、合計5件以上の規則、Firewall Managerの管理・前処理/後処理の規則グループ、CloudFrontの継続的デプロイのポリシー・ステージング、`AuthType` が `AWS_IAM` 以外のLambdaの許可、ワイルドカードの `AWS:SourceArn` など。これらの項目名（`ManagedByFirewallManager`・`PreProcessFirewallManagerRuleGroups`・`PostProcessFirewallManagerRuleGroups`・`ContinuousDeploymentPolicyId`・`Staging`）について、Codexが2026-11-09に公式API本文で項目名（`Staging`・`ContinuousDeploymentPolicyId`・`ManagedByFirewallManager`・`PreProcessFirewallManagerRuleGroups`・`PostProcessFirewallManagerRuleGroups`）の存在を確認済みです。実際のAWS応答の値との突合は未実施です。
 
 ## 出典（2026-11-09にCodexが本文を確認した記録を引き継ぐ。この作業では再読していない）
