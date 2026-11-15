@@ -30,6 +30,13 @@ test("#/admin/questions は設問管理（デモ）。末尾のスラッシュ�
   expect(parseHash("#/admin/questions/x")).toEqual({ name: "list" });
 });
 
+test("#/admin/rules は判定ルール管理（デモ）。末尾のスラッシュは許し、設問管理とは別の画面", () => {
+  expect(parseHash("#/admin/rules")).toEqual({ name: "rules" });
+  expect(parseHash("#/admin/rules/")).toEqual({ name: "rules" });
+  expect(parseHash("#/admin/rules/x")).toEqual({ name: "list" });
+  expect(parseHash("#/admin/questions")).toEqual({ name: "questions" });
+});
+
 test("detailHref は案件IDをエンコードし、parseHash で元に戻る", () => {
   expect(detailHref("CASE-B")).toBe("#/cases/CASE-B");
   const id = "CASE 日本語/1";

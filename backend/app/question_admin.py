@@ -11,6 +11,7 @@
 - AIの応答を得られないときは502（成功した応答に見せない）。
 """
 
+import threading
 from collections.abc import Callable
 from typing import Annotated, Any, Literal, Protocol
 
@@ -99,18 +100,50 @@ def _case_side(request: Request):  # noqa: ANN202
     return store
 
 
-def _references_of(store: Any) -> Callable[[str], tuple[str, ...]]:
+_FALLBACK_ADMIN_LOCK = threading.Lock()
+
+
+def admin_lock(request: Request) -> Any:
+    """設問の決定と判定ルールの決定を、1つずつ順に行うためのロック（コンテキストマネージャ）。
+
+    設問の廃止（ルールの参照の確認 → 廃止）と、ルールの承認（設問の確認 → 反映）は、
+    間に割り込まれると、廃止された設問を参照するルールが残る。app.main が
+    app.state に1つ置き、両方の決定が同じものを使う。置いていない構成
+    （部品単体のテスト）では、プロセス内で共有する既定のロックを使う。
+    """
+    return getattr(request.app.state, "admin_lock", _FALLBACK_ADMIN_LOCK)
+
+
+def _current_rules(request: Request, store: Any) -> list[dict[str, Any]]:
+    """廃止の参照の確認に使う現行ルール。案件の保存先のルールに、デモのルール一覧を足す。
+
+    デモのルール一覧（app.state.rule_store。判定ルールの追加案で増える）が参照する設問も、
+    廃止させない。両方の行を、参照の判定に使う。同じルールID・版でも条件や結果が違えば
+    別の行として数える（片方の参照を隠さない）。全項目が一致する行だけ、1件に数える。
+    デモ側で削除したルールが、案件の保存先に残っていれば、参照に数える（保守的。
+    どちらの一覧も変更しない）。
+    """
+    rules: list[dict[str, Any]] = list(store.list_rules())
+    demo = getattr(request.app.state, "rule_store", None)
+    if demo is not None:
+        rules += [r for r in demo.list_rows() if r not in rules]
+    return rules
+
+
+def _references_of(request: Request, store: Any) -> Callable[[str], tuple[str, ...]]:
     def references(question_id: str) -> tuple[str, ...]:
-        rules = find_rule_references(question_id, store.list_rules())
+        rules = find_rule_references(question_id, _current_rules(request, store))
         return tuple(r["rule_id"] for r in rules)
 
     return references
 
 
-def _retirement_body(proposal: ValidatedRetirement, store: Any) -> dict[str, Any]:
+def _retirement_body(
+    proposal: ValidatedRetirement, request: Request, store: Any
+) -> dict[str, Any]:
     """廃止案の差分。参照先のルールと、既存案件への影響を示す。何も変更しない。"""
     question_id = proposal.target.id
-    references = find_rule_references(question_id, store.list_rules())
+    references = find_rule_references(question_id, _current_rules(request, store))
     cases = [store.get_case(row["case_id"]) for row in store.list_cases()]
     return {
         "kind": "retire",
@@ -152,7 +185,7 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(error)) from None
     detail: dict[str, Any]
     if isinstance(proposal, ValidatedRetirement):
-        detail = _retirement_body(proposal, _case_side(request))
+        detail = _retirement_body(proposal, request, _case_side(request))
     else:
         detail = {
             "kind": "add",
@@ -172,6 +205,14 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
 def decide_proposal(
     proposal_id: str, body: DecisionRequest, request: Request
 ) -> dict[str, Any]:
+    # 判定ルールの承認と同時に進まないよう、1つずつ順に決める（admin_lock）。
+    with admin_lock(request):
+        return _decide(proposal_id, body, request)
+
+
+def _decide(
+    proposal_id: str, body: DecisionRequest, request: Request
+) -> dict[str, Any]:
     store: QuestionStore = request.app.state.question_store
     try:
         if body.decision == "no":
@@ -186,7 +227,9 @@ def decide_proposal(
         # 廃止案だけ、承認の時点の現行ルールを調べ直す（提案後に変わっても拒否する）。
         revision, questions = store.approve(
             proposal_id,
-            lambda question_id: _references_of(_case_side(request))(question_id),
+            lambda question_id: _references_of(request, _case_side(request))(
+                question_id
+            ),
         )
     except RetirementBlocked as error:
         raise HTTPException(

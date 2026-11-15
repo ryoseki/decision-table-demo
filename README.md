@@ -110,9 +110,11 @@ The header link "設問管理" opens `#/admin/questions`, a first vertical slice
 
 - **The AI is a mock.** A fixed rule returns a fictional proposal (question A13). Nothing connects to Bedrock or any real AI. The app still validates the output (format, the one allowed ID, duplicates, required fields) and rejects an invalid response with 422 without changing anything.
 - **No database.** The demo list lives in the backend process memory. It survives a page reload but is reset to A01–A12 when the backend restarts. It is not persistent storage, and it does not touch the cases, their questions or answers, or the database. An unapproved preview is only held by the screen and is dismissed on reload.
-- **Not decided yet:** deleting questions, editing decision rules, keeping or retiring past versions, physical deletion, and persistent storage.
+- **Not decided yet:** deleting questions, keeping or retiring past versions, physical deletion, and persistent storage.
 
 The endpoints, error statuses and layer boundaries are in [admin-question-proposal-demo.md](docs/admin-question-proposal-demo.md).
+
+The header link "判定ルール管理" opens `#/admin/rules`, which works the same way (request, Before/After diff, Yes/No) but the target is decision rules, not questions; each screen shows which one it operates on. An add proposal is rejected (422, nothing changes) when a rule refers to a question that does not exist or is retired, uses an undefined result code, or duplicates an existing rule. The rule list is a separate in-memory demo list (R01–R03 at start): it does not change the rules the review screen uses, and the cases and database stay untouched. Design, the demo-only duplicate policy and what is still undecided are in [admin-rule-proposal-demo.md](docs/admin-rule-proposal-demo.md).
 
 ### Local database
 

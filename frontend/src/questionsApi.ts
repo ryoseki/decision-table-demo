@@ -41,7 +41,13 @@ const NETWORK_UNCHANGED = "サーバーに接続できませんでした。デ�
 const NETWORK_UNKNOWN =
   "サーバーに接続できませんでした。反映されたかどうかを確認できていません。もう一度送るか、一覧を再読み込みして確認してください。";
 
-async function call(path: string, init?: RequestInit, networkMessage = NETWORK_UNCHANGED): Promise<unknown> {
+export async function call(
+  path: string,
+  init?: RequestInit,
+  networkMessage = NETWORK_UNCHANGED,
+  subject = "デモの設問一覧",
+  proposalName = "追加案",
+): Promise<unknown> {
   let response: Response;
   try {
     response = await fetch(path, init);
@@ -56,24 +62,24 @@ async function call(path: string, init?: RequestInit, networkMessage = NETWORK_U
     } catch {
       // 本文がJSONでない場合は、詳細なしで扱う。
     }
-    throw new ApiError(response.status, errorMessage(response.status, detail));
+    throw new ApiError(response.status, errorMessage(response.status, detail, subject, proposalName));
   }
   return response.json();
 }
 
-function errorMessage(status: number, detail: string): string {
+function errorMessage(status: number, detail: string, subject: string, proposalName: string): string {
   const suffix = detail === "" ? "" : `（${detail}）`;
   switch (status) {
     case 422:
-      return `AIの応答（モック）が検証で拒否されました${suffix}。デモの設問一覧は変わっていません。`;
+      return `AIの応答（モック）が検証で拒否されました${suffix}。${subject}は変わっていません。`;
     case 502:
-      return `AIの応答を得られませんでした${suffix}。デモの設問一覧は変わっていません。`;
+      return `AIの応答を得られませんでした${suffix}。${subject}は変わっていません。`;
     case 409:
-      return `${detail || "デモの設問一覧が変わっていたため、反映しませんでした"}。最新の一覧を表示しています。`;
+      return `${detail || `${subject}が変わっていたため、反映しませんでした`}。最新の一覧を表示しています。`;
     case 404:
-      return `${detail || "提案がありません"}。もう一度、追加案を作ってください。`;
+      return `${detail || "提案がありません"}。もう一度、${proposalName}を作ってください。`;
     default:
-      return `サーバーがエラーを返しました（HTTP ${status}）。デモの設問一覧は変わっていない可能性があります。`;
+      return `サーバーがエラーを返しました（HTTP ${status}）。${subject}は変わっていない可能性があります。`;
   }
 }
 

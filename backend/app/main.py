@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -14,6 +15,9 @@ from app import (
     question_admin,
     question_proposer,
     question_store,
+    rule_admin,
+    rule_proposer,
+    rule_store,
     rules,
 )
 
@@ -30,7 +34,14 @@ app.state.case_store = (
 # 実装はここで選んで渡す。HTTP層は共通の形（Protocol）だけを呼ぶ。
 app.state.question_proposer = question_proposer.MockQuestionProposer()
 app.state.question_store = question_store.InMemoryQuestionStore()
+# 判定ルールの追加案・削除案も同じ構成。ルールの一覧は、審査画面・案件のDBとは別の、
+# メモリ上のデモ用（再起動で初期化）。
+# 設問の廃止と判定ルールの承認は、割り込めないよう、同じロックで1つずつ順に決める。
+app.state.admin_lock = threading.Lock()
+app.state.rule_proposer = rule_proposer.MockRuleProposer()
+app.state.rule_store = rule_store.InMemoryRuleStore()
 app.include_router(question_admin.router)
+app.include_router(rule_admin.router)
 app.include_router(mock_api.router)
 app.include_router(intake.router)
 app.include_router(cases.router)

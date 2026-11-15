@@ -172,6 +172,24 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
 .proposal { margin: 16px 0; padding: 12px; border: 2px solid var(--accent); border-radius: var(--radius); background: var(--surface); }
 .diff { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
 .question-table th, .question-table td { padding: 8px 12px; }
+.target-badge { display: inline-block; margin: 0 0 8px; padding: 2px 10px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); font-weight: 600; }
+.condition { white-space: nowrap; }
+.rule-grid-scroll { overflow-x: auto; max-width: 100%; }
+.rule-grid-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.rule-grid th, .rule-grid td { white-space: nowrap; }
+.rule-grid th:nth-child(n+4), .rule-grid td:nth-child(n+4) { text-align: center; }
+/* 条件セルのYes／No。操作できない小さなラベル（幅・角丸は共通）。 */
+.answer-chip { display: inline-block; min-width: 2.75em; padding: 1px 8px; border-radius: 999px; font-size: 0.85rem; font-weight: 700; text-align: center; border: 1px solid transparent; }
+.answer-yes { background: var(--matched); color: #12452b; border-color: #a9d3bd; }
+.answer-no { background: #fff0e3; color: #6f2c0d; border-color: #efd2b9; }
+@media (max-width: 720px) {
+  /* 狭い画面でも、表のまま横スクロールで読む（他の表のカード表示にはしない）。 */
+  .case-table.rule-grid { display: table; width: max-content; min-width: 100%; }
+  .case-table.rule-grid thead { position: static; width: auto; height: auto; overflow: visible; clip: auto; display: table-header-group; }
+  .case-table.rule-grid tbody { display: table-row-group; }
+  .case-table.rule-grid tr { display: table-row; padding: 0; }
+  .case-table.rule-grid th, .case-table.rule-grid td { display: table-cell; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+}
 .row-added { background: #e3f3e9; box-shadow: inset 4px 0 0 var(--accent); }
 .added-label { margin-left: 8px; background: var(--accent); color: #fff; }
 .row-retired { background: #f1eaea; box-shadow: inset 4px 0 0 var(--pending); }

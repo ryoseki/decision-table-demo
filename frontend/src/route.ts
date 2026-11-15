@@ -1,11 +1,18 @@
 // 依存を増やさないため、ハッシュで画面を切り替える。
-// #/ は一覧、 #/cases/<案件ID> は詳細、 #/admin/questions は設問管理（デモ）。
-export type Route = { name: "list" } | { name: "detail"; caseId: string } | { name: "questions" };
+// #/ は一覧、 #/cases/<案件ID> は詳細、 #/admin/questions は設問管理（デモ）、
+// #/admin/rules は判定ルール管理（デモ）。
+export type Route =
+  | { name: "list" }
+  | { name: "detail"; caseId: string }
+  | { name: "questions" }
+  | { name: "rules" };
 
 export const QUESTIONS_HREF = "#/admin/questions";
+export const RULES_HREF = "#/admin/rules";
 
 export function parseHash(hash: string): Route {
   if (/^#\/admin\/questions\/?$/.test(hash)) return { name: "questions" };
+  if (/^#\/admin\/rules\/?$/.test(hash)) return { name: "rules" };
   const m = /^#\/cases\/([^/]+)\/?$/.exec(hash);
   if (m !== null) {
     try {

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import CaseDetail from "./CaseDetail";
 import CaseList, { type ListFilter } from "./CaseList";
 import QuestionAdmin from "./QuestionAdmin";
-import { QUESTIONS_HREF } from "./route";
+import RuleAdmin from "./RuleAdmin";
+import { QUESTIONS_HREF, RULES_HREF } from "./route";
 import { useRoute } from "./useRoute";
 
 export default function App() {
@@ -32,6 +33,7 @@ export default function App() {
         <nav className="app-nav" aria-label="メニュー">
           <a href="#/">案件一覧</a>
           <a href={QUESTIONS_HREF}>設問管理</a>
+          <a href={RULES_HREF}>判定ルール管理</a>
         </nav>
         <span className="tag">画面案（未承認） ／ 架空データ</span>
       </header>
@@ -39,6 +41,7 @@ export default function App() {
         {route.name === "list" && <CaseList filter={filter} onFilterChange={setFilter} />}
         {route.name === "detail" && <CaseDetail key={route.caseId} caseId={route.caseId} />}
         {route.name === "questions" && <QuestionAdmin />}
+        {route.name === "rules" && <RuleAdmin />}
       </main>
     </div>
   );

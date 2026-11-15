@@ -67,6 +67,28 @@ test("ヘッダーの「設問管理」から設問管理（デモ）へ入り�
   expect(screen.getByRole("link", { name: "案件一覧" }).getAttribute("href")).toBe("#/");
 });
 
+test("ヘッダーの「判定ルール管理」から判定ルール管理（デモ）へ入る。設問管理とは別の画面で、操作の対象が分かる", async () => {
+  render(<App />);
+  await screen.findByText("CASE-B");
+  const link = screen.getByRole("link", { name: "判定ルール管理" });
+  expect(link.getAttribute("href")).toBe("#/admin/rules");
+  const rule = { rule_id: "R01", revision: 1, result_code: "caution", conditions: { A01: "yes" } };
+  stubFetch({
+    "GET /api/admin/rules": { body: { revision: 1, rules: [rule] } },
+    "GET /api/admin/questions": { body: { revision: 1, questions: [{ id: "A01", text: "設問？" }] } },
+  });
+  goTo("#/admin/rules");
+  expect(screen.getByRole("heading", { name: "判定ルール管理（デモ）" })).toBeTruthy();
+  expect(screen.getByTestId("target").textContent).toBe("操作の対象: 判定ルール");
+  expect(await screen.findByText("R01")).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "設問管理（デモ）" })).toBeNull();
+
+  goTo("#/admin/questions");
+  expect(screen.getByRole("heading", { name: "設問管理（デモ）" })).toBeTruthy();
+  expect(screen.getByTestId("target").textContent).toBe("操作の対象: 設問");
+  expect(await screen.findByText("設問？")).toBeTruthy();
+});
+
 test("設問管理で作った未承認の追加案は、画面を切り替えて戻ると破棄され、現行の一覧は変わらない", async () => {
   const q = Array.from({ length: 12 }, (_, i) => ({ id: `A${String(i + 1).padStart(2, "0")}`, text: `設問${i + 1}？` }));
   const added = { id: "A13", text: "追加の設問？" };
@@ -94,6 +116,36 @@ test("設問管理で作った未承認の追加案は、画面を切り替え�
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(screen.queryByText("追加の設問？")).toBeNull();
   // 決定は一度も送っていない。
+  expect(spy.mock.calls.some(([url]) => String(url).endsWith("/decision"))).toBe(false);
+});
+
+test("判定ルール管理で作った未承認の案は、画面を切り替えて戻ると破棄され、現行の一覧は変わらない", async () => {
+  const rule = (id: string, conditions: Record<string, string>) => ({ rule_id: id, revision: 1, result_code: "caution", conditions });
+  const base = [rule("R01", { A01: "yes" })];
+  const added = rule("R02", { A09: "yes" });
+  const spy = stubFetch({
+    "GET /api/cases": { body: [apiRow({ case_id: "CASE-B" })] },
+    "GET /api/admin/rules": { body: { revision: 1, rules: base } },
+    "POST /api/admin/rule-proposals": {
+      status: 201,
+      body: { proposal_id: "p1", kind: "add", before: base, after: [...base, added], added },
+    },
+  });
+  render(<App />);
+  await screen.findByText("CASE-B");
+  goTo("#/admin/rules");
+  await screen.findByText("R01");
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "依頼" } });
+  fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+  await screen.findByTestId("proposal");
+
+  goTo("#/"); // 承認せずに別の画面へ
+  await screen.findByText("CASE-B");
+  expect(screen.queryByTestId("proposal")).toBeNull();
+  goTo("#/admin/rules");
+  await screen.findByText("R01");
+  expect(screen.queryByTestId("proposal")).toBeNull();
+  expect(screen.queryByText("R02")).toBeNull();
   expect(spy.mock.calls.some(([url]) => String(url).endsWith("/decision"))).toBe(false);
 });
 
