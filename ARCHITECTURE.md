@@ -6,16 +6,17 @@
 
 | 層 | モジュール | 役割 | 取り込んでよいもの |
 | --- | --- | --- | --- |
-| ドメイン | `domain`、`rule_matching`、`question_validation` | 定数・例外・ID生成・照合・設問案の検証。純粋で、DBにもHTTPにも依存しない | 標準ライブラリだけ（検査しているのは、`fastapi`・`starlette`・`pydantic`・`psycopg` と、アプリ内の他モジュールを取り込まないこと） |
+| ドメイン | `domain`、`rule_matching`、`question_validation`、`rule_validation` | 定数・例外・ID生成・照合・設問案とルール案の検証。純粋で、DBにもHTTPにも依存しない | 標準ライブラリだけ（検査しているのは、`fastapi`・`starlette`・`pydantic`・`psycopg` と、アプリ内の他モジュールを取り込まないこと） |
 | 保存先の実装 | `db_store`（PostgreSQL・Aurora DSQL）、`db_retry`（衝突の再試行） | SQL、トランザクション、DSQLのIAMトークン接続（boto3）、40001の再試行 | `domain`、`psycopg`、`boto3` |
-| 設問案の保存先・AIモック | `question_store`（メモリ）、`question_proposer`（モック） | デモの設問一覧と提案の保存・承認、AIの応答のモック。DBなし | `domain`、`question_validation`（型）、標準ライブラリ |
-| HTTP層 | `cases`、`intake`、`mock_api`、`question_admin`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
+| 設問案・ルール案の保存先・AIモック | `question_store`・`rule_store`（メモリ）、`question_proposer`・`rule_proposer`（モック） | デモの設問一覧・判定ルール一覧と提案の保存・承認、AIの応答のモック。DBなし | `domain`、`question_validation`・`rule_validation`（型）、標準ライブラリ |
+| HTTP層 | `cases`、`intake`、`mock_api`、`question_admin`、`rule_admin`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`rule_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`、`rule_admin` → `question_admin`） |
 | 組み立て | `main` | 保存先・AIモックを選び、ルーターをつなぐ | すべて |
 
 - 設問の廃止案（`docs/admin-question-proposal-demo.md`）: 廃止の参照・影響の判定は、純粋な関数（`question_validation` の `find_rule_references`・`find_case_impact`）で行い、ルールと案件は `question_admin` が `app.state.case_store` から読み取って渡す。廃止済みの設問は、`cases` が `app.state.question_store` の `retired_ids()` から読み取り、案件の応答に印を付ける（案件の保存データは変えない）。いずれも `app.main` が組み立てた保存先を、共通の形だけで呼ぶ。
-- HTTP層は、保存先の実装（`db_store`・`db_retry`）、設問案の保存先・AIモック（`question_store`・`question_proposer`）、`psycopg`、`boto3`（DSQLのIAMトークン）を取り込まない。保存先は、`main` で組み立て、`app.state`（`case_store`・`question_store`・`question_proposer`）から受け取る。
-- 保存先の実装は、HTTP層と `fastapi` を取り込まない。設問案の保存先・AIモックも、HTTP層・`fastapi`・`db_store`・`psycopg` を取り込まない（設問の追加案はDBなしで動く。`docs/admin-question-proposal-demo.md`）。
-- ドメインは、`fastapi`・`starlette`・`pydantic`・`psycopg`・他のアプリ内モジュールを取り込まない。
+- 判定ルールの追加案・削除案（`docs/admin-rule-proposal-demo.md`）: 検証（参照する設問・結果コード・重複・対象）は、純粋な関数（`rule_validation`）で行う。ルールの一覧は、案件の保存先（`case_store`。審査画面のルール）とは別の、メモリ上のデモ用（`app.state.rule_store`）に持ち、互いに影響しない。設問の一覧は `rule_admin` が `app.state.question_store` から読み取って検証に渡す。設問の廃止（`question_admin`）は、参照の確認で、`case_store` のルールに加えて `rule_store` のルールも数える（どちらも `app.main` が組み立てた保存先を、共通の形だけで呼ぶ）。ルール提案は、ルール一覧の版と設問一覧の版の両方を基準に持ち、どちらかが変わっていたYesは拒否する。設問の決定とルールの決定は、`app.state.admin_lock`（`app.main` が1つ置く）で1つずつ順に行い、設問の確認からルールの反映までの間に、設問の廃止が割り込めない（1プロセス内。`question_admin.admin_lock` が取り出し、`rule_admin` が同じものを使う）。
+- HTTP層は、保存先の実装（`db_store`・`db_retry`）、設問案・ルール案の保存先・AIモック（`question_store`・`question_proposer`・`rule_store`・`rule_proposer`）、`psycopg`、`boto3`（DSQLのIAMトークン）を取り込まない。保存先は、`main` で組み立て、`app.state`（`case_store`・`question_store`・`question_proposer`・`rule_store`・`rule_proposer`）から受け取る。
+- 保存先の実装は、HTTP層と `fastapi` を取り込まない。設問案・ルール案の保存先・AIモックも、HTTP層・`fastapi`・`db_store`・`psycopg` を取り込まない（設問の追加案・ルールの追加案はDBなしで動く。`docs/admin-question-proposal-demo.md`、`docs/admin-rule-proposal-demo.md`）。
+- ドメイン（`rule_validation` を含む）は、`fastapi`・`starlette`・`pydantic`・`psycopg`・他のアプリ内モジュールを取り込まない。
 - 検査: `docker compose run --rm --no-deps --build backend lint-imports`（`import-linter`。契約は `backend/pyproject.toml`）。契約の名前（違反時に表示される）に、直し方を書いている。
 
 ### 現状の課題（検査ではまだ強制していない）

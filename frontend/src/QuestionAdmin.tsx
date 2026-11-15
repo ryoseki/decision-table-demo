@@ -195,6 +195,8 @@ export default function QuestionAdmin() {
         <p className="lead">自然文で、設問の追加案を作り、変更前と変更後の差分を確認して、反映するかを決めます。</p>
       </div>
 
+      <p className="target-badge" data-testid="target">操作の対象: 設問</p>
+
       <p className="note note-top" data-testid="mock-note">
         <strong>モックです。</strong>AIの応答は、固定の規則で作った架空のもので、実際のAIには接続していません。
         反映先は、サーバーのメモリ上のデモの一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
