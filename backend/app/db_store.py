@@ -1,8 +1,9 @@
 """PostgreSQLによる案件の保存と再表示。docs/decision-support-schema.md のDDLに沿う。
 
 受付の2回の保存（CaseStore）と、［判定する］の一括保存・再表示を持つ。
-ここで確認できるのはローカルPostgreSQLまで。Aurora DSQL（IAMトークン接続、OCC再試行、
-カスタムロール）は未対応・未検証で、別Issueの範囲。
+接続先は2通り。DB_HOST ならローカルPostgreSQL（パスワード接続）、DSQL_ENDPOINT なら
+Aurora DSQL（IAMトークン接続）。書き込む操作は、衝突（SQLSTATE 40001）で再試行する
+（app.db_retry）。実Aurora DSQLでの確認は人の操作が要り、ここでは未検証。
 """
 
 import os
@@ -12,6 +13,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.db_retry import with_occ_retry
 from app.domain import (
     AUTO_ANSWER_KEYS,
     HUMAN_ANSWERS,
@@ -25,17 +27,49 @@ from app.domain import (
 
 
 def connect_from_env() -> psycopg.Connection:
-    """DB_HOSTなどの環境変数から接続する（ローカルPostgreSQL用。DSQLのトークン接続は別Issue）。"""
+    """環境変数から接続する。DSQL_ENDPOINTならDSQL、なければDB_HOSTのPostgreSQL。"""
     schema = os.environ.get("DB_SCHEMA", "")
-    return psycopg.connect(
+    options = f"-c search_path={schema}" if schema else None
+    endpoint = os.environ.get("DSQL_ENDPOINT")
+    if endpoint:
+        user = os.environ["DB_USER"]
+        return psycopg.connect(
+            host=endpoint,
+            port="5432",
+            dbname="postgres",
+            user=user,
+            password=_dsql_token(endpoint, user),
+            sslmode="require",
+            options=options,
+        )
+    conn = psycopg.connect(
         host=os.environ["DB_HOST"],
         port=os.environ.get("DB_PORT", "5432"),
         dbname=os.environ["DB_NAME"],
         user=os.environ["DB_USER"],
         password=os.environ["DB_PASSWORD"],
         sslmode=os.environ.get("DB_SSLMODE", "disable"),
-        options=f"-c search_path={schema}" if schema else None,
+        options=options,
     )
+    # Aurora DSQLの分離レベルはREPEATABLE READだけ。ローカルもそろえ、同時保存の衝突
+    # （40001）をローカルのPostgreSQLでも再現して、再試行を確認できるようにする。
+    conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+    return conn
+
+
+def _dsql_token(endpoint: str, user: str) -> str:
+    """接続のたびに、短時間有効なIAM認証トークンを作る（トークンは接続時だけ使う）。
+
+    資格情報は実行環境（Lambdaの実行ロールなど）から boto3 が取得する。
+    adminロールは管理者用、カスタムロールは通常用のトークン関数を使う。
+    """
+    import boto3  # DSQL接続のときだけ読み込む
+
+    region = os.environ.get("DSQL_REGION") or os.environ["AWS_REGION"]
+    client = boto3.client("dsql", region_name=region)
+    if user == "admin":
+        return client.generate_db_connect_admin_auth_token(endpoint, region)
+    return client.generate_db_connect_auth_token(endpoint, region)
 
 
 class PostgresCaseStore:
@@ -49,6 +83,7 @@ class PostgresCaseStore:
 
     # --- 受付（CaseStore） ---------------------------------------------------
 
+    @with_occ_retry
     def create_case(self, case: dict[str, Any]) -> str:
         """1回目の保存。案件・全設問のコピー・未判定の結果・自動回答対象の回答（pending）。"""
         case_id = new_case_id()
@@ -81,6 +116,7 @@ class PostgresCaseStore:
                 )
         return case_id
 
+    @with_occ_retry
     def set_auto_answer(self, case_id: str, question_code: str, answer: str) -> None:
         """2回目の保存。取得に成功したときだけ、answerとautomated_answerを入れる。"""
         with self._connect() as conn:
@@ -229,6 +265,7 @@ class PostgresCaseStore:
 
     # --- ［判定する］ ---------------------------------------------------------
 
+    @with_occ_retry
     def save_judgment(
         self,
         case_id: str,

@@ -7,13 +7,13 @@
 | 層 | モジュール | 役割 | 取り込んでよいもの |
 | --- | --- | --- | --- |
 | ドメイン | `domain`、`rule_matching`、`question_validation` | 定数・例外・ID生成・照合・設問案の検証。純粋で、DBにもHTTPにも依存しない | 標準ライブラリだけ（検査しているのは、`fastapi`・`starlette`・`pydantic`・`psycopg` と、アプリ内の他モジュールを取り込まないこと） |
-| 保存先の実装 | `db_store`（PostgreSQL） | SQLとトランザクション | `domain`、`psycopg` |
+| 保存先の実装 | `db_store`（PostgreSQL・Aurora DSQL）、`db_retry`（衝突の再試行） | SQL、トランザクション、DSQLのIAMトークン接続（boto3）、40001の再試行 | `domain`、`psycopg`、`boto3` |
 | 設問案の保存先・AIモック | `question_store`（メモリ）、`question_proposer`（モック） | デモの設問一覧と提案の保存・承認、AIの応答のモック。DBなし | `domain`、`question_validation`（型）、標準ライブラリ |
 | HTTP層 | `cases`、`intake`、`mock_api`、`question_admin`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
 | 組み立て | `main` | 保存先・AIモックを選び、ルーターをつなぐ | すべて |
 
 - 設問の廃止案（`docs/admin-question-proposal-demo.md`）: 廃止の参照・影響の判定は、純粋な関数（`question_validation` の `find_rule_references`・`find_case_impact`）で行い、ルールと案件は `question_admin` が `app.state.case_store` から読み取って渡す。廃止済みの設問は、`cases` が `app.state.question_store` の `retired_ids()` から読み取り、案件の応答に印を付ける（案件の保存データは変えない）。いずれも `app.main` が組み立てた保存先を、共通の形だけで呼ぶ。
-- HTTP層は、保存先の実装（`db_store`）、設問案の保存先・AIモック（`question_store`・`question_proposer`）と `psycopg` を取り込まない。保存先は、`main` で組み立て、`app.state`（`case_store`・`question_store`・`question_proposer`）から受け取る。
+- HTTP層は、保存先の実装（`db_store`・`db_retry`）、設問案の保存先・AIモック（`question_store`・`question_proposer`）、`psycopg`、`boto3`（DSQLのIAMトークン）を取り込まない。保存先は、`main` で組み立て、`app.state`（`case_store`・`question_store`・`question_proposer`）から受け取る。
 - 保存先の実装は、HTTP層と `fastapi` を取り込まない。設問案の保存先・AIモックも、HTTP層・`fastapi`・`db_store`・`psycopg` を取り込まない（設問の追加案はDBなしで動く。`docs/admin-question-proposal-demo.md`）。
 - ドメインは、`fastapi`・`starlette`・`pydantic`・`psycopg`・他のアプリ内モジュールを取り込まない。
 - 検査: `docker compose run --rm --no-deps --build backend lint-imports`（`import-linter`。契約は `backend/pyproject.toml`）。契約の名前（違反時に表示される）に、直し方を書いている。

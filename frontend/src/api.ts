@@ -31,6 +31,9 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
   } catch {
     throw new ApiError(0, "サーバーに接続できませんでした");
   }
+  if (response.status === 503) {
+    throw new ApiError(503, "サーバーが混み合っています。しばらくしてから、もう一度お試しください（HTTP 503）");
+  }
   if (!response.ok) throw new ApiError(response.status, `サーバーがエラーを返しました（HTTP ${response.status}）`);
   return response;
 }
@@ -147,11 +150,19 @@ export async function saveJudgment(
     body.rule_id = adopted.ruleId;
     body.rule_revision = adopted.revision;
   }
-  await request(`/api/cases/${encodeURIComponent(caseId)}/judgment`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  try {
+    await request(`/api/cases/${encodeURIComponent(caseId)}/judgment`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 503) {
+      // 保存先の衝突で、サーバー側の再試行を使い切った場合など。入力は画面に残っている。
+      throw new ApiError(503, `${error.message.replace("（HTTP 503）", "")}入力は残っています。（HTTP 503）`);
+    }
+    throw error;
+  }
 }
 
 /** 画面に出す、失敗の説明。 */
