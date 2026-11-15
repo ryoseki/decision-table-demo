@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { AnswerCounts } from "./AnswerCounts";
 import { ApiError, describeError, saveJudgment, type HumanAnswers } from "./api";
 import { StatusBadge } from "./Badges";
-import { statusOf, tally, type AdoptedRule, type Answer, type ResultName, type ReviewCase } from "./data/cases";
+import { answerLabel, statusOf, tally, type AdoptedRule, type Answer, type ResultName, type ReviewCase } from "./data/cases";
 import { questions, type QuestionId } from "./data/questions";
 import { RESULTS, canSkipQuestion, matchRules, type AnswerMap, type Rule, type RuleRow } from "./matching";
 import { useCase, useRules } from "./useApi";
@@ -80,8 +80,8 @@ export function Review({
   save: (result: ResultName, answers: HumanAnswers, adopted: AdoptedRule | null) => Promise<void>;
 }) {
   const [answers, setAnswers] = useState<AnswerMap>(c.answers);
-  // 保存済みの回答（開いたときの値。保存に成功したら更新する）。送るのは、これと違う設問だけ。
-  const [baseline, setBaseline] = useState<AnswerMap>(c.answers);
+  // 保存済みの回答（開いたときの値）。送るのは、これと違う設問だけ。登録は1回だけなので、保存後は更新しない。
+  const baseline = c.answers;
   const [edited, setEdited] = useState<ReadonlySet<QuestionId>>(new Set());
   // 行の開閉。初期は食い違わない行を開く。回答が変わったときだけ同じ規則で更新し、手動の開閉はそれまで保つ。
   const [open, setOpen] = useState<Record<string, boolean>>(() => openState(c.answers, rules));
@@ -102,6 +102,8 @@ export function Review({
   });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  // サーバーが「登録済み」（409）を返した。開き直さないかぎり、保存は必ず拒否されるので、押せなくする。
+  const [alreadyRecorded, setAlreadyRecorded] = useState(false);
 
   const rows = matchRules(answers, rules);
   const isAdopted = (rule: Rule) => adopted?.ruleId === rule.id && adopted.revision === rule.revision;
@@ -109,12 +111,20 @@ export function Review({
   const adoptedRow = adopted === null ? undefined : rows.find((r) => isAdopted(r.rule) && !r.gray);
   const effectiveAdopted = adoptedRow === undefined ? null : adopted;
   const matchingCount = rows.filter((r) => !r.gray).length;
-  const answeredCount = questions.filter((q) => answers[q.id] === "yes" || answers[q.id] === "no").length;
+  // 廃止済みの設問は、新たな回答の対象外（保存済みの設問文・回答は、下の別の一覧で読み取り専用に表示する）。
+  const retired = c.retiredQuestions ?? [];
+  const activeQuestions = questions.filter((q) => !retired.some((r) => r.id === q.id));
+  // 判定の登録は1回だけ（2026-11-15の合意）。登録済み（開いたときに結果がある、または、ここで保存に成功した）
+  // 案件は、保存済みの設問文・回答・結果を見るだけで、編集も再保存もできない。保存中も、操作を止める。
+  const locked = saved !== "";
+  const frozen = locked || saving;
+  const answeredCount = activeQuestions.filter((q) => answers[q.id] === "yes" || answers[q.id] === "no").length;
   const current = { ...c, answers };
   const counts = tally(current);
   const status = statusOf({ result: saved === "" ? undefined : saved, counts });
 
   const choose = (id: QuestionId, value: "yes" | "no") => {
+    if (frozen) return;
     const changed = answers[id] !== value;
     const next = { ...answers, [id]: value };
     setAnswers(next);
@@ -128,6 +138,7 @@ export function Review({
   };
 
   const toggleAdopt = (row: RuleRow) => {
+    if (frozen) return;
     // 採用できるのは通常表示の行だけ。グレーの行を採用しようとしたら、採用は外れる。
     if (row.gray || isAdopted(row.rule)) setAdopted(null);
     else setAdopted({ ruleId: row.rule.id, revision: row.rule.revision });
@@ -135,23 +146,23 @@ export function Review({
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (outcome === "" || saving) return; // 二重送信しない
+    if (outcome === "" || saving || locked || alreadyRecorded) return; // 二重送信しない。登録済みは送らない
     setSaving(true);
     setSaveError("");
     try {
       // 保存済みの値から変わった設問だけを送る（Yes・Noに限る。確認待ちが変わらない設問は送らない）。
       const changed: HumanAnswers = {};
-      for (const q of questions) {
+      for (const q of activeQuestions) {
         const value = answers[q.id];
         if ((value === "yes" || value === "no") && baseline[q.id] !== value) changed[q.id] = value;
       }
       await save(outcome, changed, effectiveAdopted);
       setSaved(outcome);
-      setBaseline(answers);
       setJustSaved(outcome);
     } catch (error) {
       // 失敗したときは、保存済みの表示を変えない。
       setJustSaved("");
+      if (error instanceof ApiError && error.status === 409) setAlreadyRecorded(true);
       setSaveError(describeError(error));
     } finally {
       setSaving(false);
@@ -179,18 +190,20 @@ export function Review({
       </div>
 
       <p className="note note-top" data-testid="save-note">
-        結果と、変更した回答は、［判定する］で保存されます。［判定する］を押さずに離れると、変更は保存されません（開き直すと、最後に保存した値に戻ります）。
+        {locked
+          ? "この案件は判定を登録済みです。保存済みの設問文・回答・結果を確認できます（閲覧のみ。回答の変更や再保存はできません）。"
+          : "結果と、変更した回答は、［判定する］で保存されます。［判定する］を押さずに離れると、変更は保存されません（開き直すと、最後に保存した値に戻ります）。登録は1回だけで、登録後は変更できません。"}
       </p>
 
       <div className="columns">
         <section className="pane" aria-labelledby="q-title">
           <div className="pane-head">
             <h3 id="q-title">設問と回答</h3>
-            <span role="status" data-testid="progress">{answeredCount}／{questions.length}問 入力済み</span>
+            <span role="status" data-testid="progress">{answeredCount}／{activeQuestions.length}問 入力済み</span>
           </div>
           <div className="pane-counts"><AnswerCounts counts={counts} /></div>
           <ol className="question-list">
-            {questions.map((q) => {
+            {activeQuestions.map((q) => {
               const a: Answer | undefined = answers[q.id];
               const optional = a === undefined && canSkipQuestion(q.id, answers, rules);
               const auto = c.autoQuestions?.includes(q.id) === true && !edited.has(q.id);
@@ -205,8 +218,8 @@ export function Review({
                     {optional && <span className="sr-only">（照合結果を絞り込むための回答は省略できます）</span>}
                   </span>
                   <div className="answers" role="group" aria-label={`${q.id} ${q.prompt}`}>
-                    <button type="button" aria-pressed={a === "yes"} onClick={() => choose(q.id, "yes")}>Yes</button>
-                    <button type="button" aria-pressed={a === "no"} onClick={() => choose(q.id, "no")}>No</button>
+                    <button type="button" aria-pressed={a === "yes"} disabled={frozen} onClick={() => choose(q.id, "yes")}>Yes</button>
+                    <button type="button" aria-pressed={a === "no"} disabled={frozen} onClick={() => choose(q.id, "no")}>No</button>
                   </div>
                   {a === "pending" && (
                     <p className="warn">
@@ -218,6 +231,25 @@ export function Review({
               );
             })}
           </ol>
+          {retired.length > 0 && (
+            <section className="retired-questions" aria-labelledby="retired-title" data-testid="retired-questions">
+              <h4 id="retired-title">廃止済みの設問（保存済みの内容）</h4>
+              <p className="hint" data-testid="retired-note">
+                {locked
+                  ? "登録時の結果と、保存済みの設問文・回答を表示しています。廃止した設問には、新たに回答できません。"
+                  : "最新のルールで照合します。廃止した設問は、新たな回答の対象外です。保存済みの設問文と回答は、このまま確認できます。"}
+              </p>
+              <ul>
+                {retired.map((r) => (
+                  <li key={r.id} data-testid={`retired-${r.id}`}>
+                    <strong className="q-id">{r.id}</strong> {r.prompt}
+                    <span className="badge retired-label">廃止済み</span>
+                    <span className="retired-answer" data-testid={`retired-answer-${r.id}`}> 保存済みの回答: {answerLabel(r.answer)}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </section>
 
         <section className="pane" aria-labelledby="r-title">
@@ -253,7 +285,7 @@ export function Review({
                     </div>
                   ))}
                 </dl>
-                {!gray && (
+                {!gray && !locked && (
                   <div className="rule-actions">
                     <button type="button" className="btn ghost" data-testid={`adopt-${rule.id}`} onClick={() => toggleAdopt(row)}>
                       {isAdopted(rule) ? "採用を外す" : "このルールを採用"}
@@ -279,6 +311,7 @@ export function Review({
                   <label>
                     <input
                       type="radio" name="outcome" value={r} required checked={outcome === r}
+                      disabled={frozen}
                       aria-describedby={hinted ? "outcome-hint" : undefined}
                       onChange={() => setOutcome(r)}
                     />
@@ -290,9 +323,20 @@ export function Review({
             })}
           </div>
         </fieldset>
-        <button className="btn action" type="submit" disabled={saving}>{saving ? "保存中…" : "判定する"}</button>
+        {locked ? (
+          <p className="note note-inline" data-testid="readonly-note">
+            判定は登録済みのため、［判定する］は使えません。結果と回答は、閲覧のみです。
+          </p>
+        ) : (
+          <button className="btn action" type="submit" disabled={saving || alreadyRecorded}>{saving ? "保存中…" : "判定する"}</button>
+        )}
         {justSaved !== "" && <p className="saved" role="status" data-testid="registered">保存しました。登録結果: {justSaved}</p>}
-        {saveError !== "" && <p className="error-inline" role="alert" data-testid="save-error">保存できませんでした。{saveError}。もう一度［判定する］を押してください。</p>}
+        {saveError !== "" && alreadyRecorded && (
+          <p className="error-inline" role="alert" data-testid="save-error">
+            この案件は、すでに判定が登録されているため、保存できませんでした（{saveError}）。一覧から開き直して、保存済みの内容を確認してください。
+          </p>
+        )}
+        {saveError !== "" && !alreadyRecorded && <p className="error-inline" role="alert" data-testid="save-error">保存できませんでした。{saveError}。もう一度［判定する］を押してください。</p>}
         <p className="note note-inline" data-testid="adopted-note">
           {effectiveAdopted === null
             ? "採用ルール: なし（参考の記録。結果を選んだだけでは記録されません）"

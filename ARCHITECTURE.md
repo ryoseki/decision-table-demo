@@ -12,6 +12,7 @@
 | HTTP層 | `cases`、`intake`、`mock_api`、`question_admin`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`） |
 | 組み立て | `main` | 保存先・AIモックを選び、ルーターをつなぐ | すべて |
 
+- 設問の廃止案（`docs/admin-question-proposal-demo.md`）: 廃止の参照・影響の判定は、純粋な関数（`question_validation` の `find_rule_references`・`find_case_impact`）で行い、ルールと案件は `question_admin` が `app.state.case_store` から読み取って渡す。廃止済みの設問は、`cases` が `app.state.question_store` の `retired_ids()` から読み取り、案件の応答に印を付ける（案件の保存データは変えない）。いずれも `app.main` が組み立てた保存先を、共通の形だけで呼ぶ。
 - HTTP層は、保存先の実装（`db_store`・`db_retry`）、設問案の保存先・AIモック（`question_store`・`question_proposer`）、`psycopg`、`boto3`（DSQLのIAMトークン）を取り込まない。保存先は、`main` で組み立て、`app.state`（`case_store`・`question_store`・`question_proposer`）から受け取る。
 - 保存先の実装は、HTTP層と `fastapi` を取り込まない。設問案の保存先・AIモックも、HTTP層・`fastapi`・`db_store`・`psycopg` を取り込まない（設問の追加案はDBなしで動く。`docs/admin-question-proposal-demo.md`）。
 - ドメインは、`fastapi`・`starlette`・`pydantic`・`psycopg`・他のアプリ内モジュールを取り込まない。

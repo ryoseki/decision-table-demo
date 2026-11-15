@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, StrictInt, StrictStr, model_validator
 
-from app.domain import CaseNotFound, InvalidJudgment, StoreBusy
+from app.domain import CaseNotFound, InvalidJudgment, JudgmentAlreadyRecorded, StoreBusy
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
@@ -44,23 +44,55 @@ def list_cases(request: Request) -> list[dict]:
     return _db_store(request).list_cases()
 
 
+def _retired_ids(request: Request) -> frozenset[str]:
+    """管理者が廃止した設問のID（メモリ上のデモの一覧。なければ空）。"""
+    questions = getattr(request.app.state, "question_store", None)
+    return questions.retired_ids() if questions is not None else frozenset()
+
+
 @router.get("/{case_id}")
 def get_case(case_id: str, request: Request) -> dict:
+    """保存済みの案件。廃止済みの設問は、保存済みの設問文・回答のまま retired を付ける。
+
+    廃止は、案件の保存データを変えない（読み出すときに印を付けるだけ）。
+    判定の登録の有無は judged（案件の結果の有無）。登録済みの案件は登録時の結果を、
+    未登録の案件は最新の判定ルール（GET /api/rules）で照合する。
+    """
     try:
-        return _db_store(request).get_case(case_id)
+        case = _db_store(request).get_case(case_id)
     except CaseNotFound:
         raise HTTPException(status_code=404, detail="案件がありません") from None
+    retired = _retired_ids(request)
+    return {
+        **case,
+        "judged": case.get("result") is not None,
+        "questions": [
+            {**q, "retired": q["question_code"] in retired} for q in case["questions"]
+        ],
+    }
 
 
 @router.put("/{case_id}/judgment", status_code=204)
 def save_judgment(case_id: str, body: JudgmentRequest, request: Request) -> None:
+    """未登録の案件への最初の1回だけ。登録済みは409で、結果も回答も変えない。"""
     adopted = (body.rule_id, body.rule_revision) if body.rule_id is not None else None
-    try:
-        _db_store(request).save_judgment(
-            case_id, body.result_code, body.answers, adopted
+    store = _db_store(request)
+    # 廃止済みの設問には、新たに回答できない（保存済みの回答は変えない）。
+    closed = sorted(set(body.answers) & _retired_ids(request))
+    if closed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"廃止済みの設問には回答できません: {', '.join(closed)}",
         )
+    try:
+        store.save_judgment(case_id, body.result_code, body.answers, adopted)
     except CaseNotFound:
         raise HTTPException(status_code=404, detail="案件がありません") from None
+    except JudgmentAlreadyRecorded:
+        raise HTTPException(
+            status_code=409,
+            detail="判定を登録済みの案件は、再保存できません（閲覧のみ）",
+        ) from None
     except InvalidJudgment as error:
         raise HTTPException(status_code=422, detail=str(error)) from None
     except StoreBusy:

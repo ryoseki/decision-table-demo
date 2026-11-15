@@ -29,6 +29,10 @@ class InvalidJudgment(Exception):
     """入力が保存の条件を満たさない（案件は変更しない）。"""
 
 
+class JudgmentAlreadyRecorded(Exception):
+    """判定を登録済みの案件。結果も回答も、再保存で変えられない（案件は変更しない）。"""
+
+
 class StoreBusy(Exception):
     """保存先が衝突（OCC。SQLSTATE 40001）で、決めた回数の再試行でも保存できなかった。
 
@@ -54,6 +58,15 @@ class ProposalNotFound(Exception):
 
 class ProposalConflict(Exception):
     """提案の基準にした一覧が、その後に変わっている。反映しない。"""
+
+
+class RetirementBlocked(Exception):
+    """廃止しようとした設問を、現行の判定ルールが参照している。廃止しない。"""
+
+    def __init__(self, question_id: str, references: tuple[str, ...]) -> None:
+        super().__init__(question_id)
+        self.question_id = question_id
+        self.references = references
 
 
 def new_case_id() -> str:

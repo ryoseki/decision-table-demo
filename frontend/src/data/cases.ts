@@ -25,7 +25,15 @@ export type ReviewCase = {
   result?: ResultName;
   /** 採用ルール（参考の記録）。採用していなければ undefined */
   adopted?: AdoptedRule;
+  /**
+   * 管理者が廃止した設問。新たな回答の対象外で、保存済みの設問文と回答を、読み取り専用で表示する。
+   * answers には入れない（回答の集計・照合に使わない）。
+   */
+  retiredQuestions?: readonly RetiredQuestion[];
 };
+
+/** 廃止済みの設問（案件が保存している設問文と回答）。answer がなければ未回答。 */
+export type RetiredQuestion = { id: string; prompt: string; answer?: Answer };
 
 /** 採用したルールの版。結果とは独立した、参考の記録。 */
 export type AdoptedRule = { ruleId: string; revision: number };
@@ -107,6 +115,14 @@ export function tally(c: ReviewCase): Tally {
     else t.unanswered += 1;
   }
   return t;
+}
+
+/** 保存済みの回答の表示名。未回答（回答の行がない）は null／undefined。 */
+export function answerLabel(answer: Answer | null | undefined): string {
+  if (answer === "yes") return "Yes";
+  if (answer === "no") return "No";
+  if (answer === "pending") return "確認待ち";
+  return "未回答";
 }
 
 /** 表示用の状態。登録結果の有無と、回答の集計（確認待ちの有無）から計算する。 */

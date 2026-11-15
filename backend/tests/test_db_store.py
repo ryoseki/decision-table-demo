@@ -19,6 +19,7 @@ import psycopg
 import psycopg.errors
 
 from app import db_retry, db_store
+from app.domain import JudgmentAlreadyRecorded
 from tests.test_intake import _Server, case_payload, make_app, send
 
 DOCS = Path(os.environ.get("DB_DOCS_DIR", "/repo/docs"))
@@ -312,14 +313,13 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(self.answers_of(view)["A09"], "pending")
         self.assertEqual(len(self.mock_calls), 1)
 
-    def test_example5_manual_no_overwrites_without_history(self):
+    def test_example5_manual_no_is_saved_with_the_result_without_history(self):
+        # 初回保存前に、確認待ちを手入力のNoで解消し、結果「問題なし」で保存する。
         with (
             mock.patch("app.intake.MOCK_TIMEOUT_SECONDS", 0.5),
             mock.patch("app.mock_api.FAULT_DELAY_SECONDS", 2.0),
         ):
             case_id, _ = self.intake("458", demo_controls={"fault_questions": ["A09"]})
-        status, _ = self.judge(case_id, {"result_code": "caution"})
-        self.assertEqual(status, 204)
         status, _ = self.judge(
             case_id, {"result_code": "no_issue", "answers": {"A09": "no"}}
         )
@@ -367,19 +367,20 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(self.answers_of(view)["A01"], "yes")
         self.assertEqual(view["result"]["result_code"], "account_suspension")
         self.assertEqual(len(self.mock_calls), 1)
-        # S15: 人がA09を変えても、受付時の自動回答は残る
+        # S15: 人がA09を変えて保存しても、受付時の自動回答は残る（別の案件の初回保存）
+        other, _ = self.intake("456")
         self.judge(
-            case_id, {"result_code": "account_suspension", "answers": {"A09": "no"}}
+            other, {"result_code": "account_suspension", "answers": {"A09": "no"}}
         )
         self.assertEqual(
             self.rows(
                 "SELECT answer, automated_answer FROM case_checks"
                 " WHERE case_id = %s AND question_code = 'A09'",
-                (case_id,),
+                (other,),
             ),
             [("no", "yes")],
         )
-        self.assertEqual(len(self.mock_calls), 1)
+        self.assertEqual(len(self.mock_calls), 2)  # 受付の2回だけ
 
     # --- 結果・採用ルール・検査 -------------------------------------------------------
 
@@ -394,7 +395,6 @@ class DbFlow(unittest.TestCase):
     def test_adopting_a_rule_that_does_not_exist_is_rejected_and_nothing_changes(self):
         self.add_rule("R01", 1)
         case_id, _ = self.intake("456")
-        self.judge(case_id, {"result_code": "caution"})
         before = self.get(case_id)
         for rule_id, revision in (("NO-SUCH-RULE", 1), ("R01", 2)):
             status, body = self.judge(
@@ -435,22 +435,12 @@ class DbFlow(unittest.TestCase):
         self.get(case_id)
         self.assertEqual(len(self.mock_calls), calls)  # 受付のときの呼び出しだけ
 
-    def test_resaving_without_an_adopted_rule_clears_it(self):
-        self.add_rule("R01", 1)
-        case_id, _ = self.intake("456")
-        self.judge(
-            case_id, {"result_code": "no_issue", "rule_id": "R01", "rule_revision": 1}
-        )
-        self.assertIsNotNone(self.get(case_id)["result"]["adopted_rule"])
-        self.judge(case_id, {"result_code": "no_issue"})
-        self.assertIsNone(self.get(case_id)["result"]["adopted_rule"])
-        self.assertEqual(self.get(case_id)["result"]["result_code"], "no_issue")
-
     def test_s9_s10_adopted_rule_is_recorded_only_when_given(self):
         self.add_rule("R01", 7)
+        without_rule, _ = self.intake("456")
+        self.judge(without_rule, {"result_code": "no_issue"})  # S9: 結果だけ
+        self.assertIsNone(self.get(without_rule)["result"]["adopted_rule"])
         case_id, _ = self.intake("456")
-        self.judge(case_id, {"result_code": "no_issue"})  # S9: 結果だけ
-        self.assertIsNone(self.get(case_id)["result"]["adopted_rule"])
         # S10: 採用ルールの結果と違う結果でも保存できる（参考の記録）
         status, _ = self.judge(
             case_id,
@@ -461,14 +451,72 @@ class DbFlow(unittest.TestCase):
             self.get(case_id)["result"]["adopted_rule"],
             {"rule_id": "R01", "rule_revision": 7},
         )
-        # 再保存で採用を渡さなければ、最新の状態として空になる
-        self.judge(case_id, {"result_code": "no_issue"})
-        self.assertIsNone(self.get(case_id)["result"]["adopted_rule"])
-        # 一方だけは422
+        # 一方だけは422（未登録の案件で確認する）
+        unregistered, _ = self.intake("456")
         for bad in ({"rule_id": "R"}, {"rule_revision": 1}):
             self.assertEqual(
-                self.judge(case_id, {"result_code": "no_issue", **bad})[0], 422
+                self.judge(unregistered, {"result_code": "no_issue", **bad})[0], 422
             )
+
+    # --- 登録済みの案件は再保存できない（2026-11-15の合意。旧「上書き」を置換） ---
+
+    def snapshot(self, case_id):
+        return (
+            self.rows(
+                "SELECT result_code, rule_id, rule_revision, recorded_by, recorded_at"
+                " FROM case_results WHERE case_id = %s",
+                (case_id,),
+            ),
+            self.rows(
+                "SELECT question_code, answer, automated_answer FROM case_checks"
+                " WHERE case_id = %s ORDER BY question_code",
+                (case_id,),
+            ),
+        )
+
+    def test_resaving_a_registered_case_is_409_and_stored_rows_do_not_change(self):
+        self.add_rule("R01", 1)
+        case_id, _ = self.intake("456")
+        self.judge(
+            case_id,
+            {
+                "result_code": "caution",
+                "rule_id": "R01",
+                "rule_revision": 1,
+                "answers": {"A01": "yes"},
+            },
+        )
+        before = self.snapshot(case_id)
+        view = self.get(case_id)
+        for payload in (
+            {"result_code": "caution", "answers": {"A01": "yes"}},  # 同じ内容の再送
+            {"result_code": "no_issue", "answers": {"A01": "no", "A02": "yes"}},
+            {"result_code": "no_issue"},  # 採用を渡さない再保存で、採用が消えない
+        ):
+            status, _ = self.judge(case_id, payload)
+            self.assertEqual(status, 409, payload)
+            self.assertEqual(self.snapshot(case_id), before)  # 登録日時も不変
+        self.assertEqual(self.get(case_id), view)
+
+    def test_a_stale_check_cannot_overwrite_a_registered_case(self):
+        # 保存先の事前の確認が古く（未登録に見え）ても、条件付きの更新が上書きを止める。
+        # ロックの待ち方に依存しない（PostgreSQLでもAurora DSQLでも成り立つ）。
+        case_id, _ = self.intake("456")
+        self.judge(case_id, {"result_code": "caution", "answers": {"A01": "yes"}})
+        before = self.snapshot(case_id)
+
+        class _StaleRead(_FailingConnection):
+            def execute(self, sql, *args):
+                if sql.lstrip().startswith("SELECT result_code FROM case_results"):
+                    return self._conn.execute("SELECT NULL::text")  # 未登録に見える
+                return self._conn.execute(sql, *args)
+
+        stale = db_store.PostgresCaseStore(
+            lambda: _StaleRead(_connect(self.schema), "")
+        )
+        with self.assertRaises(JudgmentAlreadyRecorded):
+            stale.save_judgment(case_id, "no_issue", {"A01": "no", "A02": "yes"}, None)
+        self.assertEqual(self.snapshot(case_id), before)  # 回答の行も不変
 
     def test_s14_undefined_result_code_is_rejected_and_nothing_changes(self):
         case_id, _ = self.intake("456")
@@ -607,10 +655,11 @@ class DbFlow(unittest.TestCase):
                 level = conn.execute("SHOW transaction_isolation").fetchone()
         self.assertEqual(level, ("repeatable read",))
 
-    def test_concurrent_saves_both_succeed_and_last_committed_wins(self):
-        """同じ案件の同時保存。後から入った側は、衝突（40001）を再試行で乗り越える。
+    def test_concurrent_saves_first_committed_stays_and_later_is_rejected(self):
+        """同じ案件の同時保存。後から入った側は、衝突（40001）を再試行したあと、
+        登録済みとして拒否される。先にコミットした側の結果と回答だけが残る。
 
-        確かめるのは「衝突したら再試行し、後の保存が残る」で、DSQLでも成り立つ。
+        確かめるのは「衝突したら再試行し、登録済みを上書きしない」で、DSQLでも成り立つ。
         衝突の起こし方（行ロックの待ちと、コミット後の40001）はPostgreSQL固有で、
         ローカルで衝突を再現するための手段にすぎない。実DSQLの挙動は確認していない。
 
@@ -657,11 +706,15 @@ class DbFlow(unittest.TestCase):
         release.set()
         thread_a.join(20)
         thread_b.join(20)
-        self.assertEqual(errors, [])
+        self.assertEqual(
+            [type(error) for error in errors],
+            [JudgmentAlreadyRecorded],
+            "先に確定したAは成功し、Bだけが登録済みで拒否される",
+        )
         self.assertGreaterEqual(counter[0], 2, "Bは衝突して再試行した")
         view = self.get(case_id)
-        self.assertEqual(view["result"]["result_code"], "no_issue", "後の保存が残る")
-        self.assertEqual(self.answers_of(view)["A01"], "no")
+        self.assertEqual(view["result"]["result_code"], "caution", "先の保存が残る")
+        self.assertEqual(self.answers_of(view)["A01"], "yes", "Bの回答は入らない")
 
     def test_s3_rejected_intake_creates_no_case_and_no_http(self):
         status, _ = send(

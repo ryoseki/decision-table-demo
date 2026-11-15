@@ -5,9 +5,28 @@ services:
     ports: !reset []
   backend:
     ports: !reset []
+  # E2E専用のシード（e2e/fixtures/seed_retirement_case.py）。この専用プロジェクトのDBにだけ、
+  # 参照のない架空の設問A13と、A13に保存済みの回答を持つ判定未登録の案件を入れる。通常の開発環境には入れない。
+  e2e-fixture:
+    build: ./backend
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: db
+      DB_NAME: "${DB_NAME:-decision_demo}"
+      DB_USER: "${DB_USER:-demo_admin}"
+      DB_PASSWORD: ""
+      PYTHONPATH: /app
+    volumes:
+      - ./e2e/fixtures:/fixtures:ro
+    command: ["python", "/fixtures/seed_retirement_case.py"]
+    restart: "no"
   e2e:
     build: ./e2e
     depends_on:
+      e2e-fixture:
+        condition: service_completed_successfully
       frontend:
         condition: service_healthy
       backend:

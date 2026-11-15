@@ -21,6 +21,7 @@ from app.domain import (
     RESULT_CODES,
     CaseNotFound,
     InvalidJudgment,
+    JudgmentAlreadyRecorded,
     new_case_id,
 )
 
@@ -280,6 +281,8 @@ class PostgresCaseStore:
         - 採用ルールは参考の記録で、渡されたときだけ入れる。
           結果を選んだだけでは入れない。decision_rules にない版は拒否する
           （結果と違うことは拒否しない）。
+        - 登録済み（result_code が入っている）の案件は、結果も回答も変えない
+          （JudgmentAlreadyRecorded）。登録できるのは、未登録の案件への1回だけ。
         - 失敗すれば結果も回答も保存されない。
         """
         if result_code not in RESULT_CODES:
@@ -288,16 +291,16 @@ class PostgresCaseStore:
             )
         rule_id, rule_revision = adopted_rule if adopted_rule else (None, None)
         with self._connect() as conn:
-            if (
-                conn.execute(
-                    # 同じ案件の同時保存を直列にする。確認待ちの遷移検査と更新の間に
-                    # 別の保存が割り込まないようにする（行ロックはコミットまで続く）。
-                    "SELECT 1 FROM case_results WHERE case_id = %s FOR UPDATE",
-                    (case_id,),
-                ).fetchone()
-                is None
-            ):
+            current = conn.execute(
+                # 同じ案件の同時保存を直列にする。確認待ちの遷移検査と更新の間に
+                # 別の保存が割り込まないようにする（行ロックはコミットまで続く）。
+                "SELECT result_code FROM case_results WHERE case_id = %s FOR UPDATE",
+                (case_id,),
+            ).fetchone()
+            if current is None:
                 raise CaseNotFound(case_id)
+            if current[0] is not None:
+                raise JudgmentAlreadyRecorded(case_id)
             # 採用ルールは参考の記録だが、decision_rules にない版は記録しない
             # （外部キーは持たないので、ここで検査する）。ルールは不変の行で
             # 削除もしないので、検査のあとで消えることはない。結果との一致は検査しない。
@@ -334,12 +337,18 @@ class PostgresCaseStore:
                     raise InvalidJudgment(f"{question_code}: pending にはできません")
                 if answer not in (*HUMAN_ANSWERS, "pending"):
                     raise InvalidJudgment(f"{question_code}: 回答が不正です")
-            conn.execute(
+            # 条件付きの更新: 未登録（result_code が NULL）のときだけ書く。ロックに
+            # 頼らず、競合した保存（OCCで後から来た側）も、登録済みを上書きしない。
+            # 0行なら、回答も書かずに戻す（with が例外でロールバックする）。
+            registered = conn.execute(
                 "UPDATE case_results SET result_code = %s, rule_id = %s,"
                 " rule_revision = %s,"
-                " recorded_by = %s, recorded_at = now() WHERE case_id = %s",
+                " recorded_by = %s, recorded_at = now()"
+                " WHERE case_id = %s AND result_code IS NULL",
                 (result_code, rule_id, rule_revision, OPERATOR_ID, case_id),
-            )
+            ).rowcount
+            if registered != 1:
+                raise JudgmentAlreadyRecorded(case_id)
             for question_code, answer in answers.items():
                 conn.execute(
                     "INSERT INTO case_checks (case_id, question_code, answer)"
