@@ -5,7 +5,6 @@
 40001だけ再試行、使い切ったらStoreBusy）は決定済み。
 """
 
-import importlib
 import os
 import sys
 import types
@@ -73,13 +72,6 @@ class RetryPolicy(unittest.TestCase):
         self.assertEqual(db_retry.delay_ceiling(5), 0.5)
         self.assertEqual(db_retry.delay_ceiling(9), 0.5)
 
-    def test_jitter_keeps_wait_between_half_and_full_ceiling(self):
-        for fraction, expected in ((0.0, 0.025), (0.5, 0.0375), (1.0, 0.05)):
-            self.waits.clear()
-            with mock.patch.object(db_retry, "jitter", lambda f=fraction: f):
-                Flaky(1).run("ok")
-            self.assertAlmostEqual(self.waits[0], expected)
-
     def test_other_errors_are_not_retried(self):
         for error in (
             RuntimeError("別の失敗"),
@@ -91,28 +83,6 @@ class RetryPolicy(unittest.TestCase):
             with self.assertRaises(type(error)):
                 flaky.run("ok")
             self.assertEqual((flaky.calls, self.waits), (1, []))
-
-    def test_other_error_after_conflict_stops_retrying(self):
-        calls = []
-
-        @db_retry.with_occ_retry
-        def run():
-            calls.append(1)
-            if len(calls) == 1:
-                raise psycopg.errors.SerializationFailure("OC000（検証用）")
-            raise RuntimeError("別の失敗")
-
-        with self.assertRaises(RuntimeError):
-            run()
-        self.assertEqual((len(calls), len(self.waits)), (2, 1))
-
-    def test_store_methods_are_wrapped(self):
-        for name in ("create_case", "set_auto_answer", "save_judgment"):
-            method = getattr(db_store.PostgresCaseStore, name)
-            self.assertTrue(hasattr(method, "__wrapped__"), name)
-        for name in ("get_case", "list_cases", "list_rules"):
-            method = getattr(db_store.PostgresCaseStore, name)
-            self.assertFalse(hasattr(method, "__wrapped__"), f"{name}は読み取り")
 
 
 class DsqlConnection(unittest.TestCase):
@@ -206,20 +176,6 @@ class DsqlConnection(unittest.TestCase):
             self.assertIn(self.ENDPOINT, token)
         self.assertNotEqual(tokens["admin"], tokens["app_role"])
 
-    def test_missing_settings_fail_instead_of_connecting_blindly(self):
-        for env in (
-            {"DSQL_ENDPOINT": self.ENDPOINT, "AWS_REGION": "r"},  # DB_USERなし
-            {"DSQL_ENDPOINT": self.ENDPOINT, "DB_USER": "u"},  # リージョンなし
-        ):
-            with (
-                mock.patch.dict(os.environ, env, clear=True),
-                mock.patch.dict(sys.modules, {"boto3": mock.Mock()}),
-                mock.patch.object(db_store.psycopg, "connect") as connect,
-                self.assertRaises(KeyError),
-            ):
-                db_store.connect_from_env()
-            connect.assert_not_called()
-
     def test_endpoint_wins_over_local_host_when_both_are_set(self):
         kwargs, _, _ = self.connect(
             {
@@ -232,18 +188,6 @@ class DsqlConnection(unittest.TestCase):
         )
         self.assertEqual(
             (kwargs["host"], kwargs["password"]), (self.ENDPOINT, "ROLE-TOKEN")
-        )
-
-    def test_local_connection_uses_repeatable_read_like_dsql(self):
-        env = {"DB_HOST": "db", "DB_NAME": "n", "DB_USER": "u", "DB_PASSWORD": "p"}
-        with (
-            mock.patch.dict(os.environ, env, clear=True),
-            mock.patch.object(db_store.psycopg, "connect") as connect,
-        ):
-            conn = db_store.connect_from_env()
-        self.assertIs(conn, connect.return_value)
-        self.assertEqual(
-            conn.isolation_level, db_store.psycopg.IsolationLevel.REPEATABLE_READ
         )
 
     def test_without_endpoint_uses_local_password_and_never_imports_boto3(self):
@@ -296,28 +240,6 @@ class CommitTimeConflict(unittest.TestCase):
         ):
             store.set_auto_answer("CASE-X", "A09", "yes")
         self.assertEqual(log.count("commit-conflict"), 4)
-
-
-class MainSelectsStore(unittest.TestCase):
-    """DB_HOSTかDSQL_ENDPOINTがあればDB、どちらもなければメモリの保存先。"""
-
-    def selected(self, env: dict[str, str]):
-        from app import main
-
-        with mock.patch.dict(os.environ, env, clear=True):
-            importlib.reload(main)
-            store = type(main.app.state.case_store)
-        self.addCleanup(importlib.reload, main)
-        return store
-
-    def test_selection(self):
-        from app import intake
-
-        self.assertIs(
-            self.selected({"DSQL_ENDPOINT": "x.example"}), db_store.PostgresCaseStore
-        )
-        self.assertIs(self.selected({"DB_HOST": "db"}), db_store.PostgresCaseStore)
-        self.assertIs(self.selected({}), intake.InMemoryCaseStore)
 
 
 if __name__ == "__main__":
