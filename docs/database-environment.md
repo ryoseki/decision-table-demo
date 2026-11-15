@@ -92,6 +92,21 @@ DSQL固有の制約（スキーマ案とアプリの保存処理で守る）:
 3. 保存処理案（結果の更新＋回答の更新）のcommitと再表示。変更後のDDLでも2026-11-12に成功。競合時の再試行（未実施）。
 4. DPUと保存量の実測（月0円は目標で、保証ではない）。
 
+## 公開環境のDBの初期化（`scripts/dsql-init.sh`。実DSQLでは未実行）
+
+実Aurora DSQLの専用スキーマに、テーブルと初期データを作る。管理者（admin）が、CloudShellなどで1回実行する。`scripts/dsql-verify.sh`（使い捨てのスキーマで検証して削除する）とは別。
+
+```bash
+DSQL_ENDPOINT=<クラスタID>.dsql.ap-northeast-1.on.aws DSQL_REGION=ap-northeast-1 \
+DB_SCHEMA=demo bash scripts/dsql-init.sh
+```
+
+- 専用スキーマを作り（なければ）、`docs/decision-support-schema.md`のDDLを依存順に1文ずつ適用し、設問12件と判定ルール3件（架空・承認済み）を入れる。書き込む前に、対象を表示して`yes`の入力を求める。
+- 何度実行しても壊れない。すでにあるテーブル・設問・ルールは、変更も削除もしない（再実行では何も追加されない）。DDLを更新したときの既存テーブルの変更は、このスクリプトの範囲外。
+- 次の2つを足すと、アプリ用のカスタムロールも作る（両方指定するか、両方省く）: `APP_DB_ROLE=app_role`、`APP_IAM_ROLE_ARN=arn:aws:iam::<アカウントID>:role/<Lambda実行ロール名>`。`CREATE ROLE ... WITH LOGIN`、`AWS IAM GRANT`、権限の付与を行う（構文はAWSの公式資料に従う）。権限は、スキーマの利用、案件系4テーブル（`review_cases`・`case_questions`・`case_results`・`case_checks`）の`SELECT, INSERT, UPDATE`、設問とルールの`SELECT`だけ。DDLと削除の権限は付けない。
+- 認証トークンは表示も保存もしない。
+- 確認した範囲: ローカルPostgreSQLで、スキーマ・テーブル・初期データの作成と、再実行で何も変わらないこと（2026-11-15）。**実DSQLでの実行、カスタムロールの作成・関連付け・権限付与（Aurora DSQL専用の構文）は未確認。**
+
 ## アプリの接続と再試行（2026-11-15実装。実DSQLでは未確認）
 
 接続（`backend/app/db_store.py`）:
