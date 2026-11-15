@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, StrictInt, StrictStr, model_validator
 
-from app.domain import CaseNotFound, InvalidJudgment
+from app.domain import CaseNotFound, InvalidJudgment, StoreBusy
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
@@ -63,3 +63,9 @@ def save_judgment(case_id: str, body: JudgmentRequest, request: Request) -> None
         raise HTTPException(status_code=404, detail="案件がありません") from None
     except InvalidJudgment as error:
         raise HTTPException(status_code=422, detail=str(error)) from None
+    except StoreBusy:
+        raise HTTPException(
+            status_code=503,
+            detail="保存先が混み合っています。入力は残っています。もう一度保存してください",
+            headers={"Retry-After": "1"},
+        ) from None

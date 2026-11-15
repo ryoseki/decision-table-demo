@@ -30,6 +30,7 @@ from app.domain import (
     RESULT_CODES,
     CaseNotFound,
     InvalidJudgment,
+    StoreBusy,
 )
 from tests.test_intake import _Server, case_payload, make_app, send
 
@@ -609,6 +610,86 @@ class WithoutDatabase(unittest.TestCase):
         self.assertEqual(
             send("PUT", f"{base}/judgment", {"result_code": "caution"})[0], 503
         )
+
+
+class BusyStore(ContractStore):
+    """衝突の再試行を使い切った保存先（StoreBusy）。保存は何も変わらない。"""
+
+    def create_case(self, case: dict) -> str:
+        raise StoreBusy("検証用")
+
+    def save_judgment(self, *args, **kwargs) -> None:
+        self.save_calls.append(args)
+        raise StoreBusy("検証用")
+
+
+class StoreBusyContract(unittest.TestCase):
+    """再試行を使い切ったとき、利用者には503（Retry-After付き）。入力は残す前提の文言。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mock_calls: list[str] = []
+        cls.store = BusyStore()
+        cls.server = _Server(make_app(cls.store, cls.mock_calls)).__enter__()
+        cls.env = mock.patch.dict(os.environ, {"MOCK_BASE_URL": cls.server.base_url})
+        cls.env.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env.stop()
+        cls.server.__exit__()
+
+    def put_judgment_raw(self) -> urllib.error.HTTPError:
+        return self.put_judgment()
+
+    def put_judgment(self) -> urllib.error.HTTPError:
+        request = urllib.request.Request(
+            f"{self.server.base_url}/api/cases/CASE-ANY/judgment",
+            data=json.dumps({"result_code": "caution"}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="PUT",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request)
+        return caught.exception
+
+    def test_save_judgment_busy_returns_503_with_retry_after(self):
+        error = self.put_judgment()
+        self.assertEqual(error.code, 503)
+        self.assertEqual(error.headers["Retry-After"], "1")
+        self.assertIn("混み合っています", json.loads(error.read())["detail"])
+        # 再試行は保存先の中の仕事。HTTP層は1回しか呼ばず、何も保存されない。
+        self.assertEqual(len(self.store.save_calls), 1)
+        self.assertEqual(self.store.cases, {})
+
+    def test_unknown_case_is_still_404_not_503(self):
+        """StoreBusyは衝突の使い切りだけ。案件がない・入力が不正は従来どおり。"""
+        with mock.patch.object(self.store, "save_judgment", side_effect=CaseNotFound):
+            error = self.put_judgment_raw()
+        self.assertEqual(error.code, 404)
+        with mock.patch.object(
+            self.store, "save_judgment", side_effect=InvalidJudgment("x")
+        ):
+            error = self.put_judgment_raw()
+        self.assertEqual(error.code, 422)
+
+    def test_intake_busy_returns_503_and_does_not_call_mock(self):
+        status, body = send(
+            "POST", f"{self.server.base_url}/api/intake/cases", case_payload("456")
+        )
+        self.assertEqual(status, 503)
+        self.assertIn("混み合っています", body["detail"])
+        self.assertEqual(self.mock_calls, [], "1回目の保存に失敗したらHTTPは呼ばない")
+        request = urllib.request.Request(
+            f"{self.server.base_url}/api/intake/cases",
+            data=json.dumps(case_payload("456")).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request)
+        self.assertEqual(caught.exception.headers["Retry-After"], "1")
+        self.assertEqual(self.store.cases, {})
 
 
 if __name__ == "__main__":

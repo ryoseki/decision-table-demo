@@ -122,6 +122,23 @@ test("保存に失敗したら、エラーを表示し、保存済みの表示�
   expect(screen.queryByTestId("save-error")).toBeNull();
 });
 
+test("保存が503（混み合っている）なら、その旨を表示し、選んだ結果を保ち、もう一度押せる", async () => {
+  save.mockRejectedValueOnce(
+    new ApiError(503, "サーバーが混み合っています。入力は残っています。しばらくしてから、もう一度お試しください（HTTP 503）"),
+  );
+  renderReview("CASE-B");
+  choose("注意");
+  submit();
+  const alert = await screen.findByTestId("save-error");
+  expect(alert.textContent).toContain("混み合っています");
+  expect(alert.textContent).toContain("入力は残っています");
+  expect(screen.queryByTestId("registered")).toBeNull();
+  expect((screen.getByRole("radio", { name: /注意/ }) as HTMLInputElement).checked).toBe(true); // 選んだ結果は残る
+  submit();
+  expect(await screen.findByTestId("registered")).toBeTruthy();
+  expect(save).toHaveBeenCalledTimes(2);
+});
+
 test("保存中は、ボタンを無効にして、二重に送信しない", async () => {
   let finish: () => void = () => {};
   save.mockReturnValueOnce(new Promise<void>((resolve) => (finish = resolve)));

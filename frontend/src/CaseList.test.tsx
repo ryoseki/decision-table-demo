@@ -98,6 +98,7 @@ test("取得に失敗したら、エラーを表示する（行は出さない�
   const alert = await screen.findByTestId("list-error");
   expect(alert.textContent).toContain("取得できませんでした");
   expect(alert.textContent).toContain("HTTP 503");
+  expect(alert.textContent).toContain("混み合っています");
   expect(screen.queryByRole("table")).toBeNull();
   expect(screen.queryByRole("searchbox")).toBeNull(); // 取得できていないときは、検索欄を出さない
 });

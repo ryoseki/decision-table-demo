@@ -81,6 +81,23 @@ test("保存: 422 などの拒否は ApiError にする", async () => {
   await expect(saveJudgment("CASE-X", "注意")).rejects.toMatchObject({ status: 422 });
 });
 
+test("保存: 503（保存先が混み合っている）は、混み合っている旨と、入力が残る旨を伝える", async () => {
+  stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 503, body: { detail: "x" } } });
+  const error = await saveJudgment("CASE-X", "注意").catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(ApiError);
+  expect((error as ApiError).status).toBe(503);
+  expect(describeError(error)).toContain("混み合っています");
+  expect(describeError(error)).toContain("入力は残っています");
+});
+
+test("取得: 503 は、混み合っている旨だけを伝える（保存の入力は無いので、入力が残る旨は言わない）", async () => {
+  stubFetch({ "GET /api/cases/CASE-X": { status: 503, body: { detail: "x" } } });
+  const error = await getCase("CASE-X").catch((e: unknown) => e);
+  expect((error as ApiError).status).toBe(503);
+  expect(describeError(error)).toContain("混み合っています");
+  expect(describeError(error)).not.toContain("入力は残っています");
+});
+
 test("ApiError でないものは、一般の文言にする", () => {
   expect(describeError(new Error("内部の詳細"))).toBe("予期しないエラーが発生しました");
 });

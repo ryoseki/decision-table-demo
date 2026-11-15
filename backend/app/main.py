@@ -18,10 +18,11 @@ from app import (
 )
 
 app = FastAPI(title="不正審査デモ API")
-# DB_HOST があればPostgreSQLに保存し、なければ開発用の仮のメモリ保存（受付のみ）にする。
+# DB_HOST（ローカルPostgreSQL）か DSQL_ENDPOINT（Aurora DSQL）があればDBに保存し、
+# なければ開発用の仮のメモリ保存（受付のみ）にする。
 app.state.case_store = (
     db_store.PostgresCaseStore()
-    if os.environ.get("DB_HOST")
+    if os.environ.get("DB_HOST") or os.environ.get("DSQL_ENDPOINT")
     else intake.InMemoryCaseStore()
 )
 # 管理者AIの試作（設問の追加案）。DBは使わない。

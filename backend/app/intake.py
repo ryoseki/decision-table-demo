@@ -26,7 +26,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.domain import AUTO_ANSWER_KEYS, new_case_id
+from app.domain import AUTO_ANSWER_KEYS, StoreBusy, new_case_id
 from app.mock_api import FAULT_TIMEOUT
 
 # 受付側のタイムアウト（ユーザー合意: 3秒）。
@@ -183,7 +183,14 @@ def intake_case(body: IntakeRequest, request: Request) -> dict:
     store: CaseStore = request.app.state.case_store
 
     case = body.model_dump(exclude={"demo_controls"}, mode="json")
-    case_id = store.create_case(case)  # 失敗すればHTTPは呼ばれない
+    try:
+        case_id = store.create_case(case)  # 失敗すればHTTPは呼ばれない
+    except StoreBusy:
+        raise HTTPException(
+            status_code=503,
+            detail="保存先が混み合っています。入力は残っています。もう一度受け付けてください",
+            headers={"Retry-After": "1"},
+        ) from None
 
     fault_questions = body.demo_controls.fault_questions if body.demo_controls else []
     answers = {code: "pending" for code in AUTO_ANSWER_KEYS}
