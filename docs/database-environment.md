@@ -1,6 +1,6 @@
 # DBの接続・スキーマ適用環境
 
-2026-11-11更新。ローカルはDocker ComposeのPostgreSQL、AWS側はAurora DSQLです。**ローカルPostgreSQLでの成功は、Aurora DSQLへの適合を示しません。** 適用するDDLは[スキーマ案](decision-support-schema.md)で、最終版ではありません。
+2026-11-16更新。ローカルはDocker ComposeのPostgreSQL、AWS側はAurora DSQLです。**ローカルPostgreSQLでの成功は、Aurora DSQLへの適合を示しません。** 適用するDDLは[スキーマ案](decision-support-schema.md)で、最終版ではありません。
 
 ## 状況
 
@@ -57,9 +57,9 @@ docker compose exec db psql -U demo_admin -d decision_demo
 
 ドライバーは`backend/`のロックとは分けています。アプリの保存処理を実装する担当が、Lambda ZIPのビルド環境での互換性（ネイティブ依存）を確認してから`backend/`へ取り込みます。
 
-## Aurora DSQLの接続（専用スキーマでの検証は2026-11-11と2026-11-12に成功。上記以外は未検証）
+## Aurora DSQLの接続（専用スキーマでの検証は2026-11-11と2026-11-12に成功。カスタムロールでの接続・保存・再表示は2026-11-15に確認。OCCなどは未検証）
 
-接続と専用スキーマでのDDL・保存の検証は実機で成功しました（状況の表を参照）。以下のうち、OCC・上限・カスタムロールなどは実機では未確認で、AWSの公式資料に基づく設計です。
+接続と専用スキーマでのDDL・保存の検証は実機で成功しました（状況の表を参照）。カスタムロールでの接続・保存・再表示も、2026-11-15に実機で確認されています（利用者が提示した記録による）。以下のうち、OCC・上限などは実機では未確認で、AWSの公式資料に基づく設計です。
 
 - 接続先は`<クラスタID>.dsql.<リージョン>.on.aws`、データベースは`postgres`（クラスタに1つ）。リージョンは東京（`ap-northeast-1`）と回答済み。
 - パスワードの代わりに、IAMで署名した一時トークンを使う。既定の有効期限は15分で、接続後はトークンが切れても接続は有効。接続は最長60分で切れる。
@@ -71,6 +71,17 @@ docker compose exec db psql -U demo_admin -d decision_demo
   DSQL_ENDPOINT=<クラスタID>.dsql.ap-northeast-1.on.aws DSQL_REGION=ap-northeast-1 bash scripts/dsql-verify.sh
   ```
 - 資格情報はコードやGitに書かず、実行環境のIAMロールなどで安全に渡す。
+
+### カスタムロールの権限（最小権限の方針）
+
+公式資料（[認証と認可](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/authentication-authorization.html)。2026-11-16に本文確認）に基づく方針です。
+
+- **管理者**（`dsql:DbConnectAdmin`を持つ利用者）だけが、カスタムロールの作成、IAMとの関連付け（`AWS IAM GRANT`）、DBの権限の付与を行う。アプリは管理者ロールを使わない。
+- **Lambdaの実行ロール**に付けるDSQLの権限は、対象クラスタに限った`dsql:DbConnect`だけにする。`dsql:DbConnectAdmin`や、クラスタの作成・変更・削除の操作は付けない。
+- **DB側の権限**は、受付・判定の保存・再表示に必要な分だけを付与する。2026-11-16に管理者がDBカタログで確認した27/27件（利用者が提示した記録による。Claude Codeが直接実行した観測ではない）は、付与されるべき権限と、付いていないべき権限の両方の確認を含む。付与されるのは、専用スキーマの`USAGE`、案件系4表の`SELECT`・`INSERT`・`UPDATE`、設問とルールの2表の`SELECT`。付いていないのは、対象スキーマの`CREATE`と、テーブルの`DELETE`。27件の内訳（許可と不許可の件数）は提示された記録にないため、ここには書かない。
+- **配布設定との関係**: `infra/cd/deploy-policy.json`にDSQLやIAMの操作は含まれないため、この方針と配布設定は競合しない（2026-11-16にこのリポジトリのファイルを直接確認。AWS上の実際のIAMを確認したものではない）。配布設定にDSQLの権限を足すときは、別途レビューする。
+- 文書・Git・Issueには、クラスタの識別子、ARN、アカウントID、トークン、資格情報を記載しない。
+- 未実施: AWS上のIAMの再監査と再試験。
 
 ## DSQLでの注意（公式資料）と、実機で確認すること
 
@@ -105,7 +116,7 @@ DB_SCHEMA=demo bash scripts/dsql-init.sh
 - 何度実行しても壊れない。すでにあるテーブル・設問・ルールは、変更も削除もしない（再実行では何も追加されない）。DDLを更新したときの既存テーブルの変更は、このスクリプトの範囲外。
 - 次の2つを足すと、アプリ用のカスタムロールも作る（両方指定するか、両方省く）: `APP_DB_ROLE=app_role`、`APP_IAM_ROLE_ARN=arn:aws:iam::<アカウントID>:role/<Lambda実行ロール名>`。`CREATE ROLE ... WITH LOGIN`、`AWS IAM GRANT`、権限の付与を行う（構文はAWSの公式資料に従う）。権限は、スキーマの利用、案件系4テーブル（`review_cases`・`case_questions`・`case_results`・`case_checks`）の`SELECT, INSERT, UPDATE`、設問とルールの`SELECT`だけ。DDLと削除の権限は付けない。
 - 認証トークンは表示も保存もしない。
-- 確認した範囲: ローカルPostgreSQLで、スキーマ・テーブル・初期データの作成と、再実行で何も変わらないこと（2026-11-15）。実Aurora DSQLでは、同日に管理者がCloudShellで実行し、スキーマ・6テーブル・初期データの作成、カスタムロールの作成、IAMロールとの関連付け、最小限の権限の付与が成功した（利用者が提示した出力の末尾による。Claude Codeが直接実行した観測ではない）。再実行（2回目）と、カスタムロールの権限がDDLなどを含まないことの実機での確認は未実施。
+- 確認した範囲: ローカルPostgreSQLで、スキーマ・テーブル・初期データの作成と、再実行で何も変わらないこと（2026-11-15）。実Aurora DSQLでは、同日に管理者がCloudShellで実行し、スキーマ・6テーブル・初期データの作成、カスタムロールの作成、IAMロールとの関連付け、最小限の権限の付与が成功した（利用者が提示した出力の末尾による。Claude Codeが直接実行した観測ではない）。再実行（2回目）は未実施。カスタムロールの権限は、2026-11-16に管理者がDBカタログで27/27件を確認した（「カスタムロールの権限」を参照）。
 
 ## アプリの接続と再試行（2026-11-15実装。実DSQLでは未確認）
 
@@ -129,7 +140,7 @@ DB_SCHEMA=demo bash scripts/dsql-init.sh
 - 確認（ローカル）: 偽の衝突での再試行・回数・待ち時間・上限、40001以外は再試行しないこと、再試行しても保存が二重にならないこと（DB）、REPEATABLE READでの同時保存の衝突と再試行、偽のboto3でのトークン接続、HTTP 503、画面の文言。
 - 確認（実機。2026-11-15。利用者が提示した出力による。Claude Codeが直接実行した観測ではない）: Lambda（エイリアス`demo`）から、カスタムロール（IAMトークン）でAurora DSQLに接続し、受付（201。自動回答A09のモック呼び出しを含む）、再表示（200）、判定の保存と再表示（保存した結果・記録者・記録日時）が成功した。関数URLへ署名付き（SigV4）で直接アクセスして確認した。
 - 実機で分かったこと: 最初のCDは、新しい版のスモーク確認で、画面のJSの読み込みが429になり失敗し、前の版へ自動で戻った。予約済み同時実行数を1から3に変更して、2回目のCDは成功した。
-- 未確認: 公開URL（CloudFront）経由の受付・保存（許可メソッドが`GET`・`HEAD`・`OPTIONS`だけで、POST・PUTは403。書き込みの公開経路は別途設計が必要）、画面（ブラウザ）からの保存、実機でのOCCの挙動と再試行、カスタムロールの権限がDDLなどを含まないことの実機での確認、Lambda上での`import boto3`以外の起動時間への影響、費用・使用量。
+- 未確認: 公開URL（CloudFront）経由の受付・保存（許可メソッドが`GET`・`HEAD`・`OPTIONS`だけで、POST・PUTは403。書き込みの公開経路は別途設計が必要）、画面（ブラウザ）からの保存、実機でのOCCの挙動と再試行、Lambda上での`import boto3`以外の起動時間への影響、費用・使用量。
 - 確認で作った架空の案件が、公開環境のDBに1件ある（アプリ用ロールには削除の権限がない。消すなら管理者が行う）。
 
 ## 再開の条件
@@ -138,7 +149,7 @@ DB_SCHEMA=demo bash scripts/dsql-init.sh
 - AWSアカウント、クラスタ作成、接続用IAM権限、費用についての人の承認。配布環境の初回構築とは重複しないよう調整する。
 - 資格情報は実行環境で安全に提供する。チャットやGitには載せない。
 
-## 参照した公式資料（2026-11-08確認）
+## 参照した公式資料（2026-11-08確認。「認証と認可」は2026-11-16にも本文を確認）
 
 - [PostgreSQLからの移行と互換性](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-postgresql-compatibility-unsupported-features.html)
 - [対応データ型](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-postgresql-compatibility-supported-data-types.html)
