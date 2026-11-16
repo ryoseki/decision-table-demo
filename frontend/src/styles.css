@@ -190,6 +190,11 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
   .case-table.rule-grid tr { display: table-row; padding: 0; }
   .case-table.rule-grid th, .case-table.rule-grid td { display: table-cell; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 }
+/* 生成元の表示。モックと実接続は、文字で区別する（枠の色は補助）。 */
+.source-badge { margin: 4px 0 12px; padding: 6px 12px; border: 1px solid var(--line-strong); border-left-width: 4px; border-radius: 4px; background: var(--surface-alt); color: var(--text); }
+.source-bedrock { border-left-color: var(--accent); background: var(--accent-soft); }
+.source-mock { border-left-color: var(--muted); }
+.source-detail { color: var(--muted); }
 .row-added { background: #e3f3e9; box-shadow: inset 4px 0 0 var(--accent); }
 .added-label { margin-left: 8px; background: var(--accent); color: #fff; }
 .row-retired { background: #f1eaea; box-shadow: inset 4px 0 0 var(--pending); }

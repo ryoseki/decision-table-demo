@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ApiError, describeError } from "./api";
 import { createRuleProposal, decideRuleProposal, type DemoRuleList, type DemoRuleRow, type RuleProposal } from "./rulesApi";
 import { QUESTION_IDS } from "./matching";
+import { AiNote, SourceBadge } from "./SourceBadge";
 import { useDemoRules } from "./useApi";
 
 type ListState = { status: "loading" } | { status: "ok"; data: DemoRuleList } | { status: "error"; message: string };
@@ -95,7 +96,7 @@ function RuleTable({
 }
 
 // 判定ルール管理（デモ）。設問管理と同じ流れ（依頼 → 差分 → Yes／No）で、操作の対象が判定ルール。
-// AIの応答はモックで、反映先はサーバーのメモリ上のデモのルール一覧（DB・審査画面のルールではない）。
+// AIの応答は、既定はモック（サーバーの設定でAmazon Bedrockの実接続にもなる）。反映先はサーバーのメモリ上のデモのルール一覧（DB・審査画面のルールではない）。
 export default function RuleAdmin() {
   const [version, setVersion] = useState(0);
   const remote = useDemoRules(version);
@@ -136,7 +137,7 @@ export default function RuleAdmin() {
     setError("");
     try {
       const result = await decideRuleProposal(proposal.proposalId, decision);
-      setLatest({ revision: result.revision, rules: result.rules });
+      setLatest({ revision: result.revision, rules: result.rules, source: result.source });
       setProposal(null);
       const removing = proposal.kind === "remove";
       setNotice(
@@ -168,7 +169,7 @@ export default function RuleAdmin() {
       <p className="target-badge" data-testid="target">操作の対象: 判定ルール</p>
 
       <p className="note note-top" data-testid="mock-note">
-        <strong>モックです。</strong>AIの応答は、固定の規則で作った架空のもので、実際のAIには接続していません。
+        <AiNote source={list.status === "ok" ? list.data.source : null} failed={list.status === "error"} />
         反映先は、サーバーのメモリ上のデモのルール一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
         審査画面で照合に使うルール、案件、データベースは変わりません。
         ルールが参照する設問・結果は、アプリが検証します（存在しない設問、定義にない結果、重複するルールは拒否します）。
@@ -209,6 +210,7 @@ export default function RuleAdmin() {
       {proposal !== null && (
         <section className="proposal" aria-labelledby="rule-diff-title" data-testid="proposal">
           <h3 id="rule-diff-title">判定ルールの{proposal.kind === "remove" ? "削除案" : "追加案"}の確認（まだ反映していません）</h3>
+          <SourceBadge source={proposal.source} />
           <div className="diff">
             <RuleTable title="Before（現行）" rules={proposal.before} removedId={proposal.kind === "remove" ? proposal.targetId : undefined} />
             <RuleTable title="After（反映した場合）" rules={proposal.after} addedId={proposal.kind === "add" ? proposal.targetId : undefined} />

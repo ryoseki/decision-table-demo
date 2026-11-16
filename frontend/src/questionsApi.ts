@@ -2,11 +2,12 @@
 // 失敗は ApiError にそろえ、画面に出す文言（message）を、原因ごとに変える。
 import { ApiError } from "./api";
 import type { Answer } from "./data/cases";
+import { toSource, type GenerationSource } from "./generationSource";
 import { resultNameOf } from "./resultCodes";
 
 /** 廃止した設問は、一覧に残り、retired が true になる（設問文は保持）。 */
 export type DemoQuestion = { id: string; text: string; retired?: boolean };
-export type DemoQuestionList = { revision: number; questions: DemoQuestion[] };
+export type DemoQuestionList = { revision: number; questions: DemoQuestion[]; source: GenerationSource };
 /** 追加案。kind は持たない（既存の形のまま）。 */
 export type AddProposal = {
   kind?: undefined;
@@ -14,6 +15,8 @@ export type AddProposal = {
   before: DemoQuestion[];
   after: DemoQuestion[];
   addedId: string;
+  /** この提案を作った生成元（モックか、実接続か）。 */
+  source: GenerationSource;
 };
 /** 廃止案の、参照しているルール（現行の最新の版）。 */
 export type RuleReference = { ruleId: string; revision: number; result: string };
@@ -26,6 +29,7 @@ export type RetireProposal = {
   after: DemoQuestion[];
   retiredId: string;
   retiredText: string;
+  source: GenerationSource;
   references: RuleReference[];
   /** 参照が0件のときだけ true。false なら、Yesでも廃止されない。 */
   canRetire: boolean;
@@ -71,7 +75,9 @@ function errorMessage(status: number, detail: string, subject: string, proposalN
   const suffix = detail === "" ? "" : `（${detail}）`;
   switch (status) {
     case 422:
-      return `AIの応答（モック）が検証で拒否されました${suffix}。${subject}は変わっていません。`;
+      return `AIの応答が検証で拒否されました${suffix}。${subject}は変わっていません。`;
+    case 504:
+      return `AIの応答がタイムアウトしました${suffix}。${subject}は変わっていません。時間をおいて、もう一度試してください。`;
     case 502:
       return `AIの応答を得られませんでした${suffix}。${subject}は変わっていません。`;
     case 409:
@@ -83,9 +89,13 @@ function errorMessage(status: number, detail: string, subject: string, proposalN
   }
 }
 
-type ApiList = { revision: number; questions: DemoQuestion[] };
+type ApiList = { revision: number; questions: DemoQuestion[]; source?: unknown };
 
-const toList = (b: ApiList): DemoQuestionList => ({ revision: b.revision, questions: b.questions });
+const toList = (b: ApiList): DemoQuestionList => ({
+  revision: b.revision,
+  questions: b.questions,
+  source: toSource(b.source),
+});
 
 export async function getDemoQuestions(): Promise<DemoQuestionList> {
   return toList((await call("/api/admin/questions")) as ApiList);
@@ -111,16 +121,17 @@ export async function createQuestionProposal(prompt: string): Promise<QuestionPr
       after: b.after,
       retiredId: b.retired.id,
       retiredText: b.retired.text,
+      source: toSource(b.source),
       references: b.references.map((r) => ({ ruleId: r.rule_id, revision: r.revision, result: resultNameOf(r.result_code) })),
       canRetire: b.can_retire,
       impact: { unjudged: b.impact.unjudged.map(toImpact), judged: b.impact.judged.map(toImpact) },
     };
   }
-  return { proposalId: b.proposal_id, before: b.before, after: b.after, addedId: b.added.id };
+  return { proposalId: b.proposal_id, before: b.before, after: b.after, addedId: b.added.id, source: toSource(b.source) };
 }
 
 type ApiImpactCase = { case_id: string; summary: string; answer: Answer | null; result_code?: string };
-type ApiProposal = { proposal_id: string; before: DemoQuestion[]; after: DemoQuestion[] } & (
+type ApiProposal = { proposal_id: string; before: DemoQuestion[]; after: DemoQuestion[]; source?: unknown } & (
   | { kind?: "add"; added: DemoQuestion }
   | {
       kind: "retire";

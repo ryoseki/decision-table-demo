@@ -11,6 +11,7 @@ import {
   type RetireProposal,
 } from "./questionsApi";
 import { detailHref } from "./route";
+import { AiNote, SourceBadge } from "./SourceBadge";
 import { useDemoQuestions } from "./useApi";
 
 type ListState = { status: "loading" } | { status: "ok"; data: DemoQuestionList } | { status: "error"; message: string };
@@ -123,7 +124,7 @@ function RetirementDetail({ proposal }: { proposal: RetireProposal }) {
   );
 }
 
-// 設問管理（デモ）。AIの応答はモックで、反映先はサーバーのメモリ上のデモ一覧（DBではない）。
+// 設問管理（デモ）。AIの応答は、既定はモック（サーバーの設定でAmazon Bedrockの実接続にもなり、生成元は画面に出す）。反映先はサーバーのメモリ上のデモ一覧（DBではない）。
 // 追加案のプレビューは、この画面の状態だけに持つ。再読み込みすると破棄される（一覧は変わらない）。
 export default function QuestionAdmin() {
   // 一覧は、サーバーから取得したもの（remote）。Yes・Noの応答で最新が分かったときは、それを優先する（latest）。
@@ -165,7 +166,7 @@ export default function QuestionAdmin() {
     setError("");
     try {
       const result = await decideQuestionProposal(proposal.proposalId, decision);
-      setLatest({ revision: result.revision, questions: result.questions });
+      setLatest({ revision: result.revision, questions: result.questions, source: result.source });
       setProposal(null);
       const retiring = proposal.kind === "retire";
       setNotice(
@@ -198,7 +199,7 @@ export default function QuestionAdmin() {
       <p className="target-badge" data-testid="target">操作の対象: 設問</p>
 
       <p className="note note-top" data-testid="mock-note">
-        <strong>モックです。</strong>AIの応答は、固定の規則で作った架空のもので、実際のAIには接続していません。
+        <AiNote source={list.status === "ok" ? list.data.source : null} failed={list.status === "error"} />
         反映先は、サーバーのメモリ上のデモの一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
         案件の設問・回答、データベースは変わりません。
         設問を廃止すると、案件の画面では、その設問が新たな回答の対象から外れます（保存済みの設問文と回答は残ります）。
@@ -239,6 +240,7 @@ export default function QuestionAdmin() {
       {proposal !== null && (
         <section className="proposal" aria-labelledby="diff-title" data-testid="proposal">
           <h3 id="diff-title">{proposal.kind === "retire" ? "廃止案" : "追加案"}の確認（まだ反映していません）</h3>
+          <SourceBadge source={proposal.source} />
           <div className="diff">
             <QuestionTable title="Before（現行）" questions={proposal.before} />
             {proposal.kind === "retire" ? (

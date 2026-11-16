@@ -1,0 +1,29 @@
+# Amazon Bedrock の実接続を、手元で試すときだけ重ねる設定（人の確認用）。
+#   docker compose -f compose.yaml -f compose.bedrock.yaml up --build
+# E2E（scripts/e2e.sh）・CI・公開環境では使わない。既定（compose.yaml だけ）は、モックのまま。
+# 詳細は docs/bedrock-connection.md。
+#
+# 課金の回避を防ぐため、frontend・backend のポートを、この端末の 127.0.0.1 だけに限る。
+# 基本の compose.yaml は、全ホスト（0.0.0.0）へ公開するため、`ports` を !override で置き換える
+# （Compose の既定は、リストの追記。置き換えないと、同じLANの他の端末から、認証・回数制限なしで
+# 実接続の提案を呼べる）。実効の設定は、`docker compose -f compose.yaml -f compose.bedrock.yaml
+# config --format json` で確認する。
+#
+# 値は、起動するシェルの環境変数から渡す。このファイルにも、Gitにも、資格情報を書かない。
+# リージョンとモデルは、既定値を持たない（未設定なら、起動前に失敗する）。
+# 資格情報（AWS_ACCESS_KEY_ID など）は、値を書かない形で、シェルの環境変数をそのまま渡す。
+# 一時的な資格情報を使い、使い終わったらシェルから消す。
+services:
+  frontend:
+    ports: !override
+      - "127.0.0.1:5173:5173"
+  backend:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    environment:
+      AI_PROVIDER: bedrock
+      BEDROCK_REGION: "${BEDROCK_REGION:?BEDROCK_REGION を指定してください}"
+      BEDROCK_MODEL_ID: "${BEDROCK_MODEL_ID:?BEDROCK_MODEL_ID を指定してください}"
+      AWS_ACCESS_KEY_ID:
+      AWS_SECRET_ACCESS_KEY:
+      AWS_SESSION_TOKEN:

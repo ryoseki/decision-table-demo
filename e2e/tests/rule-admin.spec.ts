@@ -31,6 +31,7 @@ test("判定ルールの追加案: 存在しない設問は検証エラーで変
   await expect(page.getByRole("heading", { name: "判定ルール管理（デモ）" })).toBeVisible();
   await expect(page.getByTestId("target")).toHaveText("操作の対象: 判定ルール"); // 設問ではなく、判定ルールを操作する画面
   await expect(page.getByTestId("mock-note")).toContainText("モックです");
+  await expect(page.getByTestId("mock-note")).not.toContainText("実接続です");
   const current = page.getByRole("region", { name: "現行のデモの判定ルール一覧" });
   await expect(current.getByRole("row")).toHaveCount(4); // 見出し + R01〜R03
   const initial = await demoRules();
@@ -63,6 +64,9 @@ test("判定ルールの追加案: 存在しない設問は検証エラーで変
   await expect(added).toContainText("A10=No");
   await expect(added).toHaveClass(/row-added/);
   await expect(page.getByText("反映しますか？")).toBeVisible();
+  // 生成元: 既定のモックで動いたことが、差分の確認画面に出る（Bedrockの実接続とは区別される）。
+  await expect(page.getByTestId("source-badge")).toHaveAttribute("data-source", "mock");
+  await expect(page.getByTestId("source-badge")).toContainText("生成元: モック");
   expect(await demoRules()).toEqual(initial); // 承認前は変わらない
   await page.getByRole("button", { name: "No" }).click();
   await expect(page.getByTestId("proposal")).toHaveCount(0);

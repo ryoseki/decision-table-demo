@@ -13,10 +13,10 @@ root_package = "app"
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "HTTP層（cases・intake・mock_api・question_admin・rule_admin・rules）は、DB用モジュール（db_store・db_retry）、設問の保存先とAIモックの実装（question_store・question_proposer）、psycopg、boto3（DSQLのIAMトークン）を取り込まない。直し方: 例外・定数・ID生成は app.domain に置いて取り込む。保存先やAIモックは、app.main で組み立てて app.state（case_store・question_store・question_proposer）から受け取り、HTTP層は共通の形（save_judgment などのメソッド、Protocol）だけを呼ぶ。詳細は ARCHITECTURE.md"
+name = "HTTP層（cases・intake・mock_api・question_admin・rule_admin・rules）は、DB用モジュール（db_store・db_retry）、設問の保存先とAIモックの実装（question_store・question_proposer）、psycopg、boto3・botocore（DSQLのIAMトークンとBedrockの実接続）を取り込まない。直し方: 例外・定数・ID生成・生成元の型は app.domain に置いて取り込む。保存先やAIの生成（モック・Bedrock）は、app.main で組み立てて app.state（case_store・question_store・question_proposer）から受け取り、HTTP層は共通の形（save_judgment などのメソッド、Protocol）だけを呼ぶ。詳細は ARCHITECTURE.md"
 type = "forbidden"
 source_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rule_admin", "app.rules"]
-forbidden_modules = ["app.db_store", "app.db_retry", "app.question_store", "app.question_proposer", "app.rule_store", "app.rule_proposer", "psycopg", "boto3"]
+forbidden_modules = ["app.db_store", "app.db_retry", "app.question_store", "app.question_proposer", "app.rule_store", "app.rule_proposer", "app.bedrock_proposer", "psycopg", "boto3", "botocore"]
 
 [[tool.importlinter.contracts]]
 name = "DB用モジュール（db_store・db_retry）は、HTTP層（cases・intake・mock_api・question_admin・rule_admin・rules）と fastapi を取り込まない。直し方: 共有する定数・例外は app.domain に置いて取り込む。HTTPの都合（ステータス、リクエストの型）は HTTP層に置く。詳細は ARCHITECTURE.md"
@@ -25,13 +25,13 @@ source_modules = ["app.db_store", "app.db_retry"]
 forbidden_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rule_admin", "app.rules", "fastapi"]
 
 [[tool.importlinter.contracts]]
-name = "ドメイン（domain）、照合（rule_matching）、設問案の検証（question_validation）、ルール案の検証（rule_validation）は、fastapi・starlette・pydantic・psycopg と、他のアプリ内モジュールを取り込まない。直し方: フレームワークやDBの都合を持ち込まず、純粋な関数・定数・例外だけにする。必要なものは呼び出し側から引数で渡す。詳細は ARCHITECTURE.md"
+name = "ドメイン（domain）、照合（rule_matching）、設問案の検証（question_validation）、ルール案の検証（rule_validation）は、fastapi・starlette・pydantic・psycopg と、他のアプリ内モジュール、AWS SDK（boto3・botocore）を取り込まない。直し方: フレームワークやDBやAWSの都合を持ち込まず、純粋な関数・定数・例外だけにする。必要なものは呼び出し側から引数で渡す。詳細は ARCHITECTURE.md"
 type = "forbidden"
 source_modules = ["app.domain", "app.rule_matching", "app.question_validation", "app.rule_validation"]
-forbidden_modules = ["fastapi", "starlette", "pydantic", "psycopg", "app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rules", "app.db_store", "app.db_retry", "app.question_store", "app.question_proposer", "app.rule_admin", "app.rule_store", "app.rule_proposer"]
+forbidden_modules = ["fastapi", "starlette", "pydantic", "psycopg", "app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rules", "app.db_store", "app.db_retry", "app.question_store", "app.question_proposer", "app.rule_admin", "app.rule_store", "app.rule_proposer", "app.bedrock_proposer", "boto3", "botocore"]
 
 [[tool.importlinter.contracts]]
-name = "設問案の保存先（question_store）・ルール案の保存先（rule_store）と、AIモック（question_proposer・rule_proposer）は、HTTP層・fastapi・DB用モジュール（db_store）・psycopg を取り込まない。直し方: HTTPの都合は app.question_admin に置き、共有する例外は app.domain、検証と型は app.question_validation に置く。この2つはDBなしで動く（DB接続は別Issue）。詳細は ARCHITECTURE.md"
+name = "設問案の保存先（question_store）・ルール案の保存先（rule_store）と、AIの生成（モックの question_proposer・rule_proposer、Bedrock実接続の bedrock_proposer）は、HTTP層・fastapi・DB用モジュール（db_store）・psycopg を取り込まない。直し方: HTTPの都合は app.question_admin に置き、共有する例外は app.domain、検証と型は app.question_validation に置く。この2つはDBなしで動く（DB接続は別Issue）。詳細は ARCHITECTURE.md"
 type = "forbidden"
-source_modules = ["app.question_store", "app.question_proposer", "app.rule_store", "app.rule_proposer"]
+source_modules = ["app.question_store", "app.question_proposer", "app.rule_store", "app.rule_proposer", "app.bedrock_proposer"]
 forbidden_modules = ["app.cases", "app.intake", "app.mock_api", "app.question_admin", "app.rule_admin", "app.rules", "app.db_store", "fastapi", "psycopg"]

@@ -10,7 +10,8 @@
 - 提案は1回で使い切る。未知・使用済みは404、基準のルール一覧または設問一覧の版が
   変わっていたときは409（部分反映しない。設問の変更を無関係とは見なさない）。
 - 設問の決定（question_admin）とルールの決定は、admin_lock で1つずつ順に行う。
-- AIの応答を得られないときは502（成功した応答に見せない）。
+- AIの応答を得られないときは502（待ち時間の超過は504）。AIの出力が使えない形なら422。
+  どれも成功した応答に見せず、モックへの代替もしない。応答には生成元（source）を付ける。
 """
 
 from typing import Any, Protocol
@@ -22,8 +23,15 @@ from app.domain import (
     ProposalConflict,
     ProposalNotFound,
     ProposerUnavailable,
+    source_of,
 )
-from app.question_admin import DecisionRequest, ProposalRequest, admin_lock
+from app.question_admin import (
+    DecisionRequest,
+    ProposalRequest,
+    admin_lock,
+    notice,
+    unavailable_error,
+)
 from app.question_validation import DemoQuestion
 from app.rule_validation import (
     DemoRule,
@@ -37,7 +45,10 @@ router = APIRouter(prefix="/api/admin", tags=["admin-rules"])
 
 
 class RuleProposer(Protocol):
-    """提案の生成の境界。モックと、後の実接続（別Issue）が、この形に従う。"""
+    """提案の生成の境界。モックと、Bedrockの実接続（bedrock_proposer）が従う。
+
+    生成元は、属性 source（GenerationSource）で申告する。
+    """
 
     def generate(
         self,
@@ -46,7 +57,8 @@ class RuleProposer(Protocol):
         next_id: str,
         questions: tuple[DemoQuestion, ...],
     ) -> Any:
-        """生の出力を返す。応答を得られなければ ProposerUnavailable。"""
+        """生の出力を返す。応答を得られなければ ProposerUnavailable、
+        出力が使えない形なら InvalidProposal。"""
 
 
 class RuleStore(Protocol):
@@ -78,15 +90,14 @@ def _rows(rules: tuple[DemoRule, ...]) -> list[dict[str, Any]]:
     return [_row(r) for r in rules]
 
 
-def _notice() -> dict[str, Any]:
-    # 画面に「モックであること」と保存の範囲を出すための情報。
-    return {"mock": True, "persistence": "memory"}
-
-
 @router.get("/rules")
 def list_rules(request: Request) -> dict[str, Any]:
     revision, rules = request.app.state.rule_store.snapshot()
-    return {"revision": revision, "rules": _rows(rules), **_notice()}
+    return {
+        "revision": revision,
+        "rules": _rows(rules),
+        **notice(request, "rule_proposer"),
+    }
 
 
 @router.post("/rule-proposals", status_code=201)
@@ -101,10 +112,10 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
         raw = proposer.generate(
             body.prompt, current, next_rule_id(current, removed), questions
         )
-    except ProposerUnavailable:
-        raise HTTPException(
-            status_code=502, detail="AIの応答を得られませんでした（モック）"
-        ) from None
+    except ProposerUnavailable as error:
+        raise unavailable_error(error, source_of(proposer)) from None
+    except InvalidProposal as error:  # 実接続の出力が、JSONとして読めないなど
+        raise HTTPException(status_code=422, detail=str(error)) from None
     try:
         proposal = validate_rule_output(
             raw,
@@ -127,7 +138,7 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
         "before": _rows(proposal.base),
         "after": _rows(proposal.after),
         **detail,
-        **_notice(),
+        **notice(request, "rule_proposer"),
     }
 
 
@@ -153,7 +164,7 @@ def _decide(
                 "applied": False,
                 "revision": revision,
                 "rules": _rows(rules),
-                **_notice(),
+                **notice(request, "rule_proposer"),
             }
         proposal = store.pending(proposal_id)
         # 提案は、ルール一覧の版と設問一覧の版を1つの基準にしている。設問の版が変わって
@@ -177,4 +188,9 @@ def _decide(
             status_code=409,
             detail="判定ルールの一覧が提案の後に変わったため、反映しませんでした",
         ) from None
-    return {"applied": True, "revision": revision, "rules": _rows(rules), **_notice()}
+    return {
+        "applied": True,
+        "revision": revision,
+        "rules": _rows(rules),
+        **notice(request, "rule_proposer"),
+    }
