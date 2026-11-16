@@ -23,6 +23,7 @@ test("一覧: 結果コードを表示名に、条件を設問IDと回答の並�
         ],
       },
     ],
+    source: { kind: "mock" },
   });
 });
 
@@ -87,4 +88,31 @@ test("エラー: 409は詳細を使い、404は作り直しを案内する", asy
   const notFound = ((await decideRuleProposal("p2", "yes").catch((e: unknown) => e)) as ApiError).message;
   expect(notFound).toContain("もう一度、案を作ってください");
   expect(notFound).not.toContain("追加案");
+});
+
+test("生成元: 一覧と提案から source を読む。実接続はモデルとリージョンを持ち、欠落はモック扱い", async () => {
+  const source = { kind: "bedrock", model_id: "demo.model-v1:0", region: "region-demo-1" };
+  stubFetch({
+    "GET /api/admin/rules": { body: { revision: 1, rules: [apiRule], source } },
+    "POST /api/admin/rule-proposals": {
+      status: 201,
+      body: { proposal_id: "p1", kind: "add", before: [], after: [apiRule], added: apiRule, source },
+    },
+  });
+  const expected = { kind: "bedrock", modelId: "demo.model-v1:0", region: "region-demo-1" };
+  expect((await getDemoRules()).source).toEqual(expected);
+  expect((await createRuleProposal("追加")).source).toEqual(expected);
+  stubFetch({ "POST /api/admin/rule-proposals": { status: 201, body: { proposal_id: "p1", kind: "add", before: [], after: [], added: apiRule } } });
+  expect((await createRuleProposal("追加")).source).toEqual({ kind: "mock" });
+});
+
+test("失敗の文言（504・502）: 判定ルールの一覧は変わっていないと伝え、モックとは言わない", async () => {
+  for (const [status, detail] of [[504, "AIの応答がタイムアウトしました"], [502, "AIのサービスに接続できませんでした"]] as const) {
+    stubFetch({ "POST /api/admin/rule-proposals": { status, body: { detail } } });
+    const error = (await createRuleProposal("x").catch((e: unknown) => e)) as ApiError;
+    expect(error.status).toBe(status);
+    expect(error.message).toContain(detail);
+    expect(error.message).toContain("判定ルールの一覧は変わっていません");
+    expect(error.message).not.toContain("モック");
+  }
 });

@@ -8,15 +8,14 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app import (
+    bedrock_proposer,
     cases,
     db_store,
     intake,
     mock_api,
     question_admin,
-    question_proposer,
     question_store,
     rule_admin,
-    rule_proposer,
     rule_store,
     rules,
 )
@@ -30,15 +29,19 @@ app.state.case_store = (
     else intake.InMemoryCaseStore()
 )
 # 管理者AIの試作（設問の追加案）。DBは使わない。
-# 生成はモック、保存はメモリ上（再起動で初期化）。
+# 生成は、既定はモック。AI_PROVIDER=bedrock のときだけ、Bedrockの実接続
+# （リージョン・モデルは BEDROCK_REGION・BEDROCK_MODEL_ID で明示）。
+# 設定が不正なら起動時に失敗し、黙ってモックには戻さない。
+# 保存はメモリ上（再起動で初期化）。
 # 実装はここで選んで渡す。HTTP層は共通の形（Protocol）だけを呼ぶ。
-app.state.question_proposer = question_proposer.MockQuestionProposer()
+app.state.question_proposer, app.state.rule_proposer = bedrock_proposer.build_proposers(
+    os.environ
+)
 app.state.question_store = question_store.InMemoryQuestionStore()
 # 判定ルールの追加案・削除案も同じ構成。ルールの一覧は、審査画面・案件のDBとは別の、
 # メモリ上のデモ用（再起動で初期化）。
 # 設問の廃止と判定ルールの承認は、割り込めないよう、同じロックで1つずつ順に決める。
 app.state.admin_lock = threading.Lock()
-app.state.rule_proposer = rule_proposer.MockRuleProposer()
 app.state.rule_store = rule_store.InMemoryRuleStore()
 app.include_router(question_admin.router)
 app.include_router(rule_admin.router)

@@ -11,13 +11,13 @@
 | Yes／No | Yesだけがデモの一覧へ反映する。Noは閉じるだけで変えない。成功は、行の表示と「デモの設問一覧に反映しました」で示す |
 | 仮保存 | 反映した設問は、バックエンドのメモリに持つ。画面の再読み込みでは残り、バックエンドの再起動で初期状態（A01〜A12）に戻る。未承認のプレビューは再読み込みで破棄する |
 | 例 | 架空の依頼「APIキーの失効履歴を確認する設問を追加して」→ 設問A13 |
-| 対象外 | 案件の設問・回答の変更、DB、設問の削除（廃止は下の節）、判定ルールの編集、Bedrock |
+| 対象外 | 案件の設問・回答の変更、DB、設問の削除（廃止は下の節）、判定ルールの編集、DBへの永続保存。Bedrockの実接続は [bedrock-connection.md](bedrock-connection.md)（既定はモックのまま） |
 
 ## 境界（`backend/app`、層は [ARCHITECTURE.md](../ARCHITECTURE.md)）
 
 | 境界 | モジュール | 役割 |
 | --- | --- | --- |
-| 提案の生成 | `question_proposer`（`MockQuestionProposer`） | 依頼から、AIの生の出力（辞書）を返す。モック。実接続（別課題）は同じ `generate` の形で差し替える |
+| 提案の生成 | `question_proposer`（`MockQuestionProposer`）、`bedrock_proposer`（`BedrockQuestionProposer`） | 依頼から、AIの生の出力（辞書）を返す。既定はモック。Bedrockの実接続は、同じ `generate` の形で差し替える（サーバーの設定。[bedrock-connection.md](bedrock-connection.md)）。生成元は属性 `source` で申告する |
 | 検証 | `question_validation` | 純粋な関数。生の出力の形式・追加してよいID・重複・必須項目を確かめ、検証済みの提案（基準の版と一覧つき）にする |
 | 承認と保存 | `question_store`（`InMemoryQuestionStore`） | 検証済みの提案と、デモの一覧を持つ。承認（版の比較と反映）をロックの中で1回にまとめて行う |
 | HTTP | `question_admin` | 入力の型、ステータスへの対応。生成と保存の実装は `main` が `app.state` に置き、ここは Protocol だけを呼ぶ |
@@ -28,14 +28,15 @@
 
 | エンドポイント | 内容 |
 | --- | --- |
-| `GET /api/admin/questions` | デモの一覧（`revision`、`questions`、`mock`、`persistence`） |
+| `GET /api/admin/questions` | デモの一覧（`revision`、`questions`、`mock`、`persistence`、`source`） |
 | `POST /api/admin/question-proposals` | `{prompt}` から追加案を作る（201）。応答は `proposal_id`、`before`、`after`、`added`。**一覧は変えない** |
 | `POST /api/admin/question-proposals/{id}/decision` | `{decision: "yes" \| "no"}`。Yesだけが反映する。応答は `applied` と最新の一覧 |
 
 | ステータス | 場合 |
 | --- | --- |
 | 422 | 依頼が不正（空・長すぎる）／AIの出力が検証を満たさない（形式、許されないID、重複、必須項目）／`decision` が不正。現行データは変えない |
-| 502 | AIの応答を得られない（接続エラー）。成功した応答に見せない |
+| 502 | AIの応答を得られない（接続エラー、権限、混雑など）。成功した応答に見せない。実接続のときは、原因ごとの固定の文言（SDKの文言は返さない） |
+| 504 | AIの応答がタイムアウトした（実接続）。成功した応答に見せない |
 | 404 | 提案が未知、または承認・却下済み（再利用できない） |
 | 409 | 提案の後に一覧が変わっている（基準の版が違う）。反映しない |
 
@@ -103,12 +104,12 @@
 ## モックと実接続
 
 - AIの応答は、「廃止」と設問ID（例: A13）を含む依頼にその設問の廃止案を、「失効」と「APIキー」を含む依頼にA13の追加案を返し、それ以外の依頼には操作のない出力を返す（検証で拒否される）。実際のAIではない。
-- Bedrockの実接続は別課題（P4）。この試作では行わない。
+- Bedrockの実接続は、サーバーの設定（`AI_PROVIDER=bedrock`、`BEDROCK_REGION`、`BEDROCK_MODEL_ID`）で選ぶ。既定はモック。実接続でも、出力は同じ検証（形式・ID・重複・対象）を通し、失敗・不正な出力を成功に見せず、モックにも戻さない。応答に `source`（`{kind: "mock"}` か、`{kind: "bedrock", model_id, region}`）を付け、画面の差分に生成元を出す。設定、費用の注意、確認の記録は [bedrock-connection.md](bedrock-connection.md)。実際のBedrockでの確認は、人が行う（未確認）。
 
 ## 未決・未確認（確定していない）
 
 - 本番の仕様: 設問の過去版の保持、物理削除、廃止の永続保存の形式は、確定していない。上の「設問の廃止案」は、デモのメモリ上の挙動で、実環境の運用（承認の担当、進行中の案件への適用方法など）を決めたものではない。
-- 設問の削除（物理削除）、判定ルールの編集、Bedrockの実接続（P4）、DBへの永続保存は、この範囲に含まない。判定ルールの追加案・削除案は、別の文書 [admin-rule-proposal-demo.md](admin-rule-proposal-demo.md) にある（設問の廃止の参照の確認は、そのデモのルールも数える）。
+- 設問の削除（物理削除）、判定ルールの編集、DBへの永続保存は、この範囲に含まない（Bedrockの実接続は、上の「モックと実接続」）。判定ルールの追加案・削除案は、別の文書 [admin-rule-proposal-demo.md](admin-rule-proposal-demo.md) にある（設問の廃止の参照の確認は、そのデモのルールも数える）。
 - 追加した設問は、案件の画面（設問A01〜A12）には現れない。案件の設問・回答には影響しない。廃止した設問は、案件がその設問を持つときだけ、案件の画面に「廃止済みの設問」として現れる。
 - 管理者の認証・権限は、この試作にない（公開時のアクセス・課金リスクの対策は別に維持する）。
 - 複数のバックエンド（Lambdaの複数インスタンスなど）では、メモリが共有されない。デモの仮保存であり、その動作は確認していない。

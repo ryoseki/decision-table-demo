@@ -9,7 +9,7 @@ const added = { id: "A13", text: "対象期間にAPIキーが失効されたか�
 const afterQuestions = [...baseQuestions, added];
 const PROMPT = "APIキーの失効履歴を確認する設問を追加して";
 
-const listBody = (questions = baseQuestions, revision = 1) => ({ revision, questions, mock: true, persistence: "memory" });
+const listBody = (questions = baseQuestions, revision = 1) => ({ revision, questions, mock: true, persistence: "memory", source: { kind: "mock" } });
 const proposalBody = {
   proposal_id: "p1",
   base_revision: 1,
@@ -17,6 +17,7 @@ const proposalBody = {
   after: afterQuestions,
   added,
   mock: true,
+  source: { kind: "mock" },
 };
 const baseRoutes = (): Routes => ({ "GET /api/admin/questions": { body: listBody() } });
 
@@ -40,6 +41,7 @@ async function createProposal() {
 
 test("モックであることと、保存の範囲（メモリ上で、再起動すると初期化）を、画面に出す", async () => {
   render(<QuestionAdmin />);
+  await screen.findByText("設問1？"); // 生成元は、一覧の応答で分かる
   const note = screen.getByTestId("mock-note");
   expect(note.textContent).toContain("モックです");
   expect(note.textContent).toContain("実際のAIには接続していません");

@@ -6,6 +6,8 @@ mock_api）にも置かない共有の定義は、ここに置く。
 """
 
 import uuid
+from dataclasses import dataclass
+from typing import Any
 
 # 自動回答の対象設問。設問コード -> 自動回答の種類
 # （設問マスターの auto_answer_key 相当）。
@@ -49,7 +51,38 @@ class InvalidProposal(Exception):
 
 
 class ProposerUnavailable(Exception):
-    """AIの応答を得られない（接続エラーなど）。成功した応答に見せない。"""
+    """AIの応答を得られない（接続エラー・タイムアウトなど）。成功した応答に見せない。
+
+    reason は原因の分類。HTTP層が、利用者に出す固定の文言に対応づける（SDKの文言や
+    AIの出力は、利用者へ出さない）。値は unavailable（分類なし。モックなど）、timeout、
+    network、credentials、access、throttled、config、service。
+    """
+
+    def __init__(self, *args: object, reason: str = "unavailable") -> None:
+        super().__init__(*args)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class GenerationSource:
+    """提案の生成元。画面と検証記録で、モックと実接続を区別するための情報。
+
+    kind は "mock"（固定の規則）か "bedrock"（Amazon Bedrock の実接続）。
+    model_id・region は実接続のときだけ持つ（資格情報は持たない）。
+    """
+
+    kind: str
+    model_id: str | None = None
+    region: str | None = None
+
+
+MOCK_SOURCE = GenerationSource("mock")
+
+
+def source_of(proposer: Any) -> GenerationSource:
+    """提案の生成の実装が申告する生成元。申告しないもの（モック・テスト用）は mock。"""
+    source = getattr(proposer, "source", None)
+    return source if isinstance(source, GenerationSource) else MOCK_SOURCE
 
 
 class ProposalNotFound(Exception):

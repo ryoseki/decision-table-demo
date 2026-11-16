@@ -8,7 +8,9 @@
 - 承認はYes／Noの2つで、Yesだけが反映する。
   承認できるのは、サーバーが持つ検証済みの提案だけ。
 - 提案は1回で使い切る。未知・使用済みは404、基準の一覧が変わっていたときは409。
-- AIの応答を得られないときは502（成功した応答に見せない）。
+- AIの応答を得られないときは502（待ち時間の超過は504）。AIの出力が使えない形なら422。
+  どれも成功した応答に見せず、モックへの代替もしない。
+- 応答には、生成元（source: モックか、Amazon Bedrock の実接続か）を付ける。
 """
 
 import threading
@@ -19,11 +21,13 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, StrictStr, StringConstraints
 
 from app.domain import (
+    GenerationSource,
     InvalidProposal,
     ProposalConflict,
     ProposalNotFound,
     ProposerUnavailable,
     RetirementBlocked,
+    source_of,
 )
 from app.question_validation import (
     DemoQuestion,
@@ -40,10 +44,15 @@ router = APIRouter(prefix="/api/admin", tags=["admin-questions"])
 
 
 class QuestionProposer(Protocol):
-    """提案の生成の境界。モックと、後の実接続（別Issue）が、この形に従う。"""
+    """提案の生成の境界。モックと、Bedrockの実接続（bedrock_proposer）が、この形に従う。
+
+    生成元は、属性 source（GenerationSource）で申告する。
+    申告しないものはモックとして扱う。
+    """
 
     def generate(self, prompt: str, current: tuple[DemoQuestion, ...]) -> Any:
-        """生の出力を返す。応答を得られなければ ProposerUnavailable。"""
+        """生の出力を返す。応答を得られなければ ProposerUnavailable、
+        出力が使えない形なら InvalidProposal。"""
 
 
 class QuestionStore(Protocol):
@@ -157,15 +166,76 @@ def _retirement_body(
     }
 
 
-def _notice() -> dict[str, Any]:
-    # 画面に「モックであること」と保存の範囲を出すための情報。
-    return {"mock": True, "persistence": "memory"}
+def source_body(source: GenerationSource) -> dict[str, Any]:
+    """応答に付ける生成元。資格情報は含まない。"""
+    body: dict[str, Any] = {"kind": source.kind}
+    if source.model_id is not None:
+        body["model_id"] = source.model_id
+    if source.region is not None:
+        body["region"] = source.region
+    return body
+
+
+def notice(request: Request, proposer_name: str) -> dict[str, Any]:
+    """画面に「生成元（モックか実接続か）」と保存の範囲を出すための情報。
+
+    mock は、生成元がモックのときだけ true（実接続のとき false）。
+    """
+    source = source_of(getattr(request.app.state, proposer_name, None))
+    return {
+        "mock": source.kind == "mock",
+        "persistence": "memory",
+        "source": source_body(source),
+    }
+
+
+# 生成を得られなかった原因ごとの、利用者に出す固定の文言。
+# SDKの文言・AIの出力は出さない。
+_UNAVAILABLE_DETAILS = {
+    "timeout": "AIの応答がタイムアウトしました",
+    "network": "AIのサービスに接続できませんでした",
+    "credentials": (
+        "AIのサービスの資格情報を使えません（サーバーの設定を確認してください）"
+    ),
+    "access": (
+        "AIのサービスへのアクセスが許可されていません"
+        "（権限とモデルの利用設定を確認してください）"
+    ),
+    "throttled": (
+        "AIのサービスが混み合っています。しばらくしてから、もう一度試してください"
+    ),
+    "config": "AIのサービスの接続設定（リージョン・モデル）が合っていません",
+    "service": "AIのサービス側でエラーが起きました",
+}
+
+
+def unavailable_error(
+    error: ProposerUnavailable, source: GenerationSource
+) -> HTTPException:
+    """生成を得られなかったときのHTTPエラー。待ち時間の超過は504、それ以外は502。
+
+    成功した応答に見せない。モックの既定の文言は従来のまま（実接続では、原因ごとの固定の文言）。
+    """
+    reason = getattr(error, "reason", "unavailable")
+    status = 504 if reason == "timeout" else 502
+    detail = _UNAVAILABLE_DETAILS.get(reason)
+    if detail is None:
+        detail = (
+            "AIの応答を得られませんでした（モック）"
+            if source.kind == "mock"
+            else "AIの応答を得られませんでした"
+        )
+    return HTTPException(status_code=status, detail=detail)
 
 
 @router.get("/questions")
 def list_questions(request: Request) -> dict[str, Any]:
     revision, questions = request.app.state.question_store.snapshot()
-    return {"revision": revision, "questions": _rows(questions), **_notice()}
+    return {
+        "revision": revision,
+        "questions": _rows(questions),
+        **notice(request, "question_proposer"),
+    }
 
 
 @router.post("/question-proposals", status_code=201)
@@ -175,10 +245,10 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
     revision, current = store.snapshot()
     try:
         raw = proposer.generate(body.prompt, current)
-    except ProposerUnavailable:
-        raise HTTPException(
-            status_code=502, detail="AIの応答を得られませんでした（モック）"
-        ) from None
+    except ProposerUnavailable as error:
+        raise unavailable_error(error, source_of(proposer)) from None
+    except InvalidProposal as error:  # 実接続の出力が、JSONとして読めないなど
+        raise HTTPException(status_code=422, detail=str(error)) from None
     try:
         proposal = validate_model_output(raw, current, revision)
     except InvalidProposal as error:
@@ -197,7 +267,7 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
         "before": _rows(proposal.base),
         "after": _rows(proposal.after),
         **detail,
-        **_notice(),
+        **notice(request, "question_proposer"),
     }
 
 
@@ -222,7 +292,7 @@ def _decide(
                 "applied": False,
                 "revision": revision,
                 "questions": _rows(questions),
-                **_notice(),
+                **notice(request, "question_proposer"),
             }
         # 廃止案だけ、承認の時点の現行ルールを調べ直す（提案後に変わっても拒否する）。
         revision, questions = store.approve(
@@ -253,5 +323,5 @@ def _decide(
         "applied": True,
         "revision": revision,
         "questions": _rows(questions),
-        **_notice(),
+        **notice(request, "question_proposer"),
     }

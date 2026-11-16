@@ -16,8 +16,8 @@ const added = rule("R04", "caution", { A09: "yes", A10: "no" });
 const afterRules = [...baseRules, added];
 const PROMPT = "設問A09がYes、設問A10がNoのとき注意とするルールを追加して";
 
-const listBody = (rules = baseRules, revision = 1) => ({ revision, rules, mock: true, persistence: "memory" });
-const addBody = { proposal_id: "p1", kind: "add", base_revision: 1, before: baseRules, after: afterRules, added, mock: true };
+const listBody = (rules = baseRules, revision = 1) => ({ revision, rules, mock: true, persistence: "memory", source: { kind: "mock" } });
+const addBody = { proposal_id: "p1", kind: "add", base_revision: 1, before: baseRules, after: afterRules, added, mock: true, source: { kind: "mock" } };
 const removeBody = {
   proposal_id: "p2",
   kind: "remove",
@@ -50,6 +50,7 @@ test("操作の対象が判定ルールであることと、モック・保存�
   render(<RuleAdmin />);
   expect(screen.getByRole("heading", { name: "判定ルール管理（デモ）" })).toBeTruthy();
   expect(screen.getByTestId("target").textContent).toBe("操作の対象: 判定ルール");
+  await screen.findByText("R03"); // 生成元は、一覧の応答で分かる
   const note = screen.getByTestId("mock-note").textContent ?? "";
   expect(note).toContain("モックです");
   expect(note).toContain("再起動すると初期状態に戻ります");
