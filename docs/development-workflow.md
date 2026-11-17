@@ -331,3 +331,25 @@ CD案の一次資料として、Codexが2026-11-08（日本時間）に本文を
 - [Lambda Web Adapter（v1.1.0の固定コミット）](https://github.com/awslabs/aws-lambda-web-adapter/tree/596bdbcea78a89084fd0b522807d04cd2f1f3f7e)（READMEのレイヤーARN・設定値は2026-11-08にCodexがGitHub CLIで確認。レイヤー実体のハッシュと互換性は未検証）
 - [Lambdaの料金](https://aws.amazon.com/lambda/pricing/)
 - [Aurora DSQLの料金](https://aws.amazon.com/rds/aurora/dsql/pricing/)
+
+
+## 公開時の書き込みと利用枠
+
+既存のCloudFrontとLambda関数URLのOACを使う。公開する書き込みは案件の受付POST、判定保存PUT、設問・判定ルールの提案POSTと決定POST。CloudFrontで7メソッドを許可したときも、アプリはこの組み合わせだけを受け付ける。受付が同じインスタンスの内部HTTPモックを呼ぶときは、インスタンス内で生成したトークンで確認する。公開ポリシーはそのヘッダーを転送しない。
+
+Bedrockを呼ぶ公開構成では、Aurora DSQLでIP別5回と全体25回の枠を、依頼IDと同じトランザクションで確保する。日本時間の午前0時が日付の境界。CloudFrontが設定した接続元アドレスを正規化し、DBには鍵付きHMACを保存する。IPv6は /64 を同じ枠にまとめる。日別カウンターは7日を過ぎたものを正常な予約の機会に削除する。依頼IDは、日付変更をまたぐ再送でも同じ推論を開始しないよう、追記のみで保持する。1日最大25件で、依頼文・生IP・生成出力はこの記録に含めない。予約が確定した後に推論を1回試み、応答が不明でも枠を返さない。処理済みIDの再送は409で返す。承認やモック応答は枠を使わない。
+
+### 運用者の手動切り替え
+
+1. CloudFrontを既存の読み取り構成に保った状態で、Aurora DSQLの共有設定・提案・利用枠カウンター・依頼IDの追加4テーブルを、スキーマ文書のDDLから1文ずつ適用する。専用のアプリロールへ `db/init_dsql.py` の対象テーブルに限った権限を反映する。既存の案件・判定・ルールの履歴は削除しない。
+2. **第1段階（読み取り構成のまま配布する）。** Lambda側に `AI_PROVIDER=bedrock`、許可したモデルとリージョン、有効な `DSQL_ENDPOINT` とアプリ用DB接続設定、シークレットとして32バイト以上の `AI_QUOTA_HMAC_KEY` を設定する。実行ロールのBedrock権限は対象モデルの呼び出しに絞る。公開用の回数は既定値の5・25を維持する。CloudFrontは許可メソッド3種（GET・HEAD・OPTIONS）と従来のオリジンリクエストポリシーのまま、ガード・利用枠を含むリリースZIPをCDで承認・配布し、通常のスモークを成功させる。ZIPが含むかどうかは、ZIPの内容から作る `manifest.json` の `capabilities.publicWriteGuard`（ZIPのハッシュと照合済み）で判断する。配布した版には、descriptionに `guard=1` の印が付く。ガード導入前の版（印なし）が現在の版でも、この段階は配布できる（許可メソッド3種なので、書き込みは届かない）。
+3. **第2段階（書き込みを許可する）。** 第1段階の配布後、エイリアス `demo` の現在の版に `guard=1` の印があることを確認する。CD配布用ロールに `cloudfront:GetOriginRequestPolicy` の読み取り権限を追加する。オリジンリクエストポリシーを作り、転送対象のヘッダーを `CloudFront-Viewer-Address`、`Content-Type`、`Idempotency-Key`、`x-amz-content-sha256` のみに指定し、Cookie・クエリ文字列は転送しない。次にCloudFrontでこのポリシーと7メソッドを同時に適用する。OACのAlways sign、キャッシュ無効、既存WAF、Lambda予約済み同時実行数3を維持する。書き込みを許可した構成では、CDは次を、AWSの変更の前に検査し、1つでも満たさなければ失敗で止まる（配布も戻し先の設定も行わない）。(a) 許可メソッドが7種ちょうど（一部だけ・過不足は失敗）。(b) ポリシーの実体が、上の4ヘッダーだけの許可リストで、Cookie・クエリ文字列を転送しない。(c) 今回のZIPが `publicWriteGuard` の印を持つ。(d) 戻し先になる現在の版が `guard=1` の印を持つ（印のない版へ戻す経路を作らない）。
+4. CloudFrontの変更が反映されたら、トラフィックを受ける前に、次を確認する。架空の案件の受付・判定保存、設問またはルールの提案とYes、別ブラウザでの共有一覧、最新ルールでの未判定案件の照合。保存済み判定の再保存と公開側からの内部モックPOSTが拒否されること。依頼IDを固定した再送は409で、枠が1つだけ消費されること。枠超過は検証用のカウンターを事前に用意し、不要な推論を発生させず429を確認する。**必須: ブラウザから、偽の `CloudFront-Viewer-Address` ヘッダーを付けた書き込み要求を送り、利用者の識別に使われず（実際の接続元の枠が使われ）、偽の値では別の枠を使えないことを確認する。確認できるまで、利用者へ公開しない。** CloudFrontが同名のヘッダーを実際の接続元で上書きするかは、AWSの資料の説明であり、このリポジトリでは実機で確認していない。
+5. 問題があれば最初にCloudFrontを元の読み取り構成（許可メソッド3種・従来のポリシー）に戻す。この戻しは、保存済みの共有データを変えない。設定データを戻す場合は、権限のある作業環境で `SharedConfigDb.restore(target_revision)` を使い、過去版を新しい共有設定として追加する（過去版は変えない）。反映前後の共有一覧を照合する。復元で無効になる設問も廃止済みとしてIDを保持する。公開された判定の登録済みの結果は読み取り専用で、承認した共有設定の変更・復元でも更新しない（運営も、判定の編集・解除は行わない）。設定を戻した後に開く判定未登録の案件だけ、戻した後のルールで照合される。
+6. Lambdaの版を戻す場合、書き込みを許可した構成のままでは、`guard=1` の印のない版へは戻せない（CDも、印のない版を現在の版とする書き込み構成の配布を止める）。印のない古い版が必要なときは、先にCloudFrontを読み取り構成へ戻す。
+
+実AWSでの動作（CloudFrontのポリシー適用、ヘッダーの上書き、DSQLの衝突検出と費用、権限）は、この変更では確認していない。ローカルのPostgreSQL・偽のAWSによるテストで確認したのは、アプリとCDの検査の論理だけである。
+
+本文ハッシュはブラウザでシリアライズした書き込み本文のUTF-8バイト列から計算する。公開環境はHTTPSが必要。ローカル開発で共有設定をPostgreSQLに保存する場合は、初期化済みのDBに対して `SHARED_CONFIG_DB=1` を指定する。
+
+[AWSのLambda OAC要件](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-lambda.html) · [CloudFrontの接続元ヘッダー](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html) · [配布ロールの権限表](https://docs.aws.amazon.com/service-authorization/latest/reference/list_cloudfront.html)

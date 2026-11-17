@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ApiError, describeError } from "./api";
+import { useRef, useState } from "react";
+import { ApiError, describeError, keepsRequestId, proposalRequestId } from "./api";
 import { createRuleProposal, decideRuleProposal, type DemoRuleList, type DemoRuleRow, type RuleProposal } from "./rulesApi";
 import { QUESTION_IDS } from "./matching";
 import { AiNote, SourceBadge } from "./SourceBadge";
@@ -114,6 +114,7 @@ export default function RuleAdmin() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const retry = useRef<{ prompt: string; id: string } | null>(null);
 
   const create = async () => {
     if (busy) return; // ボタンを無効にしても、フォームの送信は別経路で起きうる。
@@ -121,9 +122,17 @@ export default function RuleAdmin() {
     setNotice("");
     setError("");
     setProposal(null);
+    const previous = retry.current;
+    const submission = previous?.prompt === prompt
+      ? previous
+      : { prompt, id: proposalRequestId() };
+    retry.current = submission;
     try {
-      setProposal(await createRuleProposal(prompt));
+      setProposal(await createRuleProposal(prompt, submission.id));
+      retry.current = null;
     } catch (e) {
+      // 到達したか不明な要求（接続できない・503）だけ、同じ入力の再送で同じ依頼IDを使う。
+      if (!keepsRequestId(e)) retry.current = null;
       setError(describeError(e));
     } finally {
       setBusy(false);
@@ -170,8 +179,12 @@ export default function RuleAdmin() {
 
       <p className="note note-top" data-testid="mock-note">
         <AiNote source={list.status === "ok" ? list.data.source : null} failed={list.status === "error"} />
-        反映先は、サーバーのメモリ上のデモのルール一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
-        審査画面で照合に使うルール、案件、データベースは変わりません。
+        {list.status === "ok" && (list.data.persistence === "database" ? (
+          <> 承認したルールは全員に共有され、判定未登録の案件を開いたときの照合に使われます。</>
+        ) : (
+          <> 反映先は、サーバーのメモリ上のデモのルール一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
+        審査画面で照合に使うルール、案件、データベースは変わりません。</>
+        ))}
         ルールが参照する設問・結果は、アプリが検証します（存在しない設問、定義にない結果、重複するルールは拒否します）。
       </p>
 

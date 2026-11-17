@@ -93,6 +93,14 @@ class ProposalConflict(Exception):
     """提案の基準にした一覧が、その後に変わっている。反映しない。"""
 
 
+class QuestionBaseChanged(ProposalConflict):
+    """判定ルールの提案の基準にした設問一覧の版が、その後に変わっている。反映しない。"""
+
+
+# デモの初期の判定ルールID。これ以外（承認で追加したルール）は、案件の照合に重ねて使う。
+SEED_RULE_IDS = frozenset({"R01", "R02", "R03"})
+
+
 class RetirementBlocked(Exception):
     """廃止しようとした設問を、現行の判定ルールが参照している。廃止しない。"""
 

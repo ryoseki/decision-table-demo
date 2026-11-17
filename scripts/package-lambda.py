@@ -122,7 +122,10 @@ def main() -> int:
             archive.writestr(info, data, compresslevel=9)
 
     digest = hashlib.sha256(zip_path.read_bytes()).digest()
+    # ZIPの実際の内容から導く。CDは、書き込みを許可した公開経路にこの印のない版を出さない
+    guard_files = {"app/public_guard.py", "app/usage_quota.py", "app/quota_store.py"}
     manifest = {
+        "capabilities": {"publicWriteGuard": 1 if guard_files <= set(entries) else 0},
         "schema": 1,
         "sourceSHA": args.source_sha,
         "dirty": args.dirty,

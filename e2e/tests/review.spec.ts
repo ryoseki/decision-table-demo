@@ -258,3 +258,28 @@ test("モバイル幅で横にはみ出さない", async ({ page, request }) => 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
 });
+
+
+test("承認後の照合一覧はA09条件のないR01と追加設問を参照するルールを表示する", async ({ page, request }) => {
+  const { case_id } = await intake(request, "457"); // A09 = No
+  const result = await intake(request, "456");
+  expect((await request.put(`${backendUrl}/api/cases/${result.case_id}/judgment`, {
+    data: { result_code: "caution", rule_id: "R01", rule_revision: 1 },
+  })).status()).toBe(204);
+  const savedBefore = await (await request.get(`${backendUrl}/api/cases/${result.case_id}`)).json();
+
+  await page.goto(`/#/cases/${case_id}`);
+  await expectDisplay(page, "R01", "gray");
+
+  // 承認後の一覧をスタブにする。承認によるDB更新はバックエンドの統合テストで確認する。
+  await page.route("**/api/rules", (route) => route.fulfill({ json: [
+    { rule_id: "R01", revision: 2, result_code: "caution", conditions: { A01: "yes" } },
+    { rule_id: "R04", revision: 1, result_code: "caution", conditions: { A13: "yes" } },
+  ] }));
+  await page.reload();
+  await expectDisplay(page, "R01", "normal");
+  await expect(page.getByTestId("rule-R04")).toBeVisible();
+  await page.goto(`/#/cases/${result.case_id}`);
+  await expect(page.getByText("登録済みの結果: 注意")).toBeVisible();
+  expect(await (await request.get(`${backendUrl}/api/cases/${result.case_id}`)).json()).toEqual(savedBefore);
+});

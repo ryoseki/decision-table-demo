@@ -228,7 +228,9 @@ def make_policy_document() -> dict:
     }
 
 
-def make_artifact(directory: Path, sha: str = NEW_SHA, payload: bytes = b"new zip") -> str:
+def make_artifact(
+    directory: Path, sha: str = NEW_SHA, payload: bytes = b"new zip", guard: bool | None = None
+) -> str:
     directory.mkdir(parents=True)
     zip_path = directory / f"lambda-{sha}.zip"
     zip_path.write_bytes(payload)
@@ -254,8 +256,45 @@ def make_artifact(directory: Path, sha: str = NEW_SHA, payload: bytes = b"new zi
             "codeSha256": base64.b64encode(digest.digest()).decode(),
         },
     }
+    if guard is not None:
+        manifest["capabilities"] = {"publicWriteGuard": 1 if guard else 0}
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return digest.hexdigest()
+
+
+WRITE_POLICY_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def enable_write(aws, *, methods=None, cookie="none", query="none", headers=None) -> None:
+    """FakeAws の公開経路を、書き込み許可（7メソッド・専用ポリシー）の形にする。"""
+    items = sorted(methods if methods is not None else dl.WRITE_ENABLED_METHODS)
+    aws.behavior["AllowedMethods"].update(Quantity=len(items), Items=items)
+    aws.behavior["OriginRequestPolicyId"] = WRITE_POLICY_ID
+    names = sorted(headers if headers is not None else dl.WRITE_ORIGIN_HEADERS)
+    aws.origin_request_policy = {"OriginRequestPolicy": {
+        "Id": WRITE_POLICY_ID,
+        "OriginRequestPolicyConfig": {
+            "HeadersConfig": {"HeaderBehavior": "whitelist",
+                              "Headers": {"Quantity": len(names), "Items": names}},
+            "CookiesConfig": {"CookieBehavior": cookie},
+            "QueryStringsConfig": {"QueryStringBehavior": query},
+        },
+    }}
+
+
+class TestWriteOriginPolicy(unittest.TestCase):
+    def test_policy_requires_cloudfront_address_and_excludes_internal_token(self):
+        policy_id = "11111111-2222-3333-4444-555555555555"
+        headers = sorted(dl.WRITE_ORIGIN_HEADERS)
+        config = {
+            "HeadersConfig": {"HeaderBehavior": "whitelist", "Headers": {"Quantity": 4, "Items": headers}},
+            "CookiesConfig": {"CookieBehavior": "none"},
+            "QueryStringsConfig": {"QueryStringBehavior": "none"},
+        }
+        response = {"OriginRequestPolicy": {"Id": policy_id, "OriginRequestPolicyConfig": config}}
+        self.assertEqual(dl.write_policy_problems(response, policy_id), [])
+        headers[headers.index("cloudfront-viewer-address")] = "x-internal-mock-token"
+        self.assertEqual(dl.write_policy_problems(response, policy_id), ["writeOriginRequestPolicyHeaders"])
 
 
 class FakeAws:
@@ -388,6 +427,12 @@ class FakeAws:
             if opts["--id"] != DIST_ID:
                 raise dl.AwsError(op, 254)  # 存在しないID
             return json.loads(json.dumps(self.dist))
+        if op == "get-origin-request-policy":
+            assert args[0] == "cloudfront" and set(opts) == {"--id"}
+            policy = self.origin_request_policy
+            if opts["--id"] != policy["OriginRequestPolicy"]["Id"]:
+                raise dl.AwsError(op, 254)
+            return json.loads(json.dumps(policy))
         if op == "get-origin-access-control":
             assert args[0] == "cloudfront" and set(opts) == {"--id"}
             if opts["--id"] != OAC_ID:
@@ -1591,6 +1636,110 @@ BOUNDARY_CASES = [
 ]
 
 
+class WriteGuardGate(DeployTestCase):
+    """書き込みを許可した公開経路は、ガード・利用枠を含む版だけを許す（AWSの変更の前に止める）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.zip_hex = make_artifact(self.dir / "g", guard=True)
+        self.artifact = self.dir / "g"
+
+    def mark_previous(self):
+        self.aws.versions["1"] = self.aws._snapshot(
+            "1", dl.make_description(OLD_SHA, OLD_ZIP, "100", guard=True)
+        )
+
+    def assert_blocked_before_mutation(self, expect):
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.aws.mutating(), [])
+        result = self.result()
+        self.assertEqual(result["validation"], "failed")
+        self.assertFalse(result["mutationStarted"])
+        self.assertEqual(self.smoke.calls, [])
+        self.assertIn(expect, result["error"])
+        self.assertNotIn("rollbackTargetWithoutWriteGuard" if expect.startswith("candidate") else "candidateWithoutWriteGuard", result["error"])
+
+    def test_guarded_candidate_and_marked_rollback_target_deploy_and_leave_a_marker(self):
+        enable_write(self.aws)
+        self.mark_previous()
+        self.assertEqual(self.deploy(), 0)
+        self.assertIn("get-origin-request-policy", self.aws.ops())
+        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1"))
+
+    def test_candidate_without_marker_is_blocked_on_a_write_stage(self):
+        enable_write(self.aws)
+        self.mark_previous()
+        self.zip_hex = make_artifact(self.dir / "plain", guard=None)
+        self.artifact = self.dir / "plain"
+        self.assert_blocked_before_mutation("candidateWithoutWriteGuard")
+
+    def test_candidate_marker_zero_is_blocked(self):
+        enable_write(self.aws)
+        self.mark_previous()
+        self.zip_hex = make_artifact(self.dir / "zero", guard=False)
+        self.artifact = self.dir / "zero"
+        self.assert_blocked_before_mutation("candidateWithoutWriteGuard")
+
+    def test_rollback_target_without_marker_is_blocked(self):
+        enable_write(self.aws)  # 版1はガード導入前（印なし）
+        self.assert_blocked_before_mutation("rollbackTargetWithoutWriteGuard")
+
+    def test_read_only_stage_bootstraps_old_version_and_adds_the_marker(self):
+        self.assertEqual(self.deploy(), 0)  # 読み取り専用: 印のない版1からでも進める
+        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1"))
+
+    def test_read_only_stage_without_marker_in_candidate_still_deploys_without_marker(self):
+        self.zip_hex = make_artifact(self.dir / "plain", guard=None)
+        self.artifact = self.dir / "plain"
+        self.assertEqual(self.deploy(), 0)
+        self.assertNotIn("guard", self.aws.versions["2"]["Description"])
+
+    def test_partial_method_sets_are_rejected(self):
+        for methods in (
+            {"GET", "HEAD", "OPTIONS", "POST"},
+            dl.WRITE_ENABLED_METHODS - {"DELETE"},
+            dl.WRITE_ENABLED_METHODS - {"OPTIONS"},
+        ):
+            with self.subTest(methods=sorted(methods)):
+                self.aws = FakeAws()
+                self.smoke = FakeSmoke()
+                self.result_file.unlink(missing_ok=True)
+                self.mark_previous()
+                enable_write(self.aws, methods=methods)
+                self.assertEqual(self.deploy(), 1)
+                self.assertEqual(self.aws.mutating(), [])
+                self.assertIn("allowedMethods", self.result()["error"])
+
+    def test_forwarding_and_header_problems_are_rejected_before_mutation(self):
+        names = sorted(dl.WRITE_ORIGIN_HEADERS)
+        cases = {
+            "cookies": dict(cookie="all"),
+            "query": dict(query="all"),
+            "internal token header": dict(
+                headers=[h if h != "cloudfront-viewer-address" else "x-internal-mock-token" for h in names]
+            ),
+            "missing viewer address": dict(headers=[h for h in names if h != "cloudfront-viewer-address"]),
+            "extra header": dict(headers=names + ["authorization"]),
+        }
+        for name, options in cases.items():
+            with self.subTest(name):
+                self.aws = FakeAws()
+                self.smoke = FakeSmoke()
+                self.result_file.unlink(missing_ok=True)
+                self.mark_previous()
+                enable_write(self.aws, **options)
+                self.assertEqual(self.deploy(), 1)
+                self.assertEqual(self.aws.mutating(), [])
+                self.assertEqual(self.result()["publicPath"], "failed")
+                self.assertIn("writeOriginRequestPolicy", self.result()["error"])
+
+    def test_reusing_a_published_version_requires_the_same_marker(self):
+        enable_write(self.aws)
+        self.mark_previous()
+        self.aws.dedupe_publish = True
+        self.assertEqual(self.deploy(), 0)
+
+
 class PublicPathBoundaries(DeployTestCase):
     """公開経路（CloudFront → OAC → AWS_IAMの関数URL）の検証。
 
@@ -1900,13 +2049,13 @@ class TemplatesMatchTheCode(unittest.TestCase):
             value = statement["Action"]
             for action in [value] if isinstance(value, str) else value:
                 actions.setdefault(action.split(":")[0], set()).add(action)
-        self.assertEqual(actions["cloudfront"], {"cloudfront:GetDistribution", "cloudfront:GetOriginAccessControl"})
+        self.assertEqual(actions["cloudfront"], {"cloudfront:GetDistribution", "cloudfront:GetOriginAccessControl", "cloudfront:GetOriginRequestPolicy"})
         self.assertEqual(actions["wafv2"], {"wafv2:GetWebACL"})
         self.assertNotIn("iam", actions)
         self.assertNotIn("PassRole", text)
-        # ResourceがワイルドカードなのはOAC（リソース指定が未対応の読み取り）だけ
+        # リソース指定が未対応のCloudFrontの読み取りだけをワイルドカードにする
         wildcard = {sid for sid, s in by_sid.items() if s["Resource"] == "*"}
-        self.assertEqual(wildcard, {"ReadOriginAccessControlsResourceScopingUnsupported"})
+        self.assertEqual(wildcard, {"ReadOriginAccessControlsResourceScopingUnsupported", "ReadDemoOriginRequestPolicy"})
         self.assertEqual(by_sid["ReadTheTargetDistributionOnly"]["Resource"].count("<DISTRIBUTION_ID>"), 1)
         self.assertEqual(by_sid["ReadTheTargetWebAclOnly"]["Resource"], "<WEB_ACL_ARN>")
         policy = by_sid["ReadTheDemoAliasResourcePolicyOnly"]

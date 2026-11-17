@@ -22,6 +22,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest import mock
+from uuid import uuid4
 
 from botocore.exceptions import (
     ClientError,
@@ -48,6 +49,7 @@ from app.domain import InvalidProposal, ProposerUnavailable
 from app.question_proposer import MockQuestionProposer
 from app.question_store import InMemoryQuestionStore
 from app.question_validation import DemoQuestion
+from app.quota_store import InMemoryAiQuota
 from app.rule_proposer import MockRuleProposer
 from app.rule_store import InMemoryRuleStore
 from tests.test_intake import _Server, send
@@ -428,6 +430,7 @@ class BedrockApiTestCase(unittest.TestCase):
         application = FastAPI()
         application.state.question_proposer = BedrockQuestionProposer(SETTINGS, client)
         application.state.rule_proposer = BedrockRuleProposer(SETTINGS, client)
+        application.state.ai_quota = InMemoryAiQuota(b"x" * 32)
         application.state.question_store = self.question_store
         application.state.rule_store = self.rule_store
         if case_store is not None:  # 設問の廃止案は、ルールと案件の保存先を読む
@@ -440,7 +443,15 @@ class BedrockApiTestCase(unittest.TestCase):
         self.base = server.base_url
 
     def post(self, path: str, prompt: str) -> tuple[int, dict]:
-        return send("POST", f"{self.base}/api/admin/{path}", {"prompt": prompt})
+        return send(
+            "POST",
+            f"{self.base}/api/admin/{path}",
+            {"prompt": prompt},
+            {
+                "CloudFront-Viewer-Address": "192.0.2.1:4321",
+                "Idempotency-Key": str(uuid4()),
+            },
+        )
 
     def get(self, path: str) -> dict:
         status, body = send("GET", f"{self.base}/api/admin/{path}")
@@ -792,6 +803,12 @@ def load_main(env: dict[str, str], client: FakeClient | None = None) -> Any:
     with (
         mock.patch.dict(os.environ, env),
         mock.patch.object(bedrock_proposer, "build_proposers", build),
+        mock.patch(
+            "app.shared_db.build_ai_quota",
+            side_effect=lambda *args, uses_bedrock, **kwargs: (
+                InMemoryAiQuota(b"x" * 32) if uses_bedrock else None
+            ),
+        ),
     ):
         for name in (
             "DB_HOST",
@@ -826,12 +843,24 @@ class TestMainWiring(unittest.TestCase):
                 self.assertEqual(listed["source"], EXPECTED_SOURCE)
                 self.assertIs(listed["mock"], False)
             status, question = send(
-                "POST", f"{base}/question-proposals", {"prompt": "追加して"}
+                "POST",
+                f"{base}/question-proposals",
+                {"prompt": "追加して"},
+                {
+                    "CloudFront-Viewer-Address": "192.0.2.1:4321",
+                    "Idempotency-Key": str(uuid4()),
+                },
             )
             self.assertEqual((status, question["source"]), (201, EXPECTED_SOURCE))
             client.response = reply(add_rule_json({"A09": "yes"}))
             status, rule = send(
-                "POST", f"{base}/rule-proposals", {"prompt": "追加して"}
+                "POST",
+                f"{base}/rule-proposals",
+                {"prompt": "追加して"},
+                {
+                    "CloudFront-Viewer-Address": "192.0.2.1:4321",
+                    "Idempotency-Key": str(uuid4()),
+                },
             )
             self.assertEqual((status, rule["source"]), (201, EXPECTED_SOURCE))
             self.assertEqual(len(client.calls), 2)  # 依頼ごとに1回

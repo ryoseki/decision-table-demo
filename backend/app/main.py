@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import secrets
 import threading
 from pathlib import Path
 
@@ -18,9 +19,18 @@ from app import (
     rule_admin,
     rule_store,
     rules,
+    shared_db,
 )
+from app.domain import source_of
+from app.public_guard import PublicWriteGuard
 
 app = FastAPI(title="不正審査デモ API")
+# 書き込みは、公開する経路とメソッドだけに限る（CloudFrontは7メソッドを許可するため）。
+app.state.internal_mock_token = (
+    secrets.token_urlsafe(32) if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") else ""
+)
+app.add_middleware(PublicWriteGuard, internal_token=app.state.internal_mock_token)
+question_admin.install_handlers(app)
 # DB_HOST（ローカルPostgreSQL）か DSQL_ENDPOINT（Aurora DSQL）があればDBに保存し、
 # なければ開発用の仮のメモリ保存（受付のみ）にする。
 app.state.case_store = (
@@ -28,21 +38,44 @@ app.state.case_store = (
     if os.environ.get("DB_HOST") or os.environ.get("DSQL_ENDPOINT")
     else intake.InMemoryCaseStore()
 )
-# 管理者AIの試作（設問の追加案）。DBは使わない。
+# 管理者AIの生成実装を組み立てる。
 # 生成は、既定はモック。AI_PROVIDER=bedrock のときだけ、Bedrockの実接続
 # （リージョン・モデルは BEDROCK_REGION・BEDROCK_MODEL_ID で明示）。
 # 設定が不正なら起動時に失敗し、黙ってモックには戻さない。
-# 保存はメモリ上（再起動で初期化）。
 # 実装はここで選んで渡す。HTTP層は共通の形（Protocol）だけを呼ぶ。
 app.state.question_proposer, app.state.rule_proposer = bedrock_proposer.build_proposers(
     os.environ
 )
-app.state.question_store = question_store.InMemoryQuestionStore()
-# 判定ルールの追加案・削除案も同じ構成。ルールの一覧は、審査画面・案件のDBとは別の、
-# メモリ上のデモ用（再起動で初期化）。
+_use_db = bool(os.environ.get("DSQL_ENDPOINT")) or (
+    bool(os.environ.get("DB_HOST")) and os.environ.get("SHARED_CONFIG_DB") == "1"
+)
+# 設問・判定ルールの承認結果と未処理の提案は、DBがあれば共有（インスタンスをまたぐ）、
+# なければメモリ（再起動で初期化）。
+if _use_db:
+    _shared = shared_db.SharedConfigDb(db_store.connect_from_env)
+    app.state.question_store = shared_db.DbQuestionStore(_shared)
+    app.state.persistence = "database"
+else:
+    app.state.question_store = question_store.InMemoryQuestionStore()
+    app.state.persistence = "memory"
+# Bedrockの実接続のときだけ、日次の利用枠（接続元ごと・全体）を予約してから推論する。
+# 設定が足りなければ起動時に失敗する（枠なしで推論させない）。
+_quota = shared_db.build_ai_quota(
+    os.environ,
+    uses_bedrock=any(
+        source_of(p).kind != "mock"
+        for p in (app.state.question_proposer, app.state.rule_proposer)
+    ),
+    connect=db_store.connect_from_env if _use_db else None,
+)
+if _quota is not None:
+    app.state.ai_quota = _quota
+# DBを使う構成では管理画面と案件照合が同じ承認済み一覧を参照する。
 # 設問の廃止と判定ルールの承認は、割り込めないよう、同じロックで1つずつ順に決める。
 app.state.admin_lock = threading.Lock()
-app.state.rule_store = rule_store.InMemoryRuleStore()
+app.state.rule_store = (
+    shared_db.DbRuleStore(_shared) if _use_db else rule_store.InMemoryRuleStore()
+)
 app.include_router(question_admin.router)
 app.include_router(rule_admin.router)
 app.include_router(mock_api.router)

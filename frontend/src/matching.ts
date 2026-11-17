@@ -44,13 +44,14 @@ export type RuleRow = {
 
 export function matchRules(answers: AnswerMap, rules: readonly Rule[]): RuleRow[] {
   return rules.map((rule) => {
+    const ids = new Set([...QUESTION_IDS, ...Object.keys(rule.expected) as QuestionId[]]);
     const states = Object.fromEntries(
-      QUESTION_IDS.map((q) => {
+      [...ids].map((q) => {
         const expected = rule.expected[q];
         return [q, expected === undefined ? "any" : conditionState(answers[q], expected)];
       }),
     ) as Record<QuestionId, ConditionState>;
-    return { rule, gray: QUESTION_IDS.some((q) => states[q] === "mismatch"), states };
+    return { rule, gray: Object.values(states).includes("mismatch"), states };
   });
 }
 

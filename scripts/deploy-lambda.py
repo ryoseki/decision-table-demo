@@ -63,6 +63,10 @@ ALL_VIEWER_EXCEPT_HOST_POLICY_ID = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 CLOUDFRONT_SERVICE = "cloudfront.amazonaws.com"
 INVOKE_ACTIONS = {"lambda:InvokeFunctionUrl", "lambda:InvokeFunction"}
 ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS"}
+WRITE_ENABLED_METHODS = ALLOWED_METHODS | {"PUT", "POST", "PATCH", "DELETE"}
+WRITE_ORIGIN_HEADERS = {
+    "cloudfront-viewer-address", "content-type", "idempotency-key", "x-amz-content-sha256",
+}
 # WAFの必須のレートベース規則（実際の接続元IPごと）の閾値。infra/cd/waf-rules.json と同じ値。
 # 近似で厳密な保証ではない。全体（CONSTANT）の規則は2026-11-10に要件から外した（受け入れない）。
 RATE_WINDOW_SEC = 300
@@ -98,6 +102,7 @@ WEB_ACL_ARN_RE = re.compile(
 )
 DESCRIPTION_RE = re.compile(
     r"source=(?P<source>[0-9a-f]{40});zip=(?P<zip>[0-9a-f]{64});run=(?P<run>[0-9]{1,20})"
+    r"(?P<guard>;guard=1)?"
 )
 
 AwsRunner = Callable[[list[str]], dict]
@@ -119,15 +124,19 @@ class Interrupted(Exception):
     pass
 
 
-def make_description(source_sha: str, zip_hex: str, run_id: str) -> str:
-    return f"source={source_sha};zip={zip_hex};run={run_id}"
+def make_description(source_sha: str, zip_hex: str, run_id: str, guard: bool = False) -> str:
+    """版のdescription。guard=True は「公開書き込みのガード・利用枠を含むZIPを、この配布が検証して発行した」印。"""
+    base = f"source={source_sha};zip={zip_hex};run={run_id}"
+    return base + ";guard=1" if guard else base
 
 
 def parse_description(text: object) -> dict[str, str] | None:
     if not isinstance(text, str):
         return None
     match = DESCRIPTION_RE.fullmatch(text)
-    return match.groupdict() if match else None
+    if not match:
+        return None
+    return {key: value for key, value in match.groupdict().items() if value is not None}
 
 
 def config_problems(config: dict, *, require_status: bool = False) -> list[str]:
@@ -291,7 +300,7 @@ def behavior_problems(behavior: object, origin: object) -> list[str]:
         items is None
         or not all(isinstance(item, str) for item in items)
         or len(items) != len(set(items))
-        or set(items) != ALLOWED_METHODS
+        or set(items) not in (ALLOWED_METHODS, WRITE_ENABLED_METHODS)
     ):
         problems.append("allowedMethods")
     else:
@@ -302,7 +311,11 @@ def behavior_problems(behavior: object, origin: object) -> list[str]:
             problems.append("cachedMethods")
     if behavior.get("CachePolicyId") != CACHING_DISABLED_POLICY_ID:
         problems.append("cachePolicy")
-    if behavior.get("OriginRequestPolicyId") != ALL_VIEWER_EXCEPT_HOST_POLICY_ID:
+    policy_id = behavior.get("OriginRequestPolicyId")
+    if items is not None and all(isinstance(item, str) for item in items) and set(items) == WRITE_ENABLED_METHODS:
+        if not isinstance(policy_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", policy_id):
+            problems.append("originRequestPolicy")
+    elif policy_id != ALL_VIEWER_EXCEPT_HOST_POLICY_ID:
         problems.append("originRequestPolicy")
     # エッジでの書き換え（検証の回避）を許さない
     if block_items(behavior.get("LambdaFunctionAssociations")) != []:
@@ -310,6 +323,30 @@ def behavior_problems(behavior: object, origin: object) -> list[str]:
     if block_items(behavior.get("FunctionAssociations")) != []:
         problems.append("edgeFunctions")
     return problems
+
+
+def write_policy_problems(response: dict, expected_id: str) -> list[str]:
+    policy = response.get("OriginRequestPolicy")
+    if not isinstance(policy, dict) or policy.get("Id") != expected_id:
+        return ["writeOriginRequestPolicy"]
+    config = policy.get("OriginRequestPolicyConfig")
+    if not isinstance(config, dict):
+        return ["writeOriginRequestPolicy"]
+    headers_config = config.get("HeadersConfig")
+    if not isinstance(headers_config, dict) or headers_config.get("HeaderBehavior") != "whitelist":
+        return ["writeOriginRequestPolicyHeaders"]
+    headers = block_items(headers_config.get("Headers"))
+    if (
+        headers is None or len(headers) != len(WRITE_ORIGIN_HEADERS)
+        or not all(isinstance(header, str) for header in headers)
+        or {header.lower() for header in headers} != WRITE_ORIGIN_HEADERS
+    ):
+        return ["writeOriginRequestPolicyHeaders"]
+    for key, field in (("CookiesConfig", "CookieBehavior"), ("QueryStringsConfig", "QueryStringBehavior")):
+        entry = config.get(key)
+        if not isinstance(entry, dict) or entry.get(field) != "none":
+            return ["writeOriginRequestPolicyForwarding"]
+    return []
 
 
 def distribution_problems(response: dict, path: PublicPath) -> list[str]:
@@ -605,6 +642,12 @@ def sha256_file(path: Path) -> bytes:
     return digest.digest()
 
 
+def manifest_has_write_guard(manifest: dict) -> bool:
+    """manifest（ZIPのハッシュと照合済み）が、公開書き込みのガードと利用枠を含むと宣言しているか。"""
+    capabilities = manifest.get("capabilities")
+    return isinstance(capabilities, dict) and capabilities.get("publicWriteGuard") == 1
+
+
 def load_manifest(artifact_dir: Path, source_sha: str, zip_hex: str) -> tuple[Path, dict]:
     """成果物のmanifestとZIPを検証する。ビルド結果の出力（期待値）とも照合する。"""
     zip_name = f"lambda-{source_sha}.zip"
@@ -719,6 +762,8 @@ class Deployer:
         self._fingerprint_key = os.urandom(32)
         self.settings_baseline: dict[str, str] | None = None
         self.already_current = False
+        self.write_enabled = False  # 公開経路が書き込みメソッドを許可しているか（検証で確定）
+        self.candidate_guard = False  # 今回のZIPがガード・利用枠を含むか（manifestで確認）
         self.result = Result(
             result_file,
             {
@@ -830,7 +875,15 @@ class Deployer:
         )
         problems: list[str] = []
         distribution = self._cloudfront("get-distribution", "--id", self.distribution_id)
-        problems += distribution_problems(distribution, path)
+        distribution_errors = distribution_problems(distribution, path)
+        problems += distribution_errors
+        if not distribution_errors:
+            behavior = distribution["Distribution"]["DistributionConfig"]["DefaultCacheBehavior"]
+            if set(behavior["AllowedMethods"]["Items"]) == WRITE_ENABLED_METHODS:
+                self.write_enabled = True
+                policy_id = behavior["OriginRequestPolicyId"]
+                write_policy = self._cloudfront("get-origin-request-policy", "--id", policy_id)
+                problems += write_policy_problems(write_policy, policy_id)
         oac = self._cloudfront("get-origin-access-control", "--id", self.oac_id)
         problems += oac_problems(oac, self.oac_id)
         acl = self._wafv2(
@@ -913,6 +966,20 @@ class Deployer:
             raise DeployError("直前の版に利用できる出所情報（description）がありません")
         if old.get("CodeSha256") != code_sha_from_hex(meta["zip"]):
             raise DeployError("直前の版のコードと出所情報のハッシュが一致しません")
+        self.candidate_guard = manifest_has_write_guard(self.manifest)
+        if self.write_enabled:
+            # 書き込み可能な公開経路では、今回の版も戻し先の版も、ガード・利用枠を含む版だけを許す。
+            # 古い版は読み取り専用の段階（許可メソッド3種）で配布して、印を付けてから書き込みへ切り替える。
+            guard_problems = []
+            if not self.candidate_guard:
+                guard_problems.append("candidateWithoutWriteGuard")
+            if not meta.get("guard"):
+                guard_problems.append("rollbackTargetWithoutWriteGuard")
+            if guard_problems:
+                raise DeployError(
+                    "書き込みを許可した公開経路では、ガード・利用枠を含まない版を配布・戻し先にできません: "
+                    + ",".join(guard_problems)
+                )
         self.prev = {
             "version": version,
             "sourceSHA": meta["source"],
@@ -1032,7 +1099,9 @@ class Deployer:
             "--revision-id",
             completed_revision,
             "--description",
-            make_description(self.source_sha, self.zip_hex, self.run_id),
+            make_description(
+                self.source_sha, self.zip_hex, self.run_id, self.candidate_guard
+            ),
         )
         version = published.get("Version")
         if (
@@ -1118,7 +1187,12 @@ class Deployer:
         if config.get("CodeSha256") != self.code_sha:
             problems.append("codeSha256")
         del config
-        if meta is None or meta["source"] != self.source_sha or meta["zip"] != self.zip_hex:
+        if (
+            meta is None
+            or meta["source"] != self.source_sha
+            or meta["zip"] != self.zip_hex
+            or bool(meta.get("guard")) != self.candidate_guard
+        ):
             problems.append("description")
         if problems:
             raise DeployError(

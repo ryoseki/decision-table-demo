@@ -284,6 +284,13 @@ export function Review({
                       <dd>{states[q.id] === "any" ? "問わない" : rule.expected[q.id] === "yes" ? "Yes" : "No"}{states[q.id] === "match" && <span className="sr-only">（入力済みの回答と一致）</span>}</dd>
                     </div>
                   ))}
+                  {Object.entries(rule.expected).filter(([id]) => !questions.some((q) => q.id === id))
+                    .map(([id, expected]) => (
+                      <div key={id} data-testid={`cond-${rule.id}-${id}`}>
+                        <dt>{id}</dt>
+                        <dd>{expected === "yes" ? "Yes" : "No"}（この案件には設問なし）</dd>
+                      </div>
+                    ))}
                 </dl>
                 {!gray && !locked && (
                   <div className="rule-actions">

@@ -3,7 +3,7 @@
 import { RESULT_CODE_BY_NAME, resultNameOf } from "./resultCodes";
 import type { AdoptedRule, Answer, ResultName, RetiredQuestion, ReviewCase, Tally } from "./data/cases";
 import type { QuestionId } from "./data/questions";
-import { QUESTION_IDS, type Rule } from "./matching";
+import type { Rule } from "./matching";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -24,10 +24,42 @@ export type CaseListRow = {
   counts: Tally;
 };
 
+/** OACには実際に送るJSON文字列のUTF-8バイト列のハッシュを渡す。 */
+export async function signedBody(init?: RequestInit): Promise<RequestInit | undefined> {
+  if ((init?.method !== "POST" && init?.method !== "PUT") || typeof init.body !== "string") {
+    return init;
+  }
+  if (!globalThis.crypto?.subtle && import.meta.env.DEV) return init;
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(init.body));
+  const headers = new Headers(init.headers);
+  headers.set("x-amz-content-sha256", Array.from(new Uint8Array(hash), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join(""));
+  return { ...init, headers };
+}
+
+export function proposalRequestId(): string {
+  // getRandomValues は開発用HTTPからも利用できる。
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join("-");
+}
+
+/**
+ * 応答を確認できない失敗（接続できない・503）だけ、再送で同じ依頼IDを使う。サーバーが
+ * 結果を返した失敗（502・504などの生成の失敗、4xx）は、その依頼で枠を使い切っているので、
+ * 次の送信は新しい依頼IDにする。
+ */
+export function keepsRequestId(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 0 || error.status === 503);
+}
+
 async function request(path: string, init?: RequestInit): Promise<Response> {
   let response: Response;
   try {
-    response = await fetch(path, init);
+    response = await fetch(path, init?.body == null ? init : await signedBody(init));
   } catch {
     throw new ApiError(0, "サーバーに接続できませんでした");
   }
@@ -109,10 +141,10 @@ type ApiRule = {
 
 /** APIのルールを、照合用の形にする。 */
 function toRule(r: ApiRule): Rule {
-  // 条件のある設問だけを持つ。ない設問は「問わない」。条件の値は yes／no だけ、設問は A01〜A12 だけ。
+  // 条件のある設問だけを持つ。ない設問は「問わない」。条件の値は yes／no だけ、設問IDは共有設定で追加される。
   const expected: Partial<Record<QuestionId, "yes" | "no">> = {};
   for (const [q, value] of Object.entries(r.conditions)) {
-    if (!(QUESTION_IDS as readonly string[]).includes(q)) {
+    if (!/^A[0-9]{2,}$/.test(q)) {
       throw new Error(`ルール${r.rule_id}の条件に、未知の設問${q}があります`);
     }
     if (value !== "yes" && value !== "no") {

@@ -1,13 +1,13 @@
 // 設問の追加案（管理者AIの試作。モック・DBなし）のAPI呼び出し。Reactに依存しない。
 // 失敗は ApiError にそろえ、画面に出す文言（message）を、原因ごとに変える。
-import { ApiError } from "./api";
+import { ApiError, proposalRequestId, signedBody } from "./api";
 import type { Answer } from "./data/cases";
 import { toSource, type GenerationSource } from "./generationSource";
 import { resultNameOf } from "./resultCodes";
 
 /** 廃止した設問は、一覧に残り、retired が true になる（設問文は保持）。 */
 export type DemoQuestion = { id: string; text: string; retired?: boolean };
-export type DemoQuestionList = { revision: number; questions: DemoQuestion[]; source: GenerationSource };
+export type DemoQuestionList = { revision: number; questions: DemoQuestion[]; source: GenerationSource; persistence?: "database" };
 /** 追加案。kind は持たない（既存の形のまま）。 */
 export type AddProposal = {
   kind?: undefined;
@@ -54,7 +54,7 @@ export async function call(
 ): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(path, init);
+    response = await fetch(path, await signedBody(init));
   } catch {
     throw new ApiError(0, networkMessage);
   }
@@ -80,7 +80,10 @@ function errorMessage(status: number, detail: string, subject: string, proposalN
       return `AIの応答がタイムアウトしました${suffix}。${subject}は変わっていません。時間をおいて、もう一度試してください。`;
     case 502:
       return `AIの応答を得られませんでした${suffix}。${subject}は変わっていません。`;
+    case 429:
+      return detail || "今日のAI提案の利用上限に達しました。";
     case 409:
+      if (detail.includes("この依頼は送信済みです")) return detail;
       return `${detail || `${subject}が変わっていたため、反映しませんでした`}。最新の一覧を表示しています。`;
     case 404:
       return `${detail || "提案がありません"}。もう一度、${proposalName}を作ってください。`;
@@ -89,22 +92,23 @@ function errorMessage(status: number, detail: string, subject: string, proposalN
   }
 }
 
-type ApiList = { revision: number; questions: DemoQuestion[]; source?: unknown };
+type ApiList = { revision: number; questions: DemoQuestion[]; source?: unknown; persistence?: unknown };
 
 const toList = (b: ApiList): DemoQuestionList => ({
   revision: b.revision,
   questions: b.questions,
   source: toSource(b.source),
+  ...(b.persistence === "database" ? { persistence: "database" as const } : {}),
 });
 
 export async function getDemoQuestions(): Promise<DemoQuestionList> {
   return toList((await call("/api/admin/questions")) as ApiList);
 }
 
-export async function createQuestionProposal(prompt: string): Promise<QuestionProposal> {
+export async function createQuestionProposal(prompt: string, requestId = proposalRequestId()): Promise<QuestionProposal> {
   const b = (await call("/api/admin/question-proposals", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Idempotency-Key": requestId },
     body: JSON.stringify({ prompt }),
   })) as ApiProposal;
   if (b.kind === "retire") {

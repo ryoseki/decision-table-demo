@@ -583,3 +583,132 @@ test("追加案は、従来どおり（追加ラベル）で、廃止の補足�
   expect(screen.queryByTestId("retirement-detail")).toBeNull();
   expect(within(screen.getByTestId("proposal")).getByText("追加")).toBeTruthy();
 });
+
+
+test("応答を受け取れなかった提案の再送には同じ依頼IDを使う", async () => {
+  const keys: Array<string | null> = [];
+  stubFetch({
+    ...baseRoutes(),
+    "POST /api/admin/question-proposals": (init) => {
+      keys.push(new Headers(init?.headers).get("Idempotency-Key"));
+      return keys.length === 1 ? new Error("response lost") : { body: proposalBody };
+    },
+  });
+  render(<QuestionAdmin />);
+  await screen.findByText("設問1？");
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  await screen.findByTestId("proposal");
+  expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+  expect(keys).toEqual([keys[0], keys[0]]);
+});
+
+
+async function submitTwice(replies: Array<Error | { status: number; body: unknown }>) {
+  const keys: Array<string | null> = [];
+  stubFetch({
+    ...baseRoutes(),
+    "POST /api/admin/question-proposals": (init) => {
+      keys.push(new Headers(init?.headers).get("Idempotency-Key"));
+      return replies[keys.length - 1] ?? { status: 201, body: proposalBody };
+    },
+  });
+  render(<QuestionAdmin />);
+  await screen.findByText("設問1？");
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  await screen.findByRole("alert");
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  await waitFor(() => expect(keys).toHaveLength(2));
+  return keys;
+}
+
+test("接続できない・503（結果が不明）は、同じ入力の再送で同じ依頼IDを使う", async () => {
+  for (const reply of [new Error("offline"), { status: 503, body: { detail: "混み合っています" } }]) {
+    const keys = await submitTwice([reply]);
+    expect(keys[1]).toBe(keys[0]);
+    cleanup();
+  }
+});
+
+test("502・504・429・409など、サーバーが結果を返した失敗の後は、新しい依頼IDにする", async () => {
+  for (const status of [502, 504, 429, 409, 500]) {
+    const keys = await submitTwice([{ status, body: { detail: "理由" } }]);
+    expect(keys[1], String(status)).not.toBe(keys[0]);
+    expect(keys[1], String(status)).toMatch(/^[0-9a-f-]{36}$/);
+    cleanup();
+  }
+});
+
+test("入力を変えた再送は、結果が不明でも新しい依頼IDにする", async () => {
+  const keys: Array<string | null> = [];
+  stubFetch({
+    ...baseRoutes(),
+    "POST /api/admin/question-proposals": (init) => {
+      keys.push(new Headers(init?.headers).get("Idempotency-Key"));
+      return new Error("offline");
+    },
+  });
+  render(<QuestionAdmin />);
+  await screen.findByText("設問1？");
+  const box = screen.getByLabelText("変更の依頼（自然文）");
+  fireEvent.change(box, { target: { value: PROMPT } });
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  await screen.findByRole("alert");
+  fireEvent.change(box, { target: { value: `${PROMPT}（変更）` } });
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  await waitFor(() => expect(keys).toHaveLength(2));
+  expect(keys[1]).not.toBe(keys[0]);
+});
+
+test("送信中は、ボタンを無効にし、フォームの二重送信でも要求は1回だけ（busyの柵）", async () => {
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const spy = stubFetch(baseRoutes());
+  spy.mockImplementation(async (input, init) => {
+    const key = `${init?.method ?? "GET"} ${String(input)}`;
+    if (key === "GET /api/admin/questions") return new Response(JSON.stringify(listBody()), { status: 200 });
+    if (key === "GET /api/rules") return new Response("[]", { status: 200 });
+    await gate;
+    return new Response(JSON.stringify(proposalBody), { status: 201 });
+  });
+  render(<QuestionAdmin />);
+  await screen.findByText("設問1？");
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
+  const button = screen.getByRole("button", { name: "追加案を作る" });
+  fireEvent.click(button);
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.submit(button.closest("form") as HTMLFormElement);
+  fireEvent.submit(button.closest("form") as HTMLFormElement);
+  release?.();
+  await screen.findByTestId("proposal");
+  const posts = spy.mock.calls.filter(([, init]) => init?.method === "POST");
+  expect(posts).toHaveLength(1);
+});
+
+test("利用枠の上限（429）と送信済み（409）は、サーバーの文言を、そのまま画面に出す", async () => {
+  const quota = "この接続元からの、今日（日本時間）のAI提案の回数の上限に達しました。共有データは変わっていません";
+  stubFetch({
+    ...baseRoutes(),
+    "POST /api/admin/question-proposals": { status: 429, body: { detail: quota } },
+  });
+  render(<QuestionAdmin />);
+  await screen.findByText("設問1？");
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  expect((await screen.findByRole("alert")).textContent).toBe(quota);
+  expect(screen.queryByTestId("proposal")).toBeNull();
+  cleanup();
+  const sent = "この依頼は送信済みです。AIの呼び出しは繰り返しません";
+  stubFetch({
+    ...baseRoutes(),
+    "POST /api/admin/question-proposals": { status: 409, body: { detail: sent } },
+  });
+  render(<QuestionAdmin />);
+  await screen.findByText("設問1？");
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
+  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  expect((await screen.findByRole("alert")).textContent).toBe(sent);
+});

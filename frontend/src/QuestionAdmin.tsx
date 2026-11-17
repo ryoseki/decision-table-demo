@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ApiError, describeError } from "./api";
+import { useRef, useState } from "react";
+import { ApiError, describeError, keepsRequestId, proposalRequestId } from "./api";
 import { answerLabel } from "./data/cases";
 import {
   createQuestionProposal,
@@ -144,15 +144,25 @@ export default function QuestionAdmin() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const retry = useRef<{ prompt: string; id: string } | null>(null);
 
   const create = async () => {
+    if (busy) return; // ボタンを無効にしても、フォームの送信は別経路で起きうる。
     setBusy(true);
     setNotice("");
     setError("");
     setProposal(null);
+    const previous = retry.current;
+    const submission = previous?.prompt === prompt
+      ? previous
+      : { prompt, id: proposalRequestId() };
+    retry.current = submission;
     try {
-      setProposal(await createQuestionProposal(prompt));
+      setProposal(await createQuestionProposal(prompt, submission.id));
+      retry.current = null;
     } catch (e) {
+      // 到達したか不明な要求（接続できない・503）だけ、同じ入力の再送で同じ依頼IDを使う。
+      if (!keepsRequestId(e)) retry.current = null;
       setError(describeError(e));
     } finally {
       setBusy(false);
@@ -160,7 +170,7 @@ export default function QuestionAdmin() {
   };
 
   const decide = async (decision: "yes" | "no") => {
-    if (proposal === null) return;
+    if (proposal === null || busy) return;
     setBusy(true);
     setNotice("");
     setError("");
@@ -200,8 +210,12 @@ export default function QuestionAdmin() {
 
       <p className="note note-top" data-testid="mock-note">
         <AiNote source={list.status === "ok" ? list.data.source : null} failed={list.status === "error"} />
-        反映先は、サーバーのメモリ上のデモの一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
-        案件の設問・回答、データベースは変わりません。
+        {list.status === "ok" && (list.data.persistence === "database" ? (
+          <> 承認した設問は共有データベースに保存され、他の来訪者にも見えます。</>
+        ) : (
+          <> 反映先は、サーバーのメモリ上のデモの一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
+        案件の設問・回答、データベースは変わりません。</>
+        ))}
         設問を廃止すると、案件の画面では、その設問が新たな回答の対象から外れます（保存済みの設問文と回答は残ります）。
       </p>
 
