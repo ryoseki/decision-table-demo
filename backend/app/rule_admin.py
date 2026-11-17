@@ -23,6 +23,7 @@ from app.domain import (
     ProposalConflict,
     ProposalNotFound,
     ProposerUnavailable,
+    QuestionBaseChanged,
     source_of,
 )
 from app.question_admin import (
@@ -30,6 +31,7 @@ from app.question_admin import (
     ProposalRequest,
     admin_lock,
     notice,
+    reserve_ai_call,
     unavailable_error,
 )
 from app.question_validation import DemoQuestion
@@ -108,6 +110,7 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
     question_revision, questions = request.app.state.question_store.snapshot()
     revision, current = store.snapshot()
     removed = store.removed_ids()
+    reserve_ai_call(request, proposer)  # 予約を確定してから、生成を1回だけ呼ぶ
     try:
         raw = proposer.generate(
             body.prompt, current, next_rule_id(current, removed), questions
@@ -182,6 +185,12 @@ def _decide(
     except ProposalNotFound:
         raise HTTPException(
             status_code=404, detail="提案がありません（未知、または処理済みです）"
+        ) from None
+    except QuestionBaseChanged:
+        raise HTTPException(
+            status_code=409,
+            detail="設問の一覧が提案の後に変わったため、反映しませんでした。"
+            "判定ルールの一覧は変わっていません",
         ) from None
     except ProposalConflict:
         raise HTTPException(

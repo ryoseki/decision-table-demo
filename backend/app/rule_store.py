@@ -27,7 +27,7 @@ _INITIAL = (
 )
 
 
-def _initial_rules() -> tuple[DemoRule, ...]:
+def initial_rules() -> tuple[DemoRule, ...]:
     return tuple(
         DemoRule(
             rule_id,
@@ -45,7 +45,7 @@ def _initial_rules() -> tuple[DemoRule, ...]:
 class InMemoryRuleStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._rules: tuple[DemoRule, ...] = _initial_rules()
+        self._rules: tuple[DemoRule, ...] = initial_rules()
         self._removed_ids: frozenset[str] = frozenset()
         self._revision = 1
         self._proposals: OrderedDict[str, Proposal] = OrderedDict()

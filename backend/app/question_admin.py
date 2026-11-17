@@ -13,11 +13,13 @@
 - 応答には、生成元（source: モックか、Amazon Bedrock の実接続か）を付ける。
 """
 
+import re
 import threading
 from collections.abc import Callable
 from typing import Annotated, Any, Literal, Protocol
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictStr, StringConstraints
 
 from app.domain import (
@@ -27,6 +29,7 @@ from app.domain import (
     ProposalNotFound,
     ProposerUnavailable,
     RetirementBlocked,
+    StoreBusy,
     source_of,
 )
 from app.question_validation import (
@@ -36,6 +39,13 @@ from app.question_validation import (
     find_case_impact,
     find_rule_references,
     validate_model_output,
+)
+from app.usage_quota import (
+    VIEWER_ADDRESS_HEADER,
+    DuplicateAiRequest,
+    QuotaExceeded,
+    ViewerAddressUnavailable,
+    viewer_key,
 )
 
 MAX_PROMPT_LENGTH = 500
@@ -132,6 +142,8 @@ def _current_rules(request: Request, store: Any) -> list[dict[str, Any]]:
     デモ側で削除したルールが、案件の保存先に残っていれば、参照に数える（保守的。
     どちらの一覧も変更しない）。
     """
+    if getattr(request.app.state, "persistence", None) == "database":
+        return request.app.state.rule_store.list_rows()
     rules: list[dict[str, Any]] = list(store.list_rules())
     demo = getattr(request.app.state, "rule_store", None)
     if demo is not None:
@@ -166,6 +178,76 @@ def _retirement_body(
     }
 
 
+_QUOTA_DETAILS = {
+    "ip": (
+        "この接続元からの、今日（日本時間）のAI提案の回数の上限に達しました。"
+        "日本時間の午前0時以降に、もう一度お試しください。"
+        "同じIPアドレスの利用者は、回数を共有します。共有データは変わっていません"
+    ),
+    "global": (
+        "デモ全体の、今日（日本時間）のAI提案の回数の上限に達しました。"
+        "日本時間の午前0時以降に、もう一度お試しください。共有データは変わっていません"
+    ),
+}
+
+
+def reserve_ai_call(request: Request, proposer: Any) -> None:
+    """Bedrockを呼ぶ前に、日次の利用枠を予約する（モックは消費しない）。
+
+    予約はDB（または開発用のメモリ）に確定してから戻る。戻ったあとに、呼び出し側が生成を
+    1回だけ呼ぶ。上限・接続元の不明・保存先の不調のときは、例外で止まり、生成を呼ばない。
+    """
+    if source_of(proposer).kind == "mock":
+        return
+    quota = getattr(request.app.state, "ai_quota", None)
+    if quota is None:
+        raise HTTPException(
+            status_code=503, detail="AI提案の利用枠の管理先がありません"
+        )
+    try:
+        addresses = request.headers.getlist(VIEWER_ADDRESS_HEADER)
+        key = viewer_key(addresses[0] if len(addresses) == 1 else None)
+    except ViewerAddressUnavailable:
+        raise HTTPException(
+            status_code=400,
+            detail="接続元を確認できないため、AI提案を作れません。共有データは変わっていません",
+        ) from None
+    try:
+        keys = request.headers.getlist("Idempotency-Key")
+        if len(keys) != 1 or not re.fullmatch(
+            r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", keys[0]
+        ):
+            raise HTTPException(status_code=400, detail="有効な依頼IDが必要です")
+        quota.reserve(key, keys[0])
+    except DuplicateAiRequest:
+        raise HTTPException(
+            status_code=409,
+            detail="この依頼は送信済みです。AIの呼び出しは繰り返しません",
+        ) from None
+    except QuotaExceeded as error:
+        raise HTTPException(
+            status_code=429,
+            detail=_QUOTA_DETAILS[error.scope],
+            headers={"Retry-After": str(error.retry_after_seconds)},
+        ) from None
+    # StoreBusy は install_handlers の503になる（生成は呼ばれない）。
+
+
+def install_handlers(application: FastAPI) -> None:
+    """保存先の衝突（再試行を使い切った）を、入力が残る503にそろえる。"""
+
+    @application.exception_handler(StoreBusy)
+    def _store_busy(_request: Request, _error: StoreBusy) -> JSONResponse:
+        return JSONResponse(
+            {
+                "detail": "保存先が混み合っています。"
+                "しばらくしてから、もう一度お試しください"
+            },
+            status_code=503,
+            headers={"Retry-After": "1"},
+        )
+
+
 def source_body(source: GenerationSource) -> dict[str, Any]:
     """応答に付ける生成元。資格情報は含まない。"""
     body: dict[str, Any] = {"kind": source.kind}
@@ -184,7 +266,7 @@ def notice(request: Request, proposer_name: str) -> dict[str, Any]:
     source = source_of(getattr(request.app.state, proposer_name, None))
     return {
         "mock": source.kind == "mock",
-        "persistence": "memory",
+        "persistence": getattr(request.app.state, "persistence", "memory"),
         "source": source_body(source),
     }
 
@@ -243,6 +325,7 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
     store: QuestionStore = request.app.state.question_store
     proposer: QuestionProposer = request.app.state.question_proposer
     revision, current = store.snapshot()
+    reserve_ai_call(request, proposer)  # 予約を確定してから、生成を1回だけ呼ぶ
     try:
         raw = proposer.generate(body.prompt, current)
     except ProposerUnavailable as error:

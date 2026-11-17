@@ -478,3 +478,34 @@ test("ルールが0件の一覧は、見出しと0件を出し、エラーにし
   expect(rowsOf(within(proposal).getByRole("region", { name: "Before（現行）" }))).toBe(0);
   expect(rowsOf(within(proposal).getByRole("region", { name: "After（反映した場合）" }))).toBe(1);
 });
+
+
+test("接続できない・503は同じ依頼ID、502・504・429は新しい依頼IDで再送する", async () => {
+  const run = async (reply: Error | { status: number; body: unknown }) => {
+    const keys: Array<string | null> = [];
+    stubFetch({
+      ...baseRoutes(),
+      "POST /api/admin/rule-proposals": (init) => {
+        keys.push(new Headers(init?.headers).get("Idempotency-Key"));
+        return keys.length === 1 ? reply : { status: 201, body: addBody };
+      },
+    });
+    render(<RuleAdmin />);
+    await screen.findByText("R01");
+    fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
+    fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+    await waitFor(() => expect(keys).toHaveLength(2));
+    cleanup();
+    return keys;
+  };
+  for (const reply of [new Error("offline"), { status: 503, body: { detail: "混み合っています" } }]) {
+    const keys = await run(reply);
+    expect(keys[1]).toBe(keys[0]);
+  }
+  for (const status of [502, 504, 429]) {
+    const keys = await run({ status, body: { detail: "理由" } });
+    expect(keys[1], String(status)).not.toBe(keys[0]);
+  }
+});

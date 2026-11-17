@@ -136,11 +136,18 @@ _opener = urllib.request.build_opener(_NoRedirect)
 
 
 def fetch_auto_answer(
-    base_url: str, question_code: str, user_id: str, *, inject_timeout: bool = False
+    base_url: str,
+    question_code: str,
+    user_id: str,
+    *,
+    inject_timeout: bool = False,
+    internal_mock_token: str = "",
 ) -> str:
     """モックを実際にHTTPで1回呼ぶ。成功時はyes／no、失敗はAutoAnswerError。"""
     url = f"{base_url.rstrip('/')}/mock/v1/auto-answers/{question_code}"
     headers = {"Content-Type": "application/json"}
+    if internal_mock_token:
+        headers["X-Internal-Mock-Token"] = internal_mock_token
     if inject_timeout:
         headers["X-Mock-Fault"] = FAULT_TIMEOUT
     request = urllib.request.Request(
@@ -201,6 +208,9 @@ def intake_case(body: IntakeRequest, request: Request) -> dict:
                 question_code,
                 body.user.user_id,
                 inject_timeout=question_code in fault_questions,
+                internal_mock_token=getattr(
+                    request.app.state, "internal_mock_token", ""
+                ),
             )
         except AutoAnswerError:
             continue  # 確認待ちのまま。再試行しない。

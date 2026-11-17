@@ -40,12 +40,15 @@ _INITIAL = (
 )
 
 
+def initial_questions() -> tuple[DemoQuestion, ...]:
+    """初期のデモ一覧（A01〜A12）。DBの共有設定の初期値にも使う。"""
+    return tuple(DemoQuestion(i, t) for i, t in _INITIAL)
+
+
 class InMemoryQuestionStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._questions: tuple[DemoQuestion, ...] = tuple(
-            DemoQuestion(i, t) for i, t in _INITIAL
-        )
+        self._questions: tuple[DemoQuestion, ...] = initial_questions()
         self._revision = 1
         self._proposals: OrderedDict[str, Proposal] = OrderedDict()
 

@@ -22,6 +22,7 @@ services:
     environment:
       # DB_HOST があるとPostgreSQLに保存する（なければメモリ保存）。パスワードは使わない。
       DB_HOST: db
+      SHARED_CONFIG_DB: "${SHARED_CONFIG_DB:-0}"
       DB_NAME: "${DB_NAME:-decision_demo}"
       DB_USER: "${DB_USER:-demo_admin}"
       DB_PASSWORD: ""

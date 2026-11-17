@@ -30,12 +30,16 @@ CODE_OF_RESULT = {
 
 INIT_DEV = Path(os.environ.get("DB_INIT_DIR", "/repo/db")) / "init_dev.py"
 TABLES = [
+    "ai_usage_counters",
+    "ai_usage_requests",
     "case_checks",
     "case_questions",
     "case_results",
     "decision_rules",
     "review_cases",
     "review_questions",
+    "shared_config_revisions",
+    "shared_proposals",
 ]
 
 
@@ -94,7 +98,7 @@ class DevInit(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("適用しました", out)
         tables, questions, rules = self.snapshot()
-        self.assertEqual(tables, TABLES)  # DDLの6テーブルがすべてできる
+        self.assertEqual(tables, TABLES)  # DDLのテーブルがすべてできる
         self.assertEqual(len(questions), 12)  # 設問は12件
         self.assertEqual(
             [q[0] for q in questions],

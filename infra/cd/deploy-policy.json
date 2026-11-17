@@ -53,6 +53,12 @@
       "Effect": "Allow",
       "Action": "cloudfront:GetOriginAccessControl",
       "Resource": "*"
+    },
+    {
+      "Sid": "ReadDemoOriginRequestPolicy",
+      "Effect": "Allow",
+      "Action": "cloudfront:GetOriginRequestPolicy",
+      "Resource": "*"
     }
   ]
 }

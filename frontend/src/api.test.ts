@@ -1,6 +1,6 @@
 // 実行: npm test（Vitest）。APIの呼び出しを、fetch のスタブで確認する（サーバーに接続しない）。
 import { afterEach, expect, test, vi } from "vitest";
-import { ApiError, describeError, getCase, listCases, listRules, saveJudgment } from "./api";
+import { ApiError, describeError, getCase, listCases, listRules, saveJudgment, signedBody } from "./api";
 import { apiCase, apiRow, stubFetch } from "./testing";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -72,7 +72,9 @@ test("保存: PUT で、結果コードだけを送る（回答を渡さない�
   await saveJudgment("CASE-X", "アカウント一時凍結");
   const init = spy.mock.calls[0][1] as RequestInit;
   expect(init.method).toBe("PUT");
-  expect(init.headers).toEqual({ "Content-Type": "application/json" });
+  const headers = new Headers(init.headers);
+  expect(headers.get("content-type")).toBe("application/json");
+  expect(headers.get("x-amz-content-sha256")).toBe("8fc96da811b3dd77810ebe0226a2676eaea8eda46bafb7394f8abd8e05140c70");
   expect(JSON.parse(init.body as string)).toEqual({ result_code: "account_suspension" }); // 回答は送らない
 });
 
@@ -146,8 +148,8 @@ test("ルール: 一部の設問だけに条件があるルールは、その設
 test("ルール: 条件の値が yes／no でない・A01〜A12にない設問は、黙って使わず、エラーにする", async () => {
   stubFetch({ "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: { A05: "maybe" } }] } });
   await expect(listRules()).rejects.toThrow(/R09.*A05/);
-  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R08", revision: 1, result_code: "caution", conditions: { A99: "yes" } }] } });
-  await expect(listRules()).rejects.toThrow(/R08.*A99/);
+  stubFetch({ "GET /api/rules": { body: [{ rule_id: "R08", revision: 1, result_code: "caution", conditions: { B99: "yes" } }] } });
+  await expect(listRules()).rejects.toThrow(/R08.*B99/);
 });
 
 test("ルール: 定義にない結果コードは、エラーにする", async () => {
@@ -202,4 +204,28 @@ test("詳細: 廃止済みの設問は、回答に入れず、保存済みの設
 test("詳細: 廃止済みの設問がなければ、retiredQuestions を持たない", async () => {
   stubFetch({ "GET /api/cases/CASE-X": { body: apiCase() } });
   expect((await getCase("CASE-X")).retiredQuestions).toBeUndefined();
+});
+
+
+test("照合一覧は、A09を外したR01と追加設問を参照するルールを一緒に読み込む", async () => {
+  stubFetch({ "GET /api/rules": { body: [
+    { rule_id: "R01", revision: 2, result_code: "caution", conditions: { A01: "yes" } },
+    { rule_id: "R04", revision: 1, result_code: "caution", conditions: { A13: "yes" } },
+  ] } });
+  const rules = await listRules();
+  expect(rules[0].expected).toEqual({ A01: "yes" });
+  expect(rules[1].expected).toEqual({ A13: "yes" });
+});
+
+
+test("POST・PUT: 実際に送る日本語のJSON文字列のUTF-8バイト列のSHA-256を、OAC用のヘッダーに付ける", async () => {
+  const body = JSON.stringify({ prompt: "日本語の設問を追加して" });
+  const signed = await signedBody({ method: "POST", headers: { "Content-Type": "application/json" }, body });
+  const headers = new Headers(signed?.headers);
+  expect(headers.get("x-amz-content-sha256")).toBe("9d8196790604d97363ffde34c09d7ccd6e4b83ca05660b15ac2ad50b70234afb");
+  expect(headers.get("content-type")).toBe("application/json");
+  expect(signed?.body).toBe(body); // 本文は書き換えない
+  // 読み取り・本文なしには付けない
+  expect(await signedBody({ method: "GET" })).toEqual({ method: "GET" });
+  expect(await signedBody({ method: "POST" })).toEqual({ method: "POST" });
 });

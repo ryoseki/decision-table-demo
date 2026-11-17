@@ -12,14 +12,27 @@ import re
 import secrets
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
+from uuid import uuid4
 
 import psycopg
 import psycopg.errors
 
-from app import db_retry, db_store
-from app.domain import JudgmentAlreadyRecorded
+from app import db_retry, db_store, shared_db
+from app.domain import (
+    JudgmentAlreadyRecorded,
+    ProposalConflict,
+    ProposalNotFound,
+    QuestionBaseChanged,
+    StoreBusy,
+)
+from app.question_validation import validate_model_output
+from app.rule_validation import validate_rule_output
+from app.shared_db import DbQuestionStore, DbRuleStore, PostgresAiQuota, SharedConfigDb
+from app.usage_quota import DuplicateAiRequest, QuotaExceeded, QuotaLimits
 from tests.test_intake import _Server, case_payload, make_app, send
 
 DOCS = Path(os.environ.get("DB_DOCS_DIR", "/repo/docs"))
@@ -119,6 +132,270 @@ class DbFlow(unittest.TestCase):
         self.store = db_store.PostgresCaseStore(lambda: _connect(self.schema))
         self.mock_calls: list[str] = []
         self.start(self.store)
+
+    def test_shared_quota_deduplicates_and_enforces_both_caps(self):
+        now = datetime(2026, 11, 16, 14, 59, tzinfo=UTC)
+        quota = PostgresAiQuota(
+            lambda: _connect(self.schema),
+            b"x" * 32,
+            QuotaLimits(2, 3),
+            clock=lambda: now,
+        )
+        request_id = str(uuid4())
+
+        def reserve_once(_):
+            try:
+                quota.reserve("v4:192.0.2.1", request_id)
+            except DuplicateAiRequest:
+                return False
+            return True
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(sorted(pool.map(reserve_once, range(2))), [False, True])
+        self.assertEqual(quota.used("v4:192.0.2.1"), (1, 1))
+        quota.reserve("v4:192.0.2.1", str(uuid4()))
+        with self.assertRaises(QuotaExceeded) as ip_exceeded:
+            quota.reserve("v4:192.0.2.1", str(uuid4()))
+        self.assertEqual(ip_exceeded.exception.scope, "ip")
+        quota.reserve("v4:192.0.2.2", str(uuid4()))
+        with self.assertRaises(QuotaExceeded) as global_exceeded:
+            quota.reserve("v4:192.0.2.3", str(uuid4()))
+        self.assertEqual(global_exceeded.exception.scope, "global")
+        self.assertEqual(quota.used("v4:192.0.2.3"), (0, 3))
+        now += timedelta(minutes=1)
+        with self.assertRaises(DuplicateAiRequest):
+            quota.reserve("v4:192.0.2.1", request_id)
+        self.assertEqual(quota.used("v4:192.0.2.1"), (0, 0))
+
+    def test_approved_question_is_visible_to_a_new_store(self):
+        def connect():
+            return _connect(self.schema)
+
+        first = DbQuestionStore(SharedConfigDb(connect))
+        revision, questions = first.snapshot()
+        proposal = validate_model_output(
+            {
+                "operation": "add_question",
+                "question": {"id": "A13", "text": "架空の追加設問"},
+            },
+            questions,
+            revision,
+        )
+        proposal_id = first.register(proposal)
+        second = DbQuestionStore(SharedConfigDb(connect))
+        second.approve(proposal_id)
+        self.assertEqual(first.snapshot()[1][-1].text, "架空の追加設問")
+        restored = SharedConfigDb(connect).restore(1)
+        self.assertEqual(restored.config_revision, 3)
+        self.assertTrue(first.snapshot()[1][-1].retired)
+        self.assertEqual(first.snapshot()[1][-1].id, "A13")
+
+    # --- 共有設定・利用枠の同時操作 -------------------------------------------------
+
+    def _shared(self):
+        db = SharedConfigDb(lambda: _connect(self.schema))
+        return db, DbQuestionStore(db), DbRuleStore(db)
+
+    def _history(self):
+        with _connect(self.schema) as conn:
+            return conn.execute(
+                "SELECT config_revision, origin FROM shared_config_revisions"
+                " ORDER BY config_revision"
+            ).fetchall()
+
+    @staticmethod
+    def _add_question(store, text):
+        revision, questions = store.snapshot()
+        number = len(questions) + 1
+        proposal = validate_model_output(
+            {
+                "operation": "add_question",
+                "question": {"id": f"A{number:02d}", "text": text},
+            },
+            questions,
+            revision,
+        )
+        return store.register(proposal)
+
+    @staticmethod
+    def _add_rule(db, rules_store, questions_store):
+        question_revision, questions = questions_store.snapshot()
+        revision, rules = rules_store.snapshot()
+        proposal = validate_rule_output(
+            {
+                "operation": "add_rule",
+                "rule": {
+                    "id": "R04",
+                    "result_code": "caution",
+                    "conditions": {"A01": "yes"},
+                },
+            },
+            rules,
+            questions,
+            revision,
+            question_revision=question_revision,
+        )
+        return rules_store.register(proposal)
+
+    def _race(self, first, second):
+        """2つの承認が、同じ最新の版を読み終えてから、書き込みへ進むようにそろえる。"""
+        barrier = threading.Barrier(2)
+        seen = threading.local()
+        real = shared_db._latest
+
+        def latest(conn):
+            config = real(conn)
+            if not getattr(seen, "done", False):
+                seen.done = True
+                barrier.wait(10)
+            return config
+
+        def run(call):
+            try:
+                return call()
+            except Exception as error:  # noqa: BLE001  結果として比べる
+                return error
+
+        with (
+            mock.patch.object(shared_db, "_latest", latest),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            futures = [pool.submit(run, first), pool.submit(run, second)]
+            return [future.result(timeout=30) for future in futures]
+
+    def test_stale_no_and_actual_approvals_keep_history_append_only(self):
+        _, questions, _ = self._shared()
+        stale = self._add_question(questions, "架空の設問その1")
+        other = self._add_question(questions, "架空の設問その2")
+        questions.approve(stale)
+        self.assertEqual(self._history(), [(1, "seed"), (2, "approval")])
+        with self.assertRaises(ProposalConflict):
+            questions.approve(other)  # 基準が古い: 追加せず、提案は使い切る
+        self.assertEqual(self._history(), [(1, "seed"), (2, "approval")])
+        with self.assertRaises(ProposalNotFound):
+            questions.approve(other)
+        declined = self._add_question(questions, "架空の設問その3")
+        questions.reject(declined)  # 「いいえ」: 履歴は増えない
+        self.assertEqual(len(self._history()), 2)
+        with self.assertRaises(ProposalNotFound):
+            questions.approve(declined)
+        questions.approve(self._add_question(questions, "架空の設問その4"))
+        self.assertEqual(
+            self._history(), [(1, "seed"), (2, "approval"), (3, "approval")]
+        )
+        with _connect(self.schema) as conn:  # 過去の版は変わらない
+            first = conn.execute(
+                "SELECT jsonb_array_length(questions), question_revision"
+                " FROM shared_config_revisions WHERE config_revision = 1"
+            ).fetchone()
+        self.assertEqual(first[1], 1)
+
+    def test_concurrent_approvals_of_the_same_base_leave_one_revision_and_no_500(self):
+        _, questions, _ = self._shared()
+        first = self._add_question(questions, "架空の設問その1")
+        second = self._add_question(questions, "架空の設問その2")
+        outcomes = self._race(
+            lambda: questions.approve(first), lambda: questions.approve(second)
+        )
+        failures = [o for o in outcomes if isinstance(o, Exception)]
+        self.assertEqual(len(failures), 1, outcomes)
+        self.assertIsInstance(failures[0], ProposalConflict)
+        self.assertNotIsInstance(failures[0], psycopg.errors.UniqueViolation)
+        self.assertEqual(self._history(), [(1, "seed"), (2, "approval")])
+
+    def test_concurrent_question_and_rule_approvals_never_return_unique_errors(self):
+        db, questions, rules_store = self._shared()
+        question_id = self._add_question(questions, "架空の設問その1")
+        rule_id = self._add_rule(db, rules_store, questions)
+        outcomes = self._race(
+            lambda: questions.approve(question_id),
+            lambda: rules_store.approve(rule_id),
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                self.assertIsInstance(outcome, (ProposalConflict, QuestionBaseChanged))
+        succeeded = sum(1 for o in outcomes if not isinstance(o, Exception))
+        history = self._history()
+        self.assertEqual([r for r, _ in history], list(range(1, len(history) + 1)))
+        self.assertEqual(len(history), 1 + succeeded)
+
+    def test_a_revision_conflict_that_never_clears_is_busy_not_a_unique_error(self):
+        db, questions, _ = self._shared()
+        proposal = self._add_question(questions, "架空の設問その1")
+        with (
+            mock.patch.object(db_retry, "sleep"),
+            mock.patch.object(
+                shared_db,
+                "_insert_config",
+                side_effect=psycopg.errors.SerializationFailure("検証用"),
+            ),
+            self.assertRaises(StoreBusy),
+        ):
+            questions.approve(proposal)
+        self.assertEqual(self._history(), [(1, "seed")])
+        questions.approve(proposal)  # 失敗した承認は提案を消費していない
+
+    def _quota(self, limits, clock):
+        return PostgresAiQuota(
+            lambda: _connect(self.schema), b"x" * 32, limits, clock=clock
+        )
+
+    def _burst(self, quota, keys):
+        def run(key):
+            try:
+                quota.reserve(key, str(uuid4()))
+            except QuotaExceeded as error:
+                return error.scope
+            except StoreBusy:
+                return "busy"
+            return "ok"
+
+        with ThreadPoolExecutor(max_workers=len(keys)) as pool:
+            return list(pool.map(run, keys))
+
+    def test_concurrent_distinct_ids_never_exceed_the_per_ip_limit(self):
+        now = datetime(2026, 11, 16, 3, 0, tzinfo=UTC)
+        quota = self._quota(QuotaLimits(2, 50), lambda: now)
+        results = self._burst(quota, ["v4:192.0.2.1"] * 6)
+        self.assertLessEqual(results.count("ok"), 2)
+        self.assertEqual(set(results) - {"ok", "ip", "busy"}, set())
+        self.assertEqual(quota.used("v4:192.0.2.1")[0], results.count("ok"))
+        for _ in range(2):  # 混雑で数えなかった分を順に確認: 合計でちょうど2件で止まる
+            try:
+                quota.reserve("v4:192.0.2.1", str(uuid4()))
+            except QuotaExceeded:
+                break
+        self.assertEqual(quota.used("v4:192.0.2.1"), (2, 2))
+
+    def test_concurrent_distinct_ids_never_exceed_the_global_limit(self):
+        now = datetime(2026, 11, 16, 3, 0, tzinfo=UTC)
+        quota = self._quota(QuotaLimits(50, 3), lambda: now)
+        keys = [f"v4:192.0.2.{n}" for n in range(1, 7)]
+        results = self._burst(quota, keys)
+        self.assertLessEqual(results.count("ok"), 3)
+        self.assertEqual(set(results) - {"ok", "global", "busy"}, set())
+        self.assertEqual(quota.used(keys[0])[1], results.count("ok"))
+        for key in keys:
+            try:
+                quota.reserve(key, str(uuid4()))
+            except QuotaExceeded:
+                break
+        self.assertEqual(quota.used(keys[0])[1], 3)
+        with self.assertRaises(QuotaExceeded) as exceeded:
+            quota.reserve("v4:192.0.2.99", str(uuid4()))
+        self.assertEqual(exceeded.exception.scope, "global")
+
+    def test_same_request_id_after_the_day_rolls_over_is_still_a_duplicate(self):
+        now = [datetime(2026, 11, 16, 14, 59, tzinfo=UTC)]  # 日本時間 23:59
+        quota = self._quota(QuotaLimits(2, 3), lambda: now[0])
+        request_id = str(uuid4())
+        quota.reserve("v4:192.0.2.1", request_id)
+        now[0] += timedelta(minutes=2)  # 日本時間の翌日
+        with self.assertRaises(DuplicateAiRequest):
+            quota.reserve("v4:192.0.2.1", request_id)
+        self.assertEqual(quota.used("v4:192.0.2.1"), (0, 0))  # 新しい日は数えない
+        quota.reserve("v4:192.0.2.1", str(uuid4()))  # 別のIDは、新しい日の枠で通る
+        self.assertEqual(quota.used("v4:192.0.2.1"), (1, 1))
 
     def start(self, store):
         self.server = _Server(make_app(store, self.mock_calls))

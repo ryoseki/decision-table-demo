@@ -41,7 +41,7 @@
 
 ## DDL案
 
-Aurora DSQLでの適用時は、各`CREATE TABLE`を依存順（親から子へ。`review_cases`・`review_questions`・`decision_rules`、`case_questions`、`case_results`、`case_checks`の順）に1文ずつ確定します。DSQLは1トランザクションにつき1つのDDL文を許容し、DDLとデータ登録を別トランザクションに分けます。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)・[DDLのトランザクション仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-ddl.html)
+Aurora DSQLでの適用時は、各`CREATE TABLE`を依存順（親から子へ。`review_cases`・`review_questions`・`decision_rules`、`case_questions`、`case_results`、`case_checks`、`shared_config_revisions`、`shared_proposals`、`ai_usage_requests`、`ai_usage_counters`の順）に1文ずつ確定します。DSQLは1トランザクションにつき1つのDDL文を許容し、DDLとデータ登録を別トランザクションに分けます。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)・[DDLのトランザクション仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-ddl.html)
 
 ```sql
 CREATE TABLE review_cases (
@@ -112,7 +112,40 @@ CREATE TABLE case_checks (
     PRIMARY KEY (case_id, question_code),
     FOREIGN KEY (case_id, question_code) REFERENCES case_questions (case_id, question_code)
 );
+
+CREATE TABLE shared_config_revisions (
+    config_revision integer PRIMARY KEY CHECK (config_revision >= 1),
+    question_revision integer NOT NULL CHECK (question_revision >= 1),
+    rule_revision integer NOT NULL CHECK (rule_revision >= 1),
+    questions jsonb NOT NULL CHECK (jsonb_typeof(questions) = 'array'),
+    rules jsonb NOT NULL CHECK (jsonb_typeof(rules) = 'array'),
+    removed_rule_ids jsonb NOT NULL CHECK (jsonb_typeof(removed_rule_ids) = 'array'),
+    origin text NOT NULL CHECK (origin IN ('seed', 'approval', 'restore')),
+    restored_from integer,
+    created_at timestamptz NOT NULL
+);
+
+CREATE TABLE shared_proposals (
+    proposal_id text PRIMARY KEY CHECK (trim(proposal_id) <> ''),
+    kind text NOT NULL CHECK (kind IN ('question', 'rule')),
+    payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    created_at timestamptz NOT NULL
+);
+
+CREATE TABLE ai_usage_requests (
+    request_id text PRIMARY KEY
+);
+
+CREATE TABLE ai_usage_counters (
+    usage_day date NOT NULL,
+    scope text NOT NULL CHECK (scope IN ('ip', 'global')),
+    subject text NOT NULL CHECK (trim(subject) <> ''),
+    used integer NOT NULL CHECK (used >= 0),
+    PRIMARY KEY (usage_day, scope, subject)
+);
 ```
+
+`shared_config_revisions`・`shared_proposals`・`ai_usage_counters`は、公開デモの共有データ（設問・判定ルールの承認結果、未処理の提案、Bedrock推論の日次の件数）です。外部キーは持ちません。`shared_config_revisions`は追記だけで、承認のたびに「最新の版+1」の行を足します（同時の承認は同じ主キーを書くので、片方が衝突で失敗して再試行されます）。過去の版は変えず、運営が前の版を新しい版として復元できます（`docs/development-workflow.md`）。`shared_proposals`には、操作と基準の版だけを入れ（依頼の文章とAIの出力は入れない）、24時間を過ぎたものを消します。`ai_usage_counters`の`subject`は、全体は`*`、接続元は鍵付きHMAC-SHA256の16進で、IPそのものは入れません。7日より古い日の行を消します。`ai_usage_requests`は、確定済みの依頼IDだけを追記します。依頼IDと両方のカウンターは同じトランザクションで確定します。
 
 `case_results`の採用ルール`(rule_id, rule_revision)`は、オペレータが「このルールを採用」を操作したときだけ記録する参考の記録で、結論は選んだ`result_code`です。両方NULLか両方非NULLかをCHECKで揃えます。`decision_rules`への外部キーは持たず、DBは採用ルールの実在も、採用ルールの結果と選んだ結果の一致も検査しません（結果が違っても保存できます）。選んだ`result_code`が定義済みのコードか、採用ルールが`decision_rules`に実在するか（なければ422）は、保存処理側で検査します。結果コード表や不正を認定するルールは、この案では定めません。判定結果の3列（`result_code`・`recorded_by`・`recorded_at`）は、受付時は空で、全部空か全部入っているかのどちらかだけを許します。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)
 

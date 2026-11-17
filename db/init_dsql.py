@@ -31,10 +31,15 @@ DOCS = Path(os.environ.get("DOCS_DIR", "/repo/docs"))
 NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
 IAM_ROLE_ARN = re.compile(r"arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}")
 
-# アプリの保存・再表示が使う権限だけ。設問とルールは読むだけ（アプリは書かない）。
-# DDL（テーブルの作成・変更）と、削除の権限は付けない。
+# アプリの保存・再表示が使う権限だけ。設問マスターは読むだけ（アプリは書かない）。
+# DDL（テーブルの作成・変更）は付けない。DELETEは、下の共有データの2表だけに付ける。
 APP_WRITE_TABLES = ("review_cases", "case_questions", "case_results", "case_checks")
-APP_READ_TABLES = ("review_questions", "decision_rules")
+APP_READ_TABLES = ("review_questions",)
+# 公開デモの共有データ。承認結果は追記だけ（UPDATE・DELETEなし）。承認で追加したルールは
+# decision_rules に不変の行として足す（INSERTだけ。UPDATE・DELETEなし）。
+APP_APPEND_TABLES = ("shared_config_revisions", "decision_rules", "ai_usage_requests")
+# 未処理の提案と日別の件数は、消費・期限切れの削除のため DELETE も付ける。
+APP_DELETE_TABLES = ("shared_proposals", "ai_usage_counters")
 
 
 def connect(schema: str) -> psycopg.Connection:
@@ -160,6 +165,8 @@ def setup_app_role(
     for tables, privileges in (
         (APP_WRITE_TABLES, "SELECT, INSERT, UPDATE"),
         (APP_READ_TABLES, "SELECT"),
+        (APP_APPEND_TABLES, "SELECT, INSERT"),
+        (APP_DELETE_TABLES, "SELECT, INSERT, UPDATE, DELETE"),
     ):
         for table in tables:
             conn.execute(
@@ -169,7 +176,8 @@ def setup_app_role(
             )
     print(
         f"権限: スキーマの利用、{', '.join(APP_WRITE_TABLES)} の読み書き、"
-        f"{', '.join(APP_READ_TABLES)} の読み取りだけを付与"
+        f"{', '.join(APP_READ_TABLES)} の読み取り、{', '.join(APP_APPEND_TABLES)} の追記、"
+        f"{', '.join(APP_DELETE_TABLES)} の読み書きと削除だけを付与"
     )
 
 
