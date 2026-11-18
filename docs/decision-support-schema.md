@@ -41,7 +41,7 @@
 
 ## DDL案
 
-Aurora DSQLでの適用時は、各`CREATE TABLE`を依存順（親から子へ。`review_cases`・`review_questions`・`decision_rules`、`case_questions`、`case_results`、`case_checks`、`shared_config_revisions`、`shared_proposals`、`ai_usage_requests`、`ai_usage_counters`の順）に1文ずつ確定します。DSQLは1トランザクションにつき1つのDDL文を許容し、DDLとデータ登録を別トランザクションに分けます。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)・[DDLのトランザクション仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-ddl.html)
+Aurora DSQLでの適用時は、各`CREATE TABLE`を依存順（親から子へ。`review_cases`・`review_questions`・`decision_rules`、`case_questions`、`case_results`、`case_checks`、`shared_config_revisions`、`shared_proposals`、`processed_shared_proposals`、`proposal_templates`、`proposal_template_migrations`、`ai_usage_requests`、`ai_usage_counters`の順）に1文ずつ確定します。DSQLは1トランザクションにつき1つのDDL文を許容し、DDLとデータ登録を別トランザクションに分けます。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)・[DDLのトランザクション仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-ddl.html)
 
 ```sql
 CREATE TABLE review_cases (
@@ -132,6 +132,24 @@ CREATE TABLE shared_proposals (
     created_at timestamptz NOT NULL
 );
 
+CREATE TABLE processed_shared_proposals (
+    proposal_id text PRIMARY KEY,
+    target text NOT NULL CHECK (target IN ('question', 'rule')),
+    payload jsonb NOT NULL,
+    applied boolean NOT NULL
+);
+
+CREATE TABLE proposal_templates (
+    target text NOT NULL CHECK (target IN ('question', 'rule')),
+    prompt text NOT NULL,
+    operation jsonb NOT NULL,
+    PRIMARY KEY (target, prompt)
+);
+
+CREATE TABLE proposal_template_migrations (
+    name text PRIMARY KEY
+);
+
 CREATE TABLE ai_usage_requests (
     request_id text PRIMARY KEY
 );
@@ -145,7 +163,7 @@ CREATE TABLE ai_usage_counters (
 );
 ```
 
-`shared_config_revisions`・`shared_proposals`・`ai_usage_counters`は、公開デモの共有データ（設問・判定ルールの承認結果、未処理の提案、Bedrock推論の日次の件数）です。外部キーは持ちません。`shared_config_revisions`は追記だけで、承認のたびに「最新の版+1」の行を足します（同時の承認は同じ主キーを書くので、片方が衝突で失敗して再試行されます）。過去の版は変えず、運営が前の版を新しい版として復元できます（`docs/development-workflow.md`）。`shared_proposals`には、操作と基準の版だけを入れ（依頼の文章とAIの出力は入れない）、24時間を過ぎたものを消します。`ai_usage_counters`の`subject`は、全体は`*`、接続元は鍵付きHMAC-SHA256の16進で、IPそのものは入れません。7日より古い日の行を消します。`ai_usage_requests`は、確定済みの依頼IDだけを追記します。依頼IDと両方のカウンターは同じトランザクションで確定します。
+`shared_config_revisions`・`shared_proposals`・`ai_usage_counters`は、公開デモの共有データ（設問・判定ルールの承認結果、未処理の提案、Bedrock推論の日次の件数）です。外部キーは持ちません。`shared_config_revisions`は追記だけで、承認のたびに「最新の版+1」の行を足します（同時の承認は同じ主キーを書くので、片方が衝突で失敗して再試行されます）。過去の版は変えず、運営が前の版を新しい版として復元できます（`docs/development-workflow.md`）。`shared_proposals`には、検証済みの操作と基準の版を入れ、24時間を過ぎたものを消します。再利用を有効にしたローカル構成では、生成元を問わず、提案に依頼文を一時保持します。Yesで実際に反映するときに、設定の新しい版・処理済み記録（`processed_shared_proposals`）・定型文の自動登録（`proposal_templates`への置き換えつき挿入）を同じトランザクションで確定します。途中で失敗すれば、3つとも取り消します。Noや反映できなかった提案は定型文を変えません。処理済み記録に依頼文は残しません。`ai_usage_counters`の`subject`は、全体は`*`、接続元は鍵付きHMAC-SHA256の16進で、IPそのものは入れません。7日より古い日の行を消します。`ai_usage_requests`は、確定済みの依頼IDだけを追記します。依頼IDと両方のカウンターは同じトランザクションで確定します。`proposal_templates`は対象・依頼文・操作を保持し、対象と文言の組み合わせを主キーにします。`proposal_template_migrations`は初期登録を一度だけ行うための記録です。
 
 `case_results`の採用ルール`(rule_id, rule_revision)`は、オペレータが「このルールを採用」を操作したときだけ記録する参考の記録で、結論は選んだ`result_code`です。両方NULLか両方非NULLかをCHECKで揃えます。`decision_rules`への外部キーは持たず、DBは採用ルールの実在も、採用ルールの結果と選んだ結果の一致も検査しません（結果が違っても保存できます）。選んだ`result_code`が定義済みのコードか、採用ルールが`decision_rules`に実在するか（なければ422）は、保存処理側で検査します。結果コード表や不正を認定するルールは、この案では定めません。判定結果の3列（`result_code`・`recorded_by`・`recorded_at`）は、受付時は空で、全部空か全部入っているかのどちらかだけを許します。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)
 

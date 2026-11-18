@@ -9,7 +9,7 @@ import { toSource, type GenerationSource } from "./generationSource";
 /** 条件は、設問IDと、Yes／No（API の並びのまま）。 */
 export type RuleCondition = { questionId: string; answer: "yes" | "no" };
 export type DemoRuleRow = { ruleId: string; revision: number; result: ResultName; conditions: RuleCondition[] };
-export type DemoRuleList = { revision: number; rules: DemoRuleRow[]; source: GenerationSource; persistence?: "database" };
+export type DemoRuleList = { revision: number; rules: DemoRuleRow[]; source: GenerationSource; persistence?: "database"; templateReuse?: boolean };
 export type RuleProposal = {
   /** add は追加案、remove は削除案。 */
   kind: "add" | "remove";
@@ -32,7 +32,7 @@ const NETWORK_UNKNOWN =
   "サーバーに接続できませんでした。反映されたかどうかを確認できていません。もう一度送るか、一覧を再読み込みして確認してください。";
 
 type ApiRule = { rule_id: string; revision: number; result_code: string; conditions: Record<string, "yes" | "no"> };
-type ApiList = { revision: number; rules: ApiRule[]; source?: unknown; persistence?: unknown };
+type ApiList = { revision: number; rules: ApiRule[]; source?: unknown; persistence?: unknown; template_reuse?: boolean };
 
 const toRow = (r: ApiRule): DemoRuleRow => ({
   ruleId: r.rule_id,
@@ -42,16 +42,17 @@ const toRow = (r: ApiRule): DemoRuleRow => ({
 });
 const toList = (b: ApiList): DemoRuleList => ({ revision: b.revision, rules: b.rules.map(toRow), source: toSource(b.source),
   ...(b.persistence === "database" ? { persistence: "database" as const } : {}),
+  ...(b.template_reuse ? { templateReuse: true } : {}),
 });
 
 export async function getDemoRules(): Promise<DemoRuleList> {
   return toList((await call("/api/admin/rules", undefined, NETWORK_UNCHANGED, SUBJECT, PROPOSAL_NAME)) as ApiList);
 }
 
-export async function createRuleProposal(prompt: string, requestId = proposalRequestId()): Promise<RuleProposal> {
+export async function createRuleProposal(prompt: string, requestId = proposalRequestId(), forceAI = false): Promise<RuleProposal> {
   const b = (await call(
     "/api/admin/rule-proposals",
-    { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": requestId }, body: JSON.stringify({ prompt }) },
+    { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": requestId }, body: JSON.stringify(forceAI ? { prompt, force_ai: true } : { prompt }) },
     NETWORK_UNCHANGED,
     SUBJECT,
     PROPOSAL_NAME,

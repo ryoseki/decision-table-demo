@@ -20,7 +20,7 @@ from typing import Annotated, Any, Literal, Protocol
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, StrictStr, StringConstraints
+from pydantic import BaseModel, StrictStr, StringConstraints, field_validator
 
 from app.domain import (
     GenerationSource,
@@ -38,6 +38,7 @@ from app.question_validation import (
     ValidatedRetirement,
     find_case_impact,
     find_rule_references,
+    next_question_id,
     validate_model_output,
 )
 from app.usage_quota import (
@@ -84,10 +85,58 @@ class QuestionStore(Protocol):
 class ProposalRequest(BaseModel):
     prompt: Annotated[
         StrictStr,
-        StringConstraints(
-            strip_whitespace=True, min_length=1, max_length=MAX_PROMPT_LENGTH
-        ),
+        StringConstraints(min_length=1, max_length=MAX_PROMPT_LENGTH),
     ]
+
+    force_ai: bool = False
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def normalize_prompt(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("依頼を入力してください")
+            return value.strip(" ")
+        return value
+
+
+def find_template(
+    request: Request,
+    target: str,
+    body: ProposalRequest,
+    materialize: Callable[[Any], Any] = lambda raw: raw,
+) -> Any:
+    reuse = getattr(request.app.state, "proposal_reuse", None)
+    if reuse is None or body.force_ai:
+        return None
+    raw = reuse.lookup(target, body.prompt)
+    return None if raw is None else materialize(raw)
+
+
+def question_from_template(raw: Any, current: tuple[DemoQuestion, ...]) -> Any:
+    """追加の定型文は、承認時のIDではなく、現行データの次番号で組み立て直す。
+
+    保存済みの行にidがあっても読み捨てる。検証は、通常の提案と同じ関数で行う。
+    """
+    if not isinstance(raw, dict) or raw.get("operation") != "add_question":
+        return raw
+    question = raw.get("question")
+    if not isinstance(question, dict):
+        return raw
+    return {
+        "operation": "add_question",
+        "question": {"id": next_question_id(current), "text": question.get("text")},
+    }
+
+
+def register_proposal(
+    request: Request, store: Any, proposal: Any, source: GenerationSource, prompt: str
+) -> str:
+    """定型文が有効なら、生成元を問わず依頼文を提案に添える（Yesで反映したとき自動登録する）。"""
+    del source  # 登録するかは、生成元ではなく、Yesで実際に反映したかで決まる。
+    if getattr(request.app.state, "proposal_reuse", None) is not None:
+        return store.register_for_reuse(proposal, prompt)
+    return store.register(proposal)
 
 
 class DecisionRequest(BaseModel):
@@ -206,6 +255,9 @@ def reserve_ai_call(request: Request, proposer: Any) -> None:
         )
     try:
         addresses = request.headers.getlist(VIEWER_ADDRESS_HEADER)
+        if not addresses and getattr(request.app.state, "local_quota_address", False):
+            if request.client is not None:
+                addresses = [f"[{request.client.host}]:{request.client.port}"]
         key = viewer_key(addresses[0] if len(addresses) == 1 else None)
     except ViewerAddressUnavailable:
         raise HTTPException(
@@ -268,6 +320,11 @@ def notice(request: Request, proposer_name: str) -> dict[str, Any]:
         "mock": source.kind == "mock",
         "persistence": getattr(request.app.state, "persistence", "memory"),
         "source": source_body(source),
+        **(
+            {"template_reuse": True}
+            if getattr(request.app.state, "proposal_reuse", None)
+            else {}
+        ),
     }
 
 
@@ -325,9 +382,14 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
     store: QuestionStore = request.app.state.question_store
     proposer: QuestionProposer = request.app.state.question_proposer
     revision, current = store.snapshot()
-    reserve_ai_call(request, proposer)  # 予約を確定してから、生成を1回だけ呼ぶ
+    raw = find_template(
+        request, "question", body, lambda raw: question_from_template(raw, current)
+    )
+    source = GenerationSource("template") if raw is not None else source_of(proposer)
     try:
-        raw = proposer.generate(body.prompt, current)
+        if raw is None:
+            reserve_ai_call(request, proposer)
+            raw = proposer.generate(body.prompt.strip(), current)
     except ProposerUnavailable as error:
         raise unavailable_error(error, source_of(proposer)) from None
     except InvalidProposal as error:  # 実接続の出力が、JSONとして読めないなど
@@ -345,12 +407,14 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
             "added": {"id": proposal.added.id, "text": proposal.added.text},
         }
     return {
-        "proposal_id": store.register(proposal),
+        "proposal_id": register_proposal(request, store, proposal, source, body.prompt),
         "base_revision": proposal.base_revision,
         "before": _rows(proposal.base),
         "after": _rows(proposal.after),
         **detail,
         **notice(request, "question_proposer"),
+        "source": source_body(source),
+        "mock": source.kind == "mock",
     }
 
 

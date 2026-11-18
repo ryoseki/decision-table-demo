@@ -23,6 +23,7 @@ import psycopg.errors
 
 from app import db_retry, db_store, shared_db
 from app.domain import (
+    InvalidProposal,
     JudgmentAlreadyRecorded,
     ProposalConflict,
     ProposalNotFound,
@@ -32,6 +33,7 @@ from app.domain import (
 from app.question_validation import validate_model_output
 from app.rule_validation import validate_rule_output
 from app.shared_db import DbQuestionStore, DbRuleStore, PostgresAiQuota, SharedConfigDb
+from app.template_store import PostgresProposalTemplates
 from app.usage_quota import DuplicateAiRequest, QuotaExceeded, QuotaLimits
 from tests.test_intake import _Server, case_payload, make_app, send
 
@@ -132,6 +134,310 @@ class DbFlow(unittest.TestCase):
         self.store = db_store.PostgresCaseStore(lambda: _connect(self.schema))
         self.mock_calls: list[str] = []
         self.start(self.store)
+
+    def test_reuse_registers_only_applied_proposals_and_keeps_deleted_seed_deleted(
+        self,
+    ):
+        def connect():
+            return _connect(self.schema)
+
+        templates = PostgresProposalTemplates(connect)
+        templates.bootstrap()
+        self.assertIn("設問A13を廃止して", templates.list_prompts("question"))
+        templates.remove("question", "設問A13を廃止して")
+        templates.bootstrap()
+        self.assertEqual(templates.list_prompts("question"), [])
+
+        db = SharedConfigDb(connect, reuse_enabled=True)
+        store = DbQuestionStore(db)
+        revision, questions = store.snapshot()
+        proposal = validate_model_output(
+            {
+                "operation": "add_question",
+                "question": {"id": "A13", "text": "架空の設問"},
+            },
+            questions,
+            revision,
+        )
+        declined = store.register_for_reuse(proposal, "架空の依頼")
+        waiting = store.register_for_reuse(proposal, "再利用する依頼")
+        # Noでは定型文を作らない。
+        store.reject(declined)
+        self.assertIsNone(templates.lookup("question", "架空の依頼"))
+        # 反映の途中で失敗したら、変更・処理済み記録・自動登録のすべてを取り消す。
+        with mock.patch.object(
+            shared_db, "save_template", side_effect=RuntimeError("検証用")
+        ):
+            with self.assertRaises(RuntimeError):
+                store.approve(waiting)
+        self.assertEqual(store.snapshot()[0], revision)
+        self.assertIsNone(templates.lookup("question", "再利用する依頼"))
+        self.assertEqual(
+            self.rows(
+                "SELECT 1 FROM processed_shared_proposals WHERE proposal_id = %s",
+                (waiting,),
+            ),
+            [],
+        )
+        # 別の接続（再起動後）で承認し直すと、変更・処理済み記録・自動登録が確定する。
+        restarted = DbQuestionStore(SharedConfigDb(connect, reuse_enabled=True))
+        restarted.approve(waiting)
+        with self.assertRaises(ProposalNotFound):  # 二重承認は、変更を繰り返さない
+            restarted.approve(waiting)
+        self.assertEqual(restarted.snapshot()[0], revision + 1)
+        # 保存するのは、サーバーが検証して反映した操作。採番したIDは保存しない。
+        self.assertEqual(
+            templates.lookup("question", "再利用する依頼"),
+            {"operation": "add_question", "question": {"text": "架空の設問"}},
+        )
+        stored = self.rows(
+            "SELECT applied, payload FROM processed_shared_proposals"
+            " WHERE proposal_id = %s",
+            (waiting,),
+        )
+        self.assertTrue(stored[0][0])
+        self.assertNotIn("reuse_prompt", stored[0][1])
+        # 同じ対象・文言は、今回反映した操作で置き換わり、1行のまま。
+        revision, questions = restarted.snapshot()
+        alternate = validate_model_output(
+            {
+                "operation": "add_question",
+                "question": {"id": "A14", "text": "別の架空設問"},
+            },
+            questions,
+            revision,
+        )
+        restarted.approve(restarted.register_for_reuse(alternate, "再利用する依頼"))
+        self.assertEqual(
+            templates.lookup("question", "再利用する依頼")["question"],
+            {"text": "別の架空設問"},
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT count(*) FROM proposal_templates"
+                " WHERE target = 'question' AND prompt = %s",
+                ("再利用する依頼",),
+            ),
+            [(1,)],
+        )
+
+    def test_concurrent_approvals_of_the_same_prompt_leave_one_template_row(self):
+        def connect():
+            return _connect(self.schema)
+
+        PostgresProposalTemplates(connect).bootstrap()
+        store = DbQuestionStore(SharedConfigDb(connect, reuse_enabled=True))
+        revision, questions = store.snapshot()
+        identifiers = [
+            store.register_for_reuse(
+                validate_model_output(
+                    {
+                        "operation": "add_question",
+                        "question": {"id": "A13", "text": text},
+                    },
+                    questions,
+                    revision,
+                ),
+                "同時に出した依頼",
+            )
+            for text in ("架空の設問その1", "架空の設問その2")
+        ]
+
+        def approve(identifier):
+            try:
+                return DbQuestionStore(
+                    SharedConfigDb(connect, reuse_enabled=True)
+                ).approve(identifier)
+            except Exception as error:  # noqa: BLE001  結果として比べる
+                return error
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(approve, identifiers))
+        winners = [o for o in outcomes if not isinstance(o, Exception)]
+        self.assertEqual(len(winners), 1, outcomes)  # 基準の版が同じなので、片方だけ
+        rows = self.rows(
+            "SELECT operation FROM proposal_templates"
+            " WHERE target = 'question' AND prompt = %s",
+            ("同時に出した依頼",),
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0]["question"]["text"], winners[0][1][-1].text)
+
+    def test_rule_reuse_restores_canonical_operation_from_approved_receipt(self):
+        def connect():
+            return _connect(self.schema)
+
+        db = SharedConfigDb(connect, reuse_enabled=True)
+        store = shared_db.DbRuleStore(db)
+        revision, current = store.snapshot()
+        question_revision, questions = DbQuestionStore(db).snapshot()
+        proposal = validate_rule_output(
+            {"operation": "remove_rule", "rule_id": "R03"},
+            current,
+            questions,
+            revision,
+            question_revision=question_revision,
+        )
+        identifier = store.register_for_reuse(proposal, "架空ルールを削除する")
+        store.approve(identifier)
+        templates = PostgresProposalTemplates(connect)
+        raw = templates.lookup("rule", "架空ルールを削除する")
+        self.assertEqual(raw, {"operation": "remove_rule", "rule_id": "R03"})
+        self.assertIsNone(templates.lookup("question", "架空ルールを削除する"))
+        revision, current = store.snapshot()
+        with self.assertRaises(InvalidProposal):
+            validate_rule_output(
+                raw,
+                current,
+                questions,
+                revision,
+                question_revision=question_revision,
+            )
+
+    def test_initial_templates_match_exactly_per_target_and_stay_deleted(self):
+        def connect():
+            return _connect(self.schema)
+
+        templates = PostgresProposalTemplates(connect)
+        templates.bootstrap()
+        retire = {"operation": "retire_question", "question_id": "A13"}
+        remove = {"operation": "remove_rule", "rule_id": "R03"}
+        self.assertEqual(templates.lookup("question", "設問A13を廃止して"), retire)
+        self.assertEqual(templates.lookup("rule", "ルールR03を削除して"), remove)
+        # 保存層は完全一致だけ。対象違い・表記違い・空白違い・否定は一致しない。
+        for target, prompt in (
+            ("rule", "設問A13を廃止して"),
+            ("question", "ルールR03を削除して"),
+            ("question", " 設問A13を廃止して"),
+            ("question", "設問A13を廃止しないで"),
+            ("rule", "ルールr03を削除して"),
+            ("rule", "ルールR03の条件を編集して"),
+        ):
+            self.assertIsNone(templates.lookup(target, prompt), (target, prompt))
+        self.assertEqual(templates.list_prompts("rule"), ["ルールR03を削除して"])
+        # 対象と文言の組は一意。同じ文言でも対象が違えば別の行にできる。
+        insert = (
+            "INSERT INTO proposal_templates (target, prompt, operation)"
+            " VALUES (%s, %s, %s::jsonb)"
+        )
+        with self.assertRaises(psycopg.errors.UniqueViolation):
+            with connect() as conn:
+                conn.execute(insert, ("rule", "ルールR03を削除して", "{}"))
+        with connect() as conn:
+            conn.execute(insert, ("question", "ルールR03を削除して", "{}"))
+        # 削除した初期定型文は、起動（bootstrap）を繰り返しても復活しない。
+        templates.remove("rule", "ルールR03を削除して")
+        PostgresProposalTemplates(connect).bootstrap()
+        self.assertIsNone(templates.lookup("rule", "ルールR03を削除して"))
+        self.assertEqual(templates.lookup("question", "設問A13を廃止して"), retire)
+
+    def test_double_approval_of_one_proposal_changes_the_config_once(self):
+        db = SharedConfigDb(lambda: _connect(self.schema), reuse_enabled=True)
+        questions = DbQuestionStore(db)
+        identifier = self._add_question(questions, "架空の設問その1")
+
+        def approve(_):
+            try:
+                return questions.approve(identifier)
+            except Exception as error:  # noqa: BLE001  結果として比べる
+                return error
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(approve, range(2)))
+        failures = [o for o in outcomes if isinstance(o, Exception)]
+        self.assertEqual(len(failures), 1, outcomes)
+        self.assertIsInstance(failures[0], ProposalNotFound | ProposalConflict)
+        self.assertEqual(self._history(), [(1, "seed"), (2, "approval")])
+        processed = self.rows(
+            "SELECT applied FROM processed_shared_proposals WHERE proposal_id = %s",
+            (identifier,),
+        )
+        self.assertEqual(processed, [(True,)])
+
+    def test_failed_rule_approval_rolls_back_the_change_and_the_processed_record(
+        self,
+    ):
+        db = SharedConfigDb(lambda: _connect(self.schema), reuse_enabled=True)
+        questions, rules_store = DbQuestionStore(db), DbRuleStore(db)
+        identifier = self._add_rule(db, rules_store, questions)
+        before = self._history()
+        # 自動登録の失敗は、直前に確定しかけた版と処理済み記録も取り消す。
+        with mock.patch.object(
+            shared_db, "save_template", side_effect=RuntimeError("検証用")
+        ):
+            with self.assertRaises(RuntimeError):
+                rules_store.approve(identifier)
+        self.assertEqual(self.rows("SELECT count(*) FROM proposal_templates"), [(0,)])
+        self.assertEqual(self._history(), before)
+        self.assertEqual(
+            self.rows(
+                "SELECT 1 FROM processed_shared_proposals WHERE proposal_id = %s",
+                (identifier,),
+            ),
+            [],
+        )
+        # 提案は未処理のまま残り、やり直せば、変更と記録が1回だけ確定する。
+        rules_store.approve(identifier)
+        self.assertEqual(self._history()[-1][1], "approval")
+        self.assertEqual(len(self._history()), len(before) + 1)
+        self.assertEqual(
+            self.rows("SELECT target, prompt FROM proposal_templates"),
+            [("rule", "ルール追加の依頼")],
+        )
+
+    def test_no_and_blocked_approval_mark_unapplied_and_keep_version_and_templates(
+        self,
+    ):
+        db = SharedConfigDb(lambda: _connect(self.schema), reuse_enabled=True)
+        questions = DbQuestionStore(db)
+
+        def register(prompt, output):
+            revision, current = questions.snapshot()
+            proposal = validate_model_output(output, current, revision)
+            return questions.register_for_reuse(proposal, prompt)
+
+        def state():
+            return (
+                self._history(),
+                self.rows("SELECT target, prompt FROM proposal_templates"),
+            )
+
+        def add(identifier, text):
+            return {
+                "operation": "add_question",
+                "question": {"id": identifier, "text": text},
+            }
+
+        declined = register("Noの依頼", add("A13", "架空の設問その1"))
+        stale = register("遅れた依頼", add("A13", "架空の設問その2"))
+        winner = register("先の依頼", add("A13", "架空の設問その3"))
+        before = state()
+
+        # No: 処理済みに「反映なし」で残り、版も定型文も変わらない。
+        questions.reject(declined)
+        self.assertEqual(state(), before)
+        flags = dict(
+            self.rows("SELECT proposal_id, applied FROM processed_shared_proposals")
+        )
+        self.assertEqual(flags, {declined: False})
+        with self.assertRaises(ProposalNotFound):  # Noのあとの承認は、反映しない
+            questions.approve(declined)
+        self.assertEqual(state(), before)
+
+        # 反映して版が進んだあと、基準の古い提案は拒否される。
+        questions.approve(winner)
+        after_winner = state()
+        self.assertEqual(len(after_winner[0]), len(before[0]) + 1)
+        with self.assertRaises(ProposalConflict):
+            questions.approve(stale)
+        self.assertEqual(state(), after_winner)  # 版も定型文も増えない
+        flags = dict(
+            self.rows("SELECT proposal_id, applied FROM processed_shared_proposals")
+        )
+        self.assertEqual(flags, {declined: False, winner: True, stale: False})
+        self.assertEqual(
+            self.rows("SELECT prompt FROM proposal_templates"), [("先の依頼",)]
+        )
 
     def test_shared_quota_deduplicates_and_enforces_both_caps(self):
         now = datetime(2026, 11, 16, 14, 59, tzinfo=UTC)
@@ -235,7 +541,7 @@ class DbFlow(unittest.TestCase):
             revision,
             question_revision=question_revision,
         )
-        return rules_store.register(proposal)
+        return rules_store.register_for_reuse(proposal, "ルール追加の依頼")
 
     def _race(self, first, second):
         """2つの承認が、同じ最新の版を読み終えてから、書き込みへ進むようにそろえる。"""

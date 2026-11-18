@@ -49,11 +49,14 @@ def main() -> int:
         (DOCS / "decision-support-demo-rules.json").read_text(encoding="utf-8")
     )["decision_rules"]
     with connect() as conn:  # 成功時にコミット、例外時にロールバック
-        if conn.execute("SELECT to_regclass('review_questions')").fetchone()[0]:
-            print("開発用DB: 初期化済み（DDLを更新したときは docker compose down -v）")
-            return 0
+        initialized = conn.execute("SELECT to_regclass('review_questions')").fetchone()[0]
         for statement in extract_ddl():
-            conn.execute(statement)
+            table = statement.split()[2]
+            if not conn.execute("SELECT to_regclass(%s)", (table,)).fetchone()[0]:
+                conn.execute(statement)
+        if initialized:
+            print("開発用DB: 初期化済み（既存データを保持して不足テーブルを確認）")
+            return 0
         for q in sample["review_questions"]:
             conn.execute(
                 "INSERT INTO review_questions (question_code, category, prompt,"

@@ -10,8 +10,14 @@ import threading
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
+from typing import Any
 
-from app.domain import ProposalConflict, ProposalNotFound, RetirementBlocked
+from app.domain import (
+    ProposalConflict,
+    ProposalNotFound,
+    RetirementBlocked,
+    operation_from_receipt,
+)
 from app.question_validation import (
     DemoQuestion,
     ValidatedProposal,
@@ -46,7 +52,10 @@ def initial_questions() -> tuple[DemoQuestion, ...]:
 
 
 class InMemoryQuestionStore:
-    def __init__(self) -> None:
+    def __init__(self, templates: Any = None) -> None:
+        # templates があれば、Yesで反映した依頼文と操作を、同じロックの中で登録する。
+        self._templates = templates
+        self._prompts: dict[str, str] = {}
         self._lock = threading.Lock()
         self._questions: tuple[DemoQuestion, ...] = initial_questions()
         self._revision = 1
@@ -71,6 +80,13 @@ class InMemoryQuestionStore:
                 self._proposals.popitem(last=False)
         return proposal_id
 
+    def register_for_reuse(self, proposal: Proposal, prompt: str) -> str:
+        """register に加え、反映に成功したとき定型文へ登録する依頼文を覚える。"""
+        proposal_id = self.register(proposal)
+        with self._lock:
+            self._prompts[proposal_id] = prompt
+        return proposal_id
+
     def approve(
         self,
         proposal_id: str,
@@ -87,6 +103,7 @@ class InMemoryQuestionStore:
                 raise ProposalNotFound(proposal_id)
             if proposal.base_revision != self._revision:
                 del self._proposals[proposal_id]
+                self._prompts.pop(proposal_id, None)
                 raise ProposalConflict(proposal_id)
             references: tuple[str, ...] = ()
             if isinstance(proposal, ValidatedRetirement):
@@ -96,14 +113,25 @@ class InMemoryQuestionStore:
                 # 確認できない一時障害はここで例外になる。提案は残す（再試行可）。
                 references = references_of(proposal.target.id)
             del self._proposals[proposal_id]
+            prompt = self._prompts.pop(proposal_id, None)
             if references:
                 raise RetirementBlocked(proposal.target.id, references)
             self._questions = proposal.after
             self._revision += 1
+            if self._templates is not None and prompt is not None:
+                receipt = (
+                    {"op": "retire", "target_id": proposal.target.id}
+                    if isinstance(proposal, ValidatedRetirement)
+                    else {"op": "add", "text": proposal.added.text}
+                )
+                self._templates.save(
+                    "question", prompt, operation_from_receipt("question", receipt)
+                )
             return self._revision, self._questions
 
     def reject(self, proposal_id: str) -> None:
         """提案を破棄する。一覧は変えない。"""
         with self._lock:
+            self._prompts.pop(proposal_id, None)
             if self._proposals.pop(proposal_id, None) is None:
                 raise ProposalNotFound(proposal_id)

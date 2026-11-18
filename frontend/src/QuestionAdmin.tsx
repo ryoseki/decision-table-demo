@@ -1,3 +1,4 @@
+import { TemplatePanel } from "./TemplatePanel";
 import { useRef, useState } from "react";
 import { ApiError, describeError, keepsRequestId, proposalRequestId } from "./api";
 import { answerLabel } from "./data/cases";
@@ -144,21 +145,28 @@ export default function QuestionAdmin() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const retry = useRef<{ prompt: string; id: string } | null>(null);
+  const retry = useRef<{ prompt: string; id: string; forceAI: boolean } | null>(null);
+  const [proposedPrompt, setProposedPrompt] = useState("");
+  const [aiPrompt, setAiPrompt] = useState<string | null>(null);
+  // Yesで反映するたびに、サーバーが定型文へ自動登録する。一覧を取得し直すための値。
+  const [templateVersion, setTemplateVersion] = useState(0);
 
-  const create = async () => {
+  const create = async (forceAI = false, input = prompt) => {
     if (busy) return; // ボタンを無効にしても、フォームの送信は別経路で起きうる。
     setBusy(true);
     setNotice("");
     setError("");
     setProposal(null);
     const previous = retry.current;
-    const submission = previous?.prompt === prompt
+    const submission = previous?.prompt === input && previous.forceAI === forceAI
       ? previous
-      : { prompt, id: proposalRequestId() };
+      : { prompt: input, id: proposalRequestId(), forceAI };
+    if (!forceAI) setAiPrompt(null);
     retry.current = submission;
     try {
-      setProposal(await createQuestionProposal(prompt, submission.id));
+      setProposal(await createQuestionProposal(input, submission.id, forceAI));
+      setProposedPrompt(input);
+      setAiPrompt(null);
       retry.current = null;
     } catch (e) {
       // 到達したか不明な要求（接続できない・503）だけ、同じ入力の再送で同じ依頼IDを使う。
@@ -176,7 +184,9 @@ export default function QuestionAdmin() {
     setError("");
     try {
       const result = await decideQuestionProposal(proposal.proposalId, decision);
-      setLatest({ revision: result.revision, questions: result.questions, source: result.source });
+      setLatest(result);
+      if (result.applied) setTemplateVersion((v) => v + 1);
+      setAiPrompt(decision === "no" && proposal.source.kind === "template" ? proposedPrompt : null);
       setProposal(null);
       const retiring = proposal.kind === "retire";
       setNotice(
@@ -276,6 +286,14 @@ export default function QuestionAdmin() {
         <div className="current-list">
           <QuestionTable title="現行のデモの設問一覧" questions={list.data.questions} />
         </div>
+      )}
+      {aiPrompt !== null && (
+        <button type="button" className="btn ghost" disabled={busy} onClick={() => void create(true, aiPrompt)}>
+          AIで再提案
+        </button>
+      )}
+      {list.status === "ok" && list.data.templateReuse && (
+        <TemplatePanel target="question" refreshKey={templateVersion} />
       )}
     </section>
   );

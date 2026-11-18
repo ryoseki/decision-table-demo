@@ -2,6 +2,9 @@ import type { GenerationSource } from "./generationSource";
 
 /** 差分（提案）の確認画面に出す、生成元の表示。モックと実接続を、文字で区別する（色だけに頼らない）。 */
 export function SourceBadge({ source }: { source: GenerationSource }) {
+  if (source.kind === "template") {
+    return <p className="source-badge" data-testid="source-badge" data-source="template">生成元: 定型文（Bedrock呼び出しなし）</p>;
+  }
   return source.kind === "bedrock" ? (
     <p className="source-badge source-bedrock" data-testid="source-badge" data-source="bedrock">
       <strong>生成元: Amazon Bedrock（実接続）</strong>
