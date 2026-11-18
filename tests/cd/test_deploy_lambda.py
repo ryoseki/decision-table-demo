@@ -28,6 +28,7 @@ _spec = importlib.util.spec_from_file_location("deploy_lambda", ROOT / "scripts"
 dl = importlib.util.module_from_spec(_spec)
 sys.modules["deploy_lambda"] = dl
 _spec.loader.exec_module(dl)
+cp = sys.modules["cd_public_path"]  # deploy-lambda.py が読み込んだ、公開経路の検証（読み取り専用）
 
 NEW_SHA = "a" * 40
 OLD_SHA = "b" * 40
@@ -106,8 +107,8 @@ def make_distribution() -> dict:
                         "Items": ["GET", "HEAD", "OPTIONS"],
                         "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]},
                     },
-                    "CachePolicyId": dl.CACHING_DISABLED_POLICY_ID,
-                    "OriginRequestPolicyId": dl.ALL_VIEWER_EXCEPT_HOST_POLICY_ID,
+                    "CachePolicyId": cp.CACHING_DISABLED_POLICY_ID,
+                    "OriginRequestPolicyId": cp.ALL_VIEWER_EXCEPT_HOST_POLICY_ID,
                     "LambdaFunctionAssociations": {"Quantity": 0},
                     "FunctionAssociations": {"Quantity": 0},
                     "Compress": True,
@@ -294,7 +295,7 @@ def enable_write(aws, *, methods=None, associations=None, live="source") -> None
 
     live: "source"=レビュー済みと同じコード / bytes=別のコード / None=取得に失敗する / "nofile"=ファイルを出さない
     """
-    items = sorted(methods if methods is not None else dl.WRITE_ENABLED_METHODS)
+    items = sorted(methods if methods is not None else cp.WRITE_ENABLED_METHODS)
     aws.behavior["AllowedMethods"].update(Quantity=len(items), Items=items)
     found = [APPROVED_ASSOCIATION] if associations is None else associations
     aws.behavior["FunctionAssociations"] = {"Quantity": len(found), "Items": found}
@@ -1496,7 +1497,7 @@ class WriteEdgeGate(DeployTestCase):
             ("custom-origin-request-policy", policy(WAF_ID), "originRequestPolicy", False),
             ("viewer-address-policy", policy("88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"), "originRequestPolicy", False),
             ("partial-methods-with-post", methods({"GET", "HEAD", "OPTIONS", "POST"}), "allowedMethods", True),
-            ("partial-methods-without-delete", methods(dl.WRITE_ENABLED_METHODS - {"DELETE"}), "allowedMethods", True),
+            ("partial-methods-without-delete", methods(cp.WRITE_ENABLED_METHODS - {"DELETE"}), "allowedMethods", True),
             ("live-retrieval-fails", live(None), "edgeFunctionRetrieval", False),
             ("live-no-output-file", live("nofile"), "edgeFunctionRetrieval", False),
             ("live-empty", live(b""), "edgeFunctionRetrieval", False),
@@ -1655,22 +1656,22 @@ class TemplatesMatchTheCode(unittest.TestCase):
     def test_waf_template_satisfies_the_validator(self):
         response = make_web_acl()
         response["WebACL"]["Rules"] = self.load("waf-rules.json")["Rules"]
-        self.assertEqual(dl.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
+        self.assertEqual(cp.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
         # テンプレートの1件に既知の観測グループ3種（Count）を足した4件も受け入れる
         response["WebACL"]["Rules"] += [observer(g, 1 + i) for i, g in enumerate(OBSERVER_GROUPS)]
-        self.assertEqual(dl.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
+        self.assertEqual(cp.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
 
     def test_waf_template_has_only_the_ip_rule(self):
         text = (ROOT / "infra" / "cd" / "waf-rules.json").read_text(encoding="utf-8")
         rules = json.loads(text)["Rules"]
         self.assertEqual(len(rules), 1)
-        self.assertTrue(dl.ip_rate_rule_ok(rules[0]))
+        self.assertTrue(cp.ip_rate_rule_ok(rules[0]))
         rate_statement = rules[0]["Statement"]["RateBasedStatement"]
         self.assertEqual(
             rate_statement,
-            {"Limit": dl.IP_RATE_LIMIT, "EvaluationWindowSec": dl.RATE_WINDOW_SEC, "AggregateKeyType": "IP"},
+            {"Limit": cp.IP_RATE_LIMIT, "EvaluationWindowSec": cp.RATE_WINDOW_SEC, "AggregateKeyType": "IP"},
         )
-        self.assertEqual((dl.IP_RATE_LIMIT, dl.RATE_WINDOW_SEC), (300, 300))
+        self.assertEqual((cp.IP_RATE_LIMIT, cp.RATE_WINDOW_SEC), (300, 300))
         for removed in ("CONSTANT", "1500", "ScopeDownStatement"):
             self.assertNotIn(removed, text)
 
@@ -1796,6 +1797,28 @@ class WorkflowSummary(DeployTestCase):
         text = self.summary()
         self.assertIn("直前 なし → 今回 なし、エイリアス: untouched", text)
         self.assertNotIn("null", text)
+
+
+class IsolatedEntryPoint(unittest.TestCase):
+    """実際の `python3 -B -I` の起動（別のcwd）。同じディレクトリの cd_public_path.py を読む。"""
+
+    def run_help(self, script: Path, cwd: str):
+        return subprocess.run(
+            [sys.executable, "-B", "-I", str(script), "--help"], cwd=cwd, capture_output=True, text=True, check=False
+        )
+
+    def test_help_runs_isolated_and_a_copy_without_the_sibling_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            done = self.run_help(ROOT / "scripts" / "deploy-lambda.py", cwd)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("--artifact-dir", done.stdout)
+            with self.subTest("copy without cd_public_path.py"), tempfile.TemporaryDirectory() as copy:
+                lone = Path(copy) / "deploy-lambda.py"
+                shutil.copy(ROOT / "scripts" / "deploy-lambda.py", lone)
+                done = self.run_help(lone, cwd)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("cd_public_path.py", done.stderr)
+                self.assertNotIn("Traceback", done.stderr)
 
 
 class Cli(DeployTestCase):

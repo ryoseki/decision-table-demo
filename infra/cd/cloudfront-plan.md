@@ -1,6 +1,6 @@
 # 公開経路の計画: CloudFront + WAF + Lambda関数URL（AWS_IAM）+ OAC
 
-この文書は**計画と手順案**です。利用者の報告（2026-11-09）では、CloudFront（無効化・`Deployed`・Web ACL紐付け済み）、WAFのWeb ACL、OAC（`lambda`・`sigv4`・`always`）は**作成済み**です。これらは**再作成・削除せず、再利用して設定を確認**します。以降の「作成」の手順は、初回構築の履歴、または該当のリソースが無いと人が確認できた場合だけの手順で、作成済みなら飛ばして読み取りで確認します。利用者の確認（2026-11-10）では、Web ACLの規則は4件（接続元IPごとのレート制限のBlock 1件＋既知の観測グループ3種の`Count`）で、全体のレート制限の規則はありません。同日、利用者の承認により、全体1,500件/5分の規則を要件から外しました（必須はIPごとの1件だけ）。有効化・Lambdaの許可・公開HTTPの確認・CD・ロールバックは未実施です。このファイルのコマンド自体の実行結果は受け取っていません。AWSの作成・変更は、利用者本人が内容を確認し、判断してから実行します。コード・設定はこの文書の外にあります（検証は `scripts/deploy-lambda.py`、WAFの規則は `infra/cd/waf-rules.json`）。実在のアカウントID・ディストリビューションID・URLの実値は書きません（引用符つきの `REPLACE_*` の目印を使う）。
+この文書は**計画と手順案**です。利用者の報告（2026-11-09）では、CloudFront（無効化・`Deployed`・Web ACL紐付け済み）、WAFのWeb ACL、OAC（`lambda`・`sigv4`・`always`）は**作成済み**です。これらは**再作成・削除せず、再利用して設定を確認**します。以降の「作成」の手順は、初回構築の履歴、または該当のリソースが無いと人が確認できた場合だけの手順で、作成済みなら飛ばして読み取りで確認します。利用者の確認（2026-11-10）では、Web ACLの規則は4件（接続元IPごとのレート制限のBlock 1件＋既知の観測グループ3種の`Count`）で、全体のレート制限の規則はありません。同日、利用者の承認により、全体1,500件/5分の規則を要件から外しました（必須はIPごとの1件だけ）。有効化・Lambdaの許可・公開HTTPの確認・CD・ロールバックは未実施です。このファイルのコマンド自体の実行結果は受け取っていません。AWSの作成・変更は、利用者本人が内容を確認し、判断してから実行します。コード・設定はこの文書の外にあります（検証は `scripts/cd_public_path.py`、WAFの規則は `infra/cd/waf-rules.json`）。実在のアカウントID・ディストリビューションID・URLの実値は書きません（引用符つきの `REPLACE_*` の目印を使う）。
 
 ## 区分
 
@@ -79,7 +79,7 @@ AWSの公式資料（Lambda関数URLのスロットリング。Codexが2026-11-1
 - 規則グループの上書きは、ちょうど `OverrideAction` が `{"Count": {}}`。`Action`、別の上書き（`None` など）、`Count` の追加設定、`ScopeDownStatement`、`Version`、規則ごとの動作の上書き（`RuleActionOverrides`）、除外（`ExcludedRules`）、`RuleLabels` は不可です。APIが空の配列で返す任意の項目（`ExcludedRules`・`RuleActionOverrides`・`ManagedRuleGroupConfigs`）は、空なら許します。
 - 規則は合計4件まで（必須1件＋観測3件）。ほかのベンダー・ほかの規則グループ・ほかの規則（全体の`CONSTANT`の規則を含む）は、件数が4件以内でも拒否します。
 - 公式資料では、規則グループの動作を `Count` に上書きすると、一致しても終端せず評価が続きます（https://docs.aws.amazon.com/waf/latest/developerguide/web-acl-rule-group-override-options.html ）。このため、観測グループの優先順位が必須の1件より前でも、そのBlockを迂回しない、とプロジェクトとして判断しています。実際のWeb ACLでの動作は未確認です。
-- 検証コード（`scripts/deploy-lambda.py`）は、必須の1件をレートベースの内容（しきい値300・期間300秒・集計キー`IP`・`ForwardedIPConfig`と`ScopeDownStatement`なし・`Block`）で判定し、観測グループは別の判定で、上の条件に完全に一致するときだけ受け入れます。
+- 検証コード（`scripts/cd_public_path.py`）は、必須の1件をレートベースの内容（しきい値300・期間300秒・集計キー`IP`・`ForwardedIPConfig`と`ScopeDownStatement`なし・`Block`）で判定し、観測グループは別の判定で、上の条件に完全に一致するときだけ受け入れます。
 
 ## 費用（未確認。合計金額は出さない）
 
