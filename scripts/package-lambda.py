@@ -29,6 +29,11 @@ ADAPTER = {
     "layerArtifactHashVerified": False,
     "runtimeCompatibilityVerified": False,
 }
+# エッジ（CloudFront Functions）のソースをZIPに入れる。配布（deploy-lambda.py）は、LIVEのコードを
+# このZIPの中の写しのSHA-256と照合する（ZIPのハッシュで保護される）。
+EDGE_ARCNAME = "edge/viewer-ip.js"
+HEADER_DEFINITION = re.compile(r'^VIEWER_IP_HEADER = "([a-z0-9-]+)"$', re.MULTILINE)
+TOKEN_DEFINITION = re.compile(r'^_INTERNAL_TOKEN_HEADER = b"([a-z0-9-]+)"$', re.MULTILINE)
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHARED_OBJECT = re.compile(r"\.so(\.\d+)*$")
@@ -38,6 +43,29 @@ def parse_bool(value: str) -> bool:
     if value not in ("true", "false"):
         raise argparse.ArgumentTypeError("true または false を指定してください")
     return value == "true"
+
+
+def viewer_ip_contract(app_dir: Path, edge_source: bytes) -> bool:
+    """アプリとエッジが、2つのヘッダー名で一致しているか。どちらかが食い違えば宣言しない。
+
+    - 接続元IP（usage_quota.py の VIEWER_IP_HEADER）: エッジが利用者の値を捨て、実IPで書く。
+    - 内部のモック用トークン（public_guard.py の _INTERNAL_TOKEN_HEADER）: エッジが利用者の値を捨てる。
+    """
+    quota = app_dir / "usage_quota.py"
+    guard = app_dir / "public_guard.py"
+    if not quota.is_file() or not guard.is_file():
+        return False
+    viewer = HEADER_DEFINITION.search(quota.read_text(encoding="utf-8"))
+    token = TOKEN_DEFINITION.search(guard.read_text(encoding="utf-8"))
+    if viewer is None or token is None:
+        return False
+    text = edge_source.decode("utf-8", errors="strict")
+    return (
+        f"headers['{viewer.group(1)}'] = " in text
+        and f"lowered === '{viewer.group(1)}'" in text
+        and f"lowered === '{token.group(1)}'" in text
+        and "function handler(event)" in text
+    )
 
 
 def collect(root: Path, prefix: str, skip_top: frozenset[str] = frozenset()):
@@ -66,6 +94,7 @@ def main() -> int:
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--static", type=Path, required=True)
     parser.add_argument("--run-sh", type=Path, required=True)
+    parser.add_argument("--edge-function", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--release-eligible", type=parse_bool, required=True)
     parser.add_argument("--dirty", type=parse_bool, required=True)
@@ -80,6 +109,9 @@ def main() -> int:
         raise SystemExit("--static に index.html がありません")
     if not (args.app / "main.py").is_file():
         raise SystemExit("--app に main.py がありません")
+    if not args.edge_function.is_file() or args.edge_function.is_symlink():
+        raise SystemExit("--edge-function が通常のファイルではありません")
+    edge_source = args.edge_function.read_bytes()
 
     release = {
         "sourceSHA": args.source_sha,
@@ -105,6 +137,7 @@ def main() -> int:
     for arcname, path in collect(args.static, "static/"):
         add(arcname, path)
     add("run.sh", args.run_sh)
+    add(EDGE_ARCNAME, edge_source)
     add("release.json", release_bytes)
 
     if args.output.exists() and any(args.output.iterdir()):
@@ -124,8 +157,14 @@ def main() -> int:
     digest = hashlib.sha256(zip_path.read_bytes()).digest()
     # ZIPの実際の内容から導く。CDは、書き込みを許可した公開経路にこの印のない版を出さない
     guard_files = {"app/public_guard.py", "app/usage_quota.py", "app/quota_store.py"}
+    has_guard = guard_files <= set(entries)
     manifest = {
-        "capabilities": {"publicWriteGuard": 1 if guard_files <= set(entries) else 0},
+        "capabilities": {
+            "publicWriteGuard": 1 if has_guard else 0,
+            # 専用ヘッダー（x-demo-viewer-ip）の契約。アプリとエッジのヘッダー名が一致するときだけ宣言する
+            "viewerIpContract": 1 if has_guard and viewer_ip_contract(args.app, edge_source) else 0,
+        },
+        "edge": {"file": EDGE_ARCNAME, "sha256Hex": hashlib.sha256(edge_source).hexdigest()},
         "schema": 1,
         "sourceSHA": args.source_sha,
         "dirty": args.dirty,

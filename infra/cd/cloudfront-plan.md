@@ -19,7 +19,7 @@
 
 ## 公開書き込みへの切り替え
 
-2段階で切り替える。第1段階では、既存の読み取りビヘイビア（許可メソッド3種）を保ったまま、ガード・利用枠を含むZIPを配布する（`manifest.json` の `capabilities.publicWriteGuard` と、配布した版のdescriptionの `guard=1` で印を付ける）。第2段階で、許可メソッド7種と専用オリジンリクエストポリシーを同時に設定する。書き込み構成のCDは、AWSの変更の前に、(a) 許可メソッドが7種ちょうど、(b) ポリシーの実体の許可ヘッダーが `CloudFront-Viewer-Address`、`Content-Type`、`Idempotency-Key`、`x-amz-content-sha256` の4つだけでCookie・クエリ文字列を転送しない、(c) 今回のZIPが印を持つ、(d) 戻し先の現在の版が `guard=1` を持つ、を確認し、満たさなければ失敗で止まる。読み取り構成では従来のポリシーを検査し、印のない版からも第1段階の配布ができる。手動変更・実機確認（偽の接続元ヘッダーの確認を含む）・読み取り構成へ戻す手順は [開発手順](../docs/development-workflow.md#公開時の書き込みと利用枠) を参照。実AWSでは未確認。
+2段階で切り替える。第1段階では、既存の読み取りビヘイビア（許可メソッド3種・Managedポリシー・関数の関連付けなし）を保ったまま、ガード・利用枠・エッジのソースを含むZIPを配布する（`manifest.json` の `capabilities.publicWriteGuard`・`capabilities.viewerIpContract` と、配布した版のdescriptionの `guard=1;viewerip=1` で印を付ける）。第2段階で、CloudFront Functions（viewer-request。`event.viewer.ip` を専用ヘッダー `x-demo-viewer-ip` へ、利用者の同名ヘッダー・`x-internal-mock-token` を捨てて書く）を公開し、その関連付け1件と許可メソッド7種を**同時に**設定する。オリジンリクエストポリシーは両方の構成でManagedの `AllViewerExceptHostHeader` のまま、キャッシュは `CachingDisabled`、OACは常に `always`、WAF・予約済み同時実行数3も変えない。書き込み構成のCDは、AWSの変更の前に、(a) 許可メソッドが7種ちょうど、(b) Managedポリシーのまま、(c) `viewer-request` の関連付けが承認した関数（リポジトリ変数 `CLOUDFRONT_VIEWER_FUNCTION_ARN`）の1件だけ、(d) その関数のLIVEのコードのSHA-256が、ZIPの中のレビュー済みソースと一致（`aws cloudfront get-function --stage LIVE` の出力ファイル。取得の失敗・不一致は拒否）、(e) 今回のZIPが印を持つ、(f) 戻し先の現在の版が `guard=1` と `viewerip=1` の両方を持つ、を確認し、満たさなければ失敗で止まる。読み取り構成は3メソッド・関連付けなしを検査し、印のない版からも第1段階の配布ができる。決定の比較、手動の変更の段階的な手順（関数の作成・DEVELOPMENTでのテスト・公開・関連付け・確認・読み取り構成へ戻す順序）、LIVEの公開とアクセスの限界は [開発手順](../../docs/development-workflow.md#公開時の書き込みと利用枠) を参照。実AWSでは未確認。
 
 ## 構成（これ以外は作らない）
 
@@ -38,8 +38,8 @@
 | OAC | 種類 `lambda`、署名 `sigv4`、署名の動作 `always` | `never`・`no-override` は不可。検証コードは `always` だけを許す。作成済みのOACがあれば、それを選んで再利用する（手順0の2） |
 | オリジン | 1件。ドメインは関数URLのホスト（エイリアス `demo` の実値）、パスなし、`https-only`、OACを関連付け | 関数URLの値はコミット・文書に書かない |
 | デフォルトのビヘイビア | `redirect-to-https`（または `https-only`）。許可メソッド `GET`・`HEAD`・`OPTIONS`。キャッシュ対象メソッドは `GET`・`HEAD`（`OPTIONS` を足してもよい） | POSTなどは許可しない。将来POSTを足す場合、OACは本文のSHA-256ヘッダが必要という要件が公式にあるため、別途設計する |
-| キャッシュポリシー | `CachingDisabled`（Managed）。ID `4135ea2d-6df8-44a3-9df3-4b5a84be39ad` | 初期はデフォルトのビヘイビア1件だけ。追加のビヘイビア・Lambda@Edge・CloudFront Functions・カスタムエラー応答・オリジングループ・既定のルートオブジェクトは設定しない |
-| オリジンリクエストポリシー | `AllViewerExceptHostHeader`（Managed）。ID `b689b0a8-53d0-40ab-baf2-68738e2966ac` | Hostヘッダを転送しない（関数URLのホストでの署名のため） |
+| キャッシュポリシー | `CachingDisabled`（Managed）。ID `4135ea2d-6df8-44a3-9df3-4b5a84be39ad` | 初期はデフォルトのビヘイビア1件だけ。追加のビヘイビア・Lambda@Edge・カスタムエラー応答・オリジングループ・既定のルートオブジェクトは設定しない。CloudFront Functionsは、読み取り構成では関連付けない。書き込み構成（7メソッド）だけ、承認した `viewer-request` の関数を1件関連付ける |
+| オリジンリクエストポリシー | `AllViewerExceptHostHeader`（Managed）。ID `b689b0a8-53d0-40ab-baf2-68738e2966ac` | Hostヘッダを転送しない（関数URLのホストでの署名のため）。書き込み構成（7メソッド）でも変えない（専用のポリシーは使わない） |
 | 継続的デプロイ | 使わない（ステージングのディストリビューション・継続的デプロイのポリシーなし） | 本番と別の設定でトラフィックが流れ得るため、検証コードは拒否する |
 | WAF | CLOUDFRONT scope（us-east-1）。デフォルト動作 `Allow`。規則は `infra/cd/waf-rules.json` の**必須の1件**（接続元IPごと）と、任意で既知のAWSマネージド規則グループ3種（`Count` で観測だけ）を0〜3件（合計1〜4件）。Firewall Managerの管理・前処理/後処理の規則グループなし | 下の「WAFの規則」参照。必須の1件が欠けた・変わった・重複した場合、全体（`CONSTANT`）の規則など未対応・未知の規則・規則グループ、Count以外の規則グループ、Firewall Managerの規則グループがあると、検証コードは拒否する |
 | 関数のリソースポリシー | 最後に、このディストリビューションだけに `lambda:InvokeFunctionUrl` と `lambda:InvokeFunction` を許可 | 下の「最後の許可」参照。公開の許可は、ここまでの確認が終わるまで作らない |
@@ -181,7 +181,7 @@ aws cloudfront get-origin-access-control --id "$OAC_ID" --region us-east-1 --out
 aws wafv2 get-web-acl --name "$WAF_NAME" --scope CLOUDFRONT --id "$WAF_ID" --region us-east-1 --output json
 ```
 
-出力（実在のIDを含むため、チャット・文書に貼らない）を人が読み、「設定」表と一致することを確認します。確認の項目: OACが `lambda`・`sigv4`・`always`、オリジンが1件・`https-only`・パスなし・関数URLのホスト・OAC関連付け、`CachingDisabled` と `AllViewerExceptHostHeader`、メソッドが `GET`・`HEAD`・`OPTIONS`、追加のビヘイビア・関数の関連付けなし、`ContinuousDeploymentPolicyId` が空・`Staging` が偽、WAFが関連付け済み・IPごとの規則がちょうど1件（`Limit` 300・`EvaluationWindowSec` 300・`AggregateKeyType` `IP`・`ScopeDownStatement` と `ForwardedIPConfig` なし・`Block`）、ほかは既知の観測グループ（`Count`）0〜3件だけ（合計1〜4件。全体の規則なし）、Firewall Managerの管理・規則グループがない。予約済み同時実行数が1であることも、`aws lambda get-function-concurrency --function-name "$FN" --region ap-northeast-1`（読み取り）で確認します。**同じ項目は、CDの配布時にも `scripts/deploy-lambda.py` が読み取りだけで再検証し、1つでも違えばAWSの変更をせずに止まります**（コードの検証であり、実際のAWSでの動作は未確認）。
+出力（実在のIDを含むため、チャット・文書に貼らない）を人が読み、「設定」表と一致することを確認します。確認の項目: OACが `lambda`・`sigv4`・`always`、オリジンが1件・`https-only`・パスなし・関数URLのホスト・OAC関連付け、`CachingDisabled` と `AllViewerExceptHostHeader`、メソッドが `GET`・`HEAD`・`OPTIONS`、追加のビヘイビアなし・関数の関連付けは読み取り構成ではなし（書き込み構成では承認した1件だけ）、`ContinuousDeploymentPolicyId` が空・`Staging` が偽、WAFが関連付け済み・IPごとの規則がちょうど1件（`Limit` 300・`EvaluationWindowSec` 300・`AggregateKeyType` `IP`・`ScopeDownStatement` と `ForwardedIPConfig` なし・`Block`）、ほかは既知の観測グループ（`Count`）0〜3件だけ（合計1〜4件。全体の規則なし）、Firewall Managerの管理・規則グループがない。予約済み同時実行数が1であることも、`aws lambda get-function-concurrency --function-name "$FN" --region ap-northeast-1`（読み取り）で確認します。**同じ項目は、CDの配布時にも `scripts/deploy-lambda.py` が読み取りだけで再検証し、1つでも違えばAWSの変更をせずに止まります**（コードの検証であり、実際のAWSでの動作は未確認）。
 
 ### 5. 最後に、このディストリビューションだけに許可する
 
@@ -257,7 +257,7 @@ aws cloudfront create-origin-access-control --region us-east-1 --origin-access-c
 
 - 公開URLはCloudFrontだけ。関数URLのホストは `get-function-url-config`（エイリアス `demo`）の実値から導き、CloudFrontのオリジンと一致することを検証する。
 - リポジトリ変数: `CD_BASE_URL`（CloudFrontのオリジン）、`CLOUDFRONT_DISTRIBUTION_ID`、`CLOUDFRONT_OAC_ID`、`WAF_WEB_ACL_ARN`（us-east-1・globalのWeb ACLのARN）、ほかは従来どおり。**いずれもAWS作成後に人が設定する（未設定）**。
-- 配布用ロールの追加権限は読み取りだけ: `cloudfront:GetDistribution`（対象のディストリビューション）、`cloudfront:GetOriginAccessControl`（OACの読み取りはリソース指定ができないため `Resource: *`）、`wafv2:GetWebACL`（対象のWeb ACL）、`lambda:GetPolicy`（エイリアス `demo`）、`lambda:GetFunctionConcurrency`（修飾子なしの対象関数だけ。別の文 `ReadTheDemoFunctionReservedConcurrencyOnly`）。CloudFront・WAF・IAMの書き込み、同時実行数の設定・削除（`PutFunctionConcurrency`・`DeleteFunctionConcurrency`）と `iam:PassRole` は含めない。
+- 配布用ロールの追加権限は読み取りだけ: `cloudfront:GetDistribution`（対象のディストリビューション）、`cloudfront:GetOriginAccessControl`（OACの読み取りはリソース指定ができないため `Resource: *`）、`cloudfront:GetFunction`（承認したエッジ関数だけ。LIVEのコードの読み取り。別の文 `ReadTheApprovedViewerRequestFunctionOnly`）、`wafv2:GetWebACL`（対象のWeb ACL）、`lambda:GetPolicy`（エイリアス `demo`）、`lambda:GetFunctionConcurrency`（修飾子なしの対象関数だけ。別の文 `ReadTheDemoFunctionReservedConcurrencyOnly`）。CloudFront（`UpdateDistribution`・`UpdateFunction`・`PublishFunction` を含む）・WAF・IAMの書き込み、同時実行数の設定・削除（`PutFunctionConcurrency`・`DeleteFunctionConcurrency`）と `iam:PassRole` は含めない。
 - 検証が失敗した場合は、AWSの変更を1件もせず、スモーク確認もせずに止まる。予約済み同時実行数がちょうど3でない場合（未設定・0・3以外・取得失敗）も同じで、結果JSONの `reservedConcurrency` に `missing`・`zero`・`mismatch`・`read-failed` を記録する。
 - 検証コードが拒否する項目（初期構成）: 必須のIPごとの規則の欠落・変更・重複、全体（`CONSTANT`）の規則など未対応の規則、既知の観測グループ（`Count`）3種以外のWAF規則・規則グループ、観測グループの重複・`Count` 以外の動作・絞り込みや上書き、合計5件以上の規則、Firewall Managerの管理・前処理/後処理の規則グループ、CloudFrontの継続的デプロイのポリシー・ステージング、`AuthType` が `AWS_IAM` 以外のLambdaの許可、ワイルドカードの `AWS:SourceArn` など。これらの項目名（`ManagedByFirewallManager`・`PreProcessFirewallManagerRuleGroups`・`PostProcessFirewallManagerRuleGroups`・`ContinuousDeploymentPolicyId`・`Staging`）について、Codexが2026-11-09に公式API本文で項目名（`Staging`・`ContinuousDeploymentPolicyId`・`ManagedByFirewallManager`・`PreProcessFirewallManagerRuleGroups`・`PostProcessFirewallManagerRuleGroups`）の存在を確認済みです。実際のAWS応答の値との突合は未実施です。
 
@@ -266,6 +266,7 @@ aws cloudfront create-origin-access-control --region us-east-1 --origin-access-c
 - CloudFront Flat-rateプラン: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/flat-rate-pricing-plan.html
 - CloudFront料金: https://aws.amazon.com/cloudfront/pricing/
 - OACでLambda関数URLへのアクセスを制限: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-lambda.html
+- CloudFront Functionsのイベント構造（`viewer.ip`・ヘッダーの `value`/`multiValue`）: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/functions-event-structure.html ・ GetFunction API: https://docs.aws.amazon.com/cloudfront/latest/APIReference/API_GetFunction.html （Codexが2026-11-18に確認した記録を引き継ぐ。この作業では再読していない）
 - Managedキャッシュポリシー・オリジンリクエストポリシー: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html ・ https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html
 - WAFのレートベース規則: https://docs.aws.amazon.com/waf/latest/APIReference/API_RateBasedStatement.html ・ https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based-caveats.html
 - WAFのバイト一致: https://docs.aws.amazon.com/waf/latest/APIReference/API_ByteMatchStatement.html

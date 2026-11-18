@@ -104,3 +104,15 @@ jobs:
             -v "$PWD:/work:ro" -w /work \
             python:3.14.10-slim-trixie@sha256:af8a5aa14780025dbfbcfbc81bd8a91ebd87711dd5b0f48ed71090949dd7cb1d \
             python -B -I -m unittest discover -s tests/cd
+
+  # エッジ（CloudFront Functions）の関数のテスト。固定したNodeのイメージで、通信なし・読み取り専用で実行する。
+  # AWSの検証ではない（実際のCloudFrontでの動作は、人が公開手順で確認する）。
+  edge:
+    name: edge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - run: bash scripts/edge-test.sh

@@ -12,6 +12,7 @@
 | 2 | フロント単体 | **判断のロジック**（純粋な関数）と、**画面の部品**（描画して、見える内容・操作・状態の変化）。APIはモックで、サーバーに接続しない | サーバーとのつながり | なし | `docker compose run --rm --no-deps --build frontend npm test` |
 | 3 | E2E | 機能の一連の流れ1本以上（例: 画面から保存し、再表示できる）。実ブラウザが必要なこと（レイアウト、実際の通信、複数サービスのつながり） | E2Eだけに任せる細かい挙動（下の層でも確認する） | あり（`docker compose` の全サービス） | `bash scripts/e2e.sh` |
 | 4 | インフラのつなぎ込み | DB統合、実Aurora DSQL、Lambdaなど、つなぎ込みの部分だけ | 上の層で確認できること | 層による | DB統合は `bash scripts/backend-db-test.sh`。実DSQLは人が実行する |
+| 4 | エッジ・CDの検査（AWSなし） | CloudFront Functionsの関数（`infra/edge/viewer-ip.js`）のNodeでの実行、配布ヘルパー・ZIPの組み立て（偽のAWS） | 実際のCloudFront・AWSの動作 | なし | `bash scripts/edge-test.sh`（compose.edge.yaml。プロジェクト名は `EDGE_TEST_PROJECT` で変えられる）、`python3 -B -I -m unittest discover -s tests/cd` |
 
 - `--build` を付けるのは、ソースがイメージにコピーされる構成（バインドマウントなし）のため。付けないと、古いソースでテストが走ることがある。
 - 前の段階が赤いままでは、次の段階へ進まない。E2Eで原因探しをしない。

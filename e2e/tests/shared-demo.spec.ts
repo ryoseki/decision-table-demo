@@ -11,7 +11,7 @@ async function openSharedQuestions(page: Page) {
     const request = route.request();
     const response = await route.fetch({
       url: SHARED_BACKEND + new URL(request.url()).pathname,
-      headers: { ...request.headers(), "CloudFront-Viewer-Address": "192.0.2.10:4000" },
+      headers: { ...request.headers(), "X-Demo-Viewer-Ip": "192.0.2.10" },
     });
     await route.fulfill({ response });
   });
@@ -75,7 +75,7 @@ test("共有DBで承認した判定ルールが、判定未登録の案件の照
     const url = new URL(route.request().url());
     const response = await route.fetch({
       url: SHARED_BACKEND + url.pathname + url.search,
-      headers: { ...route.request().headers(), "CloudFront-Viewer-Address": "192.0.2.20:4000" },
+      headers: { ...route.request().headers(), "X-Demo-Viewer-Ip": "192.0.2.20" },
     });
     await route.fulfill({ response });
   });

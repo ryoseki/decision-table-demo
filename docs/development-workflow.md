@@ -124,7 +124,7 @@ AIレビューを使う場合も、機械的な合否はCIが判定し、マー�
 2. **事前確認（buildジョブ。AWSの資格情報なし）**: 起動したコミットの配布コードで、オフラインテスト、Environment`demo`の保護設定の確認（必須レビュー担当者がリポジトリ変数`CD_APPROVER_LOGIN`の1人のユーザー、自己承認禁止は無効、デプロイブランチは`main`のみ、管理者の迂回なし）、対象SHAが`origin/main`の祖先であること、同じSHAの`ci.yml`のpushのrun（最新）と、その最新の試行の`frontend`・`backend`・`e2e`のジョブがすべて成功していること（スキップ・部分成功は不可）を確認する。Environmentが無い・読めない場合は止まり、自動作成には頼らない。
 3. **ビルドと保管**: 確認後に対象SHAをチェックアウトし、`scripts/build-lambda.sh`でリリースモードのZIPとマニフェストを作る。同じrun内の専用名で上書きなしに保存し、ZIPの実測ハッシュ、CIのrun、ソースSHA、成果物IDをサマリーに出す。**承認者はこのサマリーを見てから承認する**。
 4. **承認と再確認（deployジョブ）**: Environment`demo`の承認後、AWSの資格情報の前に、設定・承認記録・必須変数（`AWS_ROLE_ARN`、`LAMBDA_FUNCTION_NAME`、`CD_BASE_URL`（CloudFrontのオリジン）、`CLOUDFRONT_DISTRIBUTION_ID`、`CLOUDFRONT_OAC_ID`、`WAF_WEB_ACL_ARN`、`LAMBDA_LAYER_CODE_SHA256`、`CD_APPROVER_LOGIN`）を確認する。配布コードは対象SHAではなく起動したコミットのもの。続けて、ダウンロードした成果物（manifestとZIP）を、ソースSHA・ビルドジョブのZIPハッシュ・`releaseEligible=true`・`dirty=false`と照合する（`deploy-lambda.py --verify-artifact-only`。AWS CLI・資格情報・通信を使わない）。改ざんがあれば資格情報の前に止まる。その後にOIDCで一時資格情報を得る（ロールセッション名はrun番号と試行）。`CD_ALLOW_LOCAL`は常にfalseで、ワークフローとヘルパーは拒否する。
-5. **変更前の検証（`deploy-lambda.py`。失敗したら変更しない）**: マニフェストとZIPの内容、ビルドの出力とのハッシュ照合、`releaseEligible=true`・`dirty=false`、関数がPython 3.14・x86_64・ハンドラ`run.sh`・固定レイヤー・`/opt/bootstrap`であること、レイヤーのCodeSha256が記録値と一致すること、関数URLがエイリアス`demo`で`AWS_IAM`・BUFFERED・CloudFrontのオリジンと一致するホストであること、CloudFrontのディストリビューション（有効・Deployed・WAF関連付け・単一オリジン・https-only・OACの関連付け・`CachingDisabled`と`AllViewerExceptHostHeader`・`GET`・`HEAD`・`OPTIONS`のみ・追加のビヘイビアや関数の関連付けなし）、OAC（`lambda`・`sigv4`・`always`）、Web ACL（us-east-1・CLOUDFRONT scope・必須の接続元IPごとの規則1件（300件/300秒・Block）、ほかは既知の観測グループ（`Count`）0〜3件だけ。全体の規則などは拒否）、予約済み同時実行数がちょうど3であること（`get-function-concurrency`。自動では設定しない）、関数のリソースポリシーが特定のディストリビューションだけを許可していること（いずれも読み取りのみ。スモーク確認は公開URL（CloudFront）で行う）、エイリアスが加重なしの数値の版を指し、その版のdescription（`source=<sha>;zip=<hex>;run=<id>`）がコードのハッシュと一致すること、現在の版のスモーク確認が成功すること。
+5. **変更前の検証（`deploy-lambda.py`。失敗したら変更しない）**: マニフェストとZIPの内容、ビルドの出力とのハッシュ照合、`releaseEligible=true`・`dirty=false`、関数がPython 3.14・x86_64・ハンドラ`run.sh`・固定レイヤー・`/opt/bootstrap`であること、レイヤーのCodeSha256が記録値と一致すること、関数URLがエイリアス`demo`で`AWS_IAM`・BUFFERED・CloudFrontのオリジンと一致するホストであること、CloudFrontのディストリビューション（有効・Deployed・WAF関連付け・単一オリジン・https-only・OACの関連付け・`CachingDisabled`と`AllViewerExceptHostHeader`・`GET`・`HEAD`・`OPTIONS`のみ・追加のビヘイビアなし。読み取り構成は関数の関連付けなし。7メソッドの書き込み構成は、承認した `viewer-request` のエッジ関数の関連付けがちょうど1件で、LIVEのコードがZIPの中のレビュー済みソースと一致すること。[公開時の書き込みと利用枠](#公開時の書き込みと利用枠)）、OAC（`lambda`・`sigv4`・`always`）、Web ACL（us-east-1・CLOUDFRONT scope・必須の接続元IPごとの規則1件（300件/300秒・Block）、ほかは既知の観測グループ（`Count`）0〜3件だけ。全体の規則などは拒否）、予約済み同時実行数がちょうど3であること（`get-function-concurrency`。自動では設定しない）、関数のリソースポリシーが特定のディストリビューションだけを許可していること（いずれも読み取りのみ。スモーク確認は公開URL（CloudFront）で行う）、エイリアスが加重なしの数値の版を指し、その版のdescription（`source=<sha>;zip=<hex>;run=<id>`）がコードのハッシュと一致すること、現在の版のスモーク確認が成功すること。
 6. **更新**: 検証時に取得した関数のRevisionIdを条件にコードを更新する（現行版のスモーク確認の間に設定が変わっていれば、更新は拒否される。更新の直前に読み直した値は使わない）。返ってきたCodeSha256がマニフェストと一致することを確認し、更新完了を待つ（AWS CLIの`wait function-updated-v2`。`GetFunction`を使う）。更新の応答のRevisionIdは完了後と同じとは限らないため、比較にも発行の条件にも使わない（利用者の報告では、旧実装がこの一致を前提にして、実際のCD実行で止まった。不一致が通常の遷移か、同時期の手動変更かは未確定で、通常の遷移とは主張しない）。完了後に設定を読み直し、検査対象の設定、コードのハッシュ、`State=Active`・`LastUpdateStatus=Successful`（どちらも明示的な値が必須）、空でない完了後のRevisionIdを確認する。さらに、検証時に捕捉した「版に固定される設定全体」（追加の環境変数・実行ロール・メモリ・タイムアウト・説明・VPC・KMS・トレース・レイヤー・一時ストレージ・ファイルシステム・アーキテクチャ・ランタイムなど。未知の項目も含む）の項目ごとの指紋（プロセスごとの乱数鍵のHMAC。環境変数などの値は保持・出力しない）と、完了後の設定を照合する。コード更新で変わるメタデータ（RevisionId・更新日時・コードサイズ・コードのハッシュ・状態・署名情報）だけを正規化して除き、それ以外が違えば項目名だけを示して発行しない。版に固定される設定・コードが検証時と違えば検出して発行しない。一方、読み直しの前に別の操作があっても、設定・コードが検証時と同一（元に戻された変更を含む）なら区別できず、他者の操作が無かったとは証明できない。除外するメタデータ以外の未知のAWSの差異では閉じて止まる場合がある。すべて合格したときだけ、完了後に読んだRevisionIdとコードのSHA-256を条件に版を発行する（読み直しの後に関数が変われば発行は拒否される。descriptionに出所を記録）。発行された版（再利用する既存の版も同じ）は、Pendingのことがあるため、AWS CLIの`wait function-active-v2 --qualifier <版>`（上限つき。追加の権限は不要）でActiveを待ってから確認し、その後にエイリアスを切り替える。待機の失敗・タイムアウトはエイリアスを動かさず失敗とする。AWSはコード・設定が変わらないと新しい版を作らず既存の版を返すため、返された版を読み、descriptionのソースSHA・ZIPのハッシュ、コードのハッシュ、検査対象の設定がすべて今回と一致すると証明できたときだけ再利用する。証明できなければ、エイリアスを動かさず止まり、手動確認とする（設定を変えて版を作らせることはしない）。続いて、エイリアスの`RevisionId`を条件に（加重なしで）切り替え、承認したSHAでブラウザのスモーク確認を行う。配布処理とスモーク確認は別々に記録する。エイリアスが既に今回と同じソースSHA・ZIPの版を指し、現行版のスモーク確認が合格した場合は、変更なしの成功（`overall=no-change-success`、`deployment=already-current`）として終え、新しい版の発行も新しい配布のスモーク確認もしない。新しい配布の成功とは扱わない。
 7. **失敗時の戻し**: 切り替えた後にスモーク確認が失敗したら、**こちらの更新が成功として返した**`RevisionId`だけを条件に、記録した直前の版へ戻す。戻しの応答（版・`RevisionId`）を検証できたときだけ、直前のSHAでスモーク確認を行う。応答が不正なら戻しの失敗とし、手動復旧とする。戻しが成功しても全体は失敗として終了する。エイリアス更新の結果が不明な場合（エラー応答、期待と異なる応答）は、読み直した`RevisionId`は外部の変更かもしれず戻しの根拠にしないため、自動では戻さず、観測した状態を記録して全体を失敗とし、手動復旧とする（観測した版が今回の版でも上書きしない）。エイリアスが外部で変更されていた場合（条件付き更新の拒否）も、上書きせず、エイリアスの実際の版は不明と記録する。切り替え前の失敗では、無関係な変更を戻さない。版・成果物・DBは削除しない。
 8. **記録**: 結果JSON（ソースSHA、ZIPのハッシュ、CIのrun、配布・スモーク・戻しの状態、版、エイリアスのRevisionId、AWSの変更操作の開始の有無`mutationStarted`）を、処理の各段階と最後に書き、ビルド成果物とは別の成果物として常に保存する。秘密・ローカルの絶対パス・Lambda設定の全体は含めない。プロセスが強制終了・タイムアウトした場合は戻し処理が走らないことがあり、その場合は結果JSONの復旧メモと手順書で人が確認する（保証はしない）。
@@ -335,21 +335,190 @@ CD案の一次資料として、Codexが2026-11-08（日本時間）に本文を
 
 ## 公開時の書き込みと利用枠
 
-既存のCloudFrontとLambda関数URLのOACを使う。公開する書き込みは案件の受付POST、判定保存PUT、設問・判定ルールの提案POSTと決定POST。CloudFrontで7メソッドを許可したときも、アプリはこの組み合わせだけを受け付ける。受付が同じインスタンスの内部HTTPモックを呼ぶときは、インスタンス内で生成したトークンで確認する。公開ポリシーはそのヘッダーを転送しない。
+既存のCloudFrontとLambda関数URLのOACを使う。公開する書き込みは案件の受付POST、判定保存PUT、設問・判定ルールの提案POSTと決定POST。CloudFrontで7メソッドを許可したときも、アプリはこの組み合わせだけを受け付ける。受付が同じインスタンスの内部HTTPモックを呼ぶときは、インスタンス内で生成したトークンで確認する。トークンのヘッダー（`X-Internal-Mock-Token`）は、エッジが利用者の送ったものを捨てるため、公開側からは届かない。トークンが複数あるとアプリは拒否する。専用の接続元ヘッダー（`X-Demo-Viewer-Ip`）がある要求は、トークンが付いていても内部の呼び出しとして扱わない。
 
-Bedrockを呼ぶ公開構成では、Aurora DSQLでIP別5回と全体25回の枠を、依頼IDと同じトランザクションで確保する。日本時間の午前0時が日付の境界。CloudFrontが設定した接続元アドレスを正規化し、DBには鍵付きHMACを保存する。IPv6は /64 を同じ枠にまとめる。日別カウンターは7日を過ぎたものを正常な予約の機会に削除する。依頼IDは、日付変更をまたぐ再送でも同じ推論を開始しないよう、追記のみで保持する。1日最大25件で、依頼文・生IP・生成出力はこの記録に含めない。予約が確定した後に推論を1回試み、応答が不明でも枠を返さない。処理済みIDの再送は409で返す。承認やモック応答は枠を使わない。
+Bedrockを呼ぶ公開構成では、Aurora DSQLでIP別5回と全体25回の枠を、依頼IDと同じトランザクションで確保する。日本時間の午前0時が日付の境界。接続元は、エッジ（CloudFront Functions、viewer-request）が `event.viewer.ip` から付ける専用ヘッダー `X-Demo-Viewer-Ip`（ポートなしのIP1つ）だけを使い、アプリは正規化して、DBには鍵付きHMACを保存する。他のヘッダーへのフォールバックはない。ヘッダーがない・複数ある・IPの形でない要求は、枠の予約もBedrockの呼び出しもせず400で拒否する。IPv4射影のIPv6はIPv4として、IPv6は /64 を同じ枠にまとめる（これまでの正規化と同じで、保存済みのカウンターの主体は変わらない）。日別カウンターは7日を過ぎたものを正常な予約の機会に削除する。依頼IDは、日付変更をまたぐ再送でも同じ推論を開始しないよう、追記のみで保持する。1日最大25件で、依頼文・生IP・生成出力はこの記録に含めない。予約が確定した後に推論を1回試み、応答が不明でも枠を返さない。処理済みIDの再送は409で返す。承認やモック応答は枠を使わない。
 
-### 運用者の手動切り替え
+### 接続元IPの渡し方（比較と採用）
+
+| 案 | 内容 | 判断 |
+| --- | --- | --- |
+| 前の設計（採用しない） | 専用のオリジンリクエストポリシーで、`CloudFront-Viewer-Address` などを許可リストにして転送する | 専用ポリシーの設定・検証が増える。接続元の上書きが保証されるかを、実機で確認する必要があった（AWSの資料の説明であって、このリポジトリでは未確認）。値が「IP:ポート」の形で、解析も要る |
+| 採用（プロジェクト独自の判断） | AWSのManagedポリシー `AllViewerExceptHostHeader` のまま、CloudFront Functions（viewer-request）が `event.viewer.ip` を専用ヘッダー `x-demo-viewer-ip` へ書く。利用者が送った同名のヘッダーは、複数値（`multiValue`）も含めて項目ごと捨てて置き換え、`x-internal-mock-token` も捨てる | 置き換えの動作を、コードとテストで確認できる（`infra/edge/viewer-ip.test.js`）。CDが関連付けとLIVEのコードを読み取りで検証できる。接続元IPが取れない・IPの形でないときは、エッジが400で止める。本文ハッシュ（`x-amz-content-sha256`）と依頼ID（`Idempotency-Key`）は変えない |
+| 不採用 | Lambda関数URLへの直接の公開、アプリ側でのX-Forwarded-Forの解釈 | OAC・WAFの前提と合わない。信頼できる値かを確かめられない |
+
+出典（Codexが2026-11-18に確認した記録を引き継ぐ。この作業では再読していない）: [CloudFront Functionsのイベント構造](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/functions-event-structure.html)（`viewer.ip`、ヘッダーの `value`・`multiValue`）、[GetFunction API](https://docs.aws.amazon.com/cloudfront/latest/APIReference/API_GetFunction.html)、[Managedのオリジンリクエストポリシー](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html)、[Lambda関数URLへのOAC](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-lambda.html)、[Flat-rateプラン](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/flat-rate-pricing-plan.html)。CloudFrontのFlat-rateプラン「Free」を選べることは利用者の報告で、アカウントでの実際の契約・適用範囲は未確認（前述の「費用（未確認）」）。CloudFront Functionsが、そのプランまたは従量課金のどちらで使えるか・費用は、**未確認**（人がコンソールで確認する。確認できなければ、書き込みを許可しない）。
+
+### CDの検証（変更の前。実AWSは未確認）
+
+- 3メソッド（読み取り）: Managedポリシー、エッジ関数の関連付けなし。印のない版（`guard=1`・`viewerip=1` がない版）からも配布できる。エッジ関数は読まない。
+- 7メソッド（書き込み）: Managedポリシーのまま、`viewer-request` の関連付けがちょうど1件で、承認した関数（リポジトリ変数 `CLOUDFRONT_VIEWER_FUNCTION_ARN`）と完全一致。LIVEのコード（`aws cloudfront get-function --stage LIVE` の出力ファイル）のSHA-256が、**ZIPの中のレビュー済みソース**と一致。取得の失敗・出力が空・不一致は、AWSの変更の前に失敗で止まる（切り替えもロールバックもしない）。今回のZIPと戻し先の版の両方が、`guard=1` と `viewerip=1` の印を持つ。印は、ZIPの内容から作る `manifest.json` の `capabilities`（`publicWriteGuard`・`viewerIpContract`）と、配布した版のdescriptionで確認する。`viewerIpContract` は、アプリが読む専用ヘッダー名とエッジのヘッダー名が一致するときだけ宣言される。
+- 一時ファイルは専用の一時ディレクトリに作り、成功・失敗のどちらでも削除する。配布用ロールに足す権限は、承認した関数の `cloudfront:GetFunction`（読み取り）だけ。`cloudfront:GetOriginRequestPolicy` は不要になった。`UpdateFunction`・`PublishFunction`・`UpdateDistribution` は含めない。
+
+### 運営者の手動切り替え
+
+AWSの作成・変更は、利用者本人が内容を確認し、判断してから実行する（1ブロックずつ。実在のIDは出力・チャットに貼らない）。値はすべて目印（`REPLACE_*`）。リージョンは、CloudFrontが `us-east-1`、Lambdaが `ap-northeast-1`。
 
 1. CloudFrontを既存の読み取り構成に保った状態で、Aurora DSQLの共有設定・提案・利用枠カウンター・依頼IDの追加4テーブルを、スキーマ文書のDDLから1文ずつ適用する。専用のアプリロールへ `db/init_dsql.py` の対象テーブルに限った権限を反映する。既存の案件・判定・ルールの履歴は削除しない。
-2. **第1段階（読み取り構成のまま配布する）。** Lambda側に `AI_PROVIDER=bedrock`、許可したモデルとリージョン、有効な `DSQL_ENDPOINT` とアプリ用DB接続設定、シークレットとして32バイト以上の `AI_QUOTA_HMAC_KEY` を設定する。実行ロールのBedrock権限は対象モデルの呼び出しに絞る。公開用の回数は既定値の5・25を維持する。CloudFrontは許可メソッド3種（GET・HEAD・OPTIONS）と従来のオリジンリクエストポリシーのまま、ガード・利用枠を含むリリースZIPをCDで承認・配布し、通常のスモークを成功させる。ZIPが含むかどうかは、ZIPの内容から作る `manifest.json` の `capabilities.publicWriteGuard`（ZIPのハッシュと照合済み）で判断する。配布した版には、descriptionに `guard=1` の印が付く。ガード導入前の版（印なし）が現在の版でも、この段階は配布できる（許可メソッド3種なので、書き込みは届かない）。
-3. **第2段階（書き込みを許可する）。** 第1段階の配布後、エイリアス `demo` の現在の版に `guard=1` の印があることを確認する。CD配布用ロールに `cloudfront:GetOriginRequestPolicy` の読み取り権限を追加する。オリジンリクエストポリシーを作り、転送対象のヘッダーを `CloudFront-Viewer-Address`、`Content-Type`、`Idempotency-Key`、`x-amz-content-sha256` のみに指定し、Cookie・クエリ文字列は転送しない。次にCloudFrontでこのポリシーと7メソッドを同時に適用する。OACのAlways sign、キャッシュ無効、既存WAF、Lambda予約済み同時実行数3を維持する。書き込みを許可した構成では、CDは次を、AWSの変更の前に検査し、1つでも満たさなければ失敗で止まる（配布も戻し先の設定も行わない）。(a) 許可メソッドが7種ちょうど（一部だけ・過不足は失敗）。(b) ポリシーの実体が、上の4ヘッダーだけの許可リストで、Cookie・クエリ文字列を転送しない。(c) 今回のZIPが `publicWriteGuard` の印を持つ。(d) 戻し先になる現在の版が `guard=1` の印を持つ（印のない版へ戻す経路を作らない）。
-4. CloudFrontの変更が反映されたら、トラフィックを受ける前に、次を確認する。架空の案件の受付・判定保存、設問またはルールの提案とYes、別ブラウザでの共有一覧、最新ルールでの未判定案件の照合。保存済み判定の再保存と公開側からの内部モックPOSTが拒否されること。依頼IDを固定した再送は409で、枠が1つだけ消費されること。枠超過は検証用のカウンターを事前に用意し、不要な推論を発生させず429を確認する。**必須: ブラウザから、偽の `CloudFront-Viewer-Address` ヘッダーを付けた書き込み要求を送り、利用者の識別に使われず（実際の接続元の枠が使われ）、偽の値では別の枠を使えないことを確認する。確認できるまで、利用者へ公開しない。** CloudFrontが同名のヘッダーを実際の接続元で上書きするかは、AWSの資料の説明であり、このリポジトリでは実機で確認していない。
-5. 問題があれば最初にCloudFrontを元の読み取り構成（許可メソッド3種・従来のポリシー）に戻す。この戻しは、保存済みの共有データを変えない。設定データを戻す場合は、権限のある作業環境で `SharedConfigDb.restore(target_revision)` を使い、過去版を新しい共有設定として追加する（過去版は変えない）。反映前後の共有一覧を照合する。復元で無効になる設問も廃止済みとしてIDを保持する。公開された判定の登録済みの結果は読み取り専用で、承認した共有設定の変更・復元でも更新しない（運営も、判定の編集・解除は行わない）。設定を戻した後に開く判定未登録の案件だけ、戻した後のルールで照合される。
-6. Lambdaの版を戻す場合、書き込みを許可した構成のままでは、`guard=1` の印のない版へは戻せない（CDも、印のない版を現在の版とする書き込み構成の配布を止める）。印のない古い版が必要なときは、先にCloudFrontを読み取り構成へ戻す。
+2. **第1段階（読み取り構成のまま、候補を配布する）。** Lambda側に `AI_PROVIDER=bedrock`、許可したモデルとリージョン、有効な `DSQL_ENDPOINT` とアプリ用DB接続設定、シークレットとして32バイト以上の `AI_QUOTA_HMAC_KEY` を設定する。実行ロールのBedrock権限は対象モデルの呼び出しに絞る。公開用の回数は既定値の5・25を維持する。CloudFrontは許可メソッド3種・Managedポリシー・関連付けなしのまま、ガード・利用枠・エッジのソースを含むリリースZIPをCDで承認・配布し、通常のスモークを成功させる。続けて、エイリアスの版のdescriptionが `…;guard=1;viewerip=1` で終わることを読み取りで確認する。
+   ```bash
+   set -euo pipefail
+   FN='REPLACE_FUNCTION_NAME'
+   VER="$(aws lambda get-alias --function-name "$FN" --name demo --region ap-northeast-1 --query FunctionVersion --output text)"
+   aws lambda get-function-configuration --function-name "$FN" --qualifier "$VER" --region ap-northeast-1 \
+     --query Description --output text      # 期待: source=…;zip=…;run=…;guard=1;viewerip=1
+   ```
+3. **第2段階の準備（まだ公開しない・関連付けない）。** ZIPの中のレビュー済みソースを、新しい空のディレクトリへ取り出し、`manifest.json` の `edge.sha256Hex` と一致することを確認してから、関数を開発ステージ（DEVELOPMENT）に作ってテストする。
+   以降のbashブロックは、それぞれ独立したスクリプトとして `bash` で実行できる（先頭で `set -euo pipefail`。値は `REPLACE_*` を置き換える）。照合に失敗したときは、その場で終了コード1になり、次のAWSの操作へ進まない。
+   ```bash
+   set -euo pipefail
+   WORK="$(mktemp -d)"; echo "作業ディレクトリ: $WORK"   # 空の新しいディレクトリ（ZIP・manifestは信頼しない入力）。以降のブロックの WORK に控える
+   ART='REPLACE_ARTIFACT_DIR'               # CDの成果物（manifest.json と lambda-<SHA>.zip）
+   SHA='REPLACE_SOURCE_SHA'
+   unzip -p "$ART/lambda-$SHA.zip" edge/viewer-ip.js > "$WORK/viewer-ip.js"
+   EXPECTED="$(jq -r '.edge.sha256Hex // empty' "$ART/manifest.json")"
+   ACTUAL="$(sha256sum "$WORK/viewer-ip.js" | cut -d' ' -f1)"
+   if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+     echo 'ZIPの中のソースが manifest.json の edge.sha256Hex と一致しません。中止します。' >&2
+     exit 1
+   fi
+   EDGE_FN='REPLACE_EDGE_FUNCTION_NAME'
+   DEV_ETAG="$(aws cloudfront create-function --name "$EDGE_FN" --region us-east-1 \
+     --function-config 'Comment=viewer ip for demo,Runtime=cloudfront-js-2.0' \
+     --function-code "fileb://$WORK/viewer-ip.js" --query ETag --output text)"
+   echo "DEV_ETAG=$DEV_ETAG"               # 次のブロックの DEV_ETAG に控える（チャットには貼らない）
+   # DEVELOPMENTのコードも取り出し、レビュー済みソースとバイト単位で一致することを確認する
+   aws cloudfront get-function --name "$EDGE_FN" --stage DEVELOPMENT "$WORK/dev.js" --region us-east-1 > /dev/null
+   if ! cmp -s "$WORK/dev.js" "$WORK/viewer-ip.js"; then
+     echo 'DEVELOPMENTのコードがレビュー済みソースと一致しません。公開しないでください。' >&2
+     exit 1
+   fi
+   ```
+   `event.json`（架空のIPと、偽の重複ヘッダー・偽のトークンを含む例）を、下のJSONで `"$WORK/event.json"` に作り、DEVELOPMENTでテストする。`FunctionOutput` はJSONの文字列。期待: `FunctionErrorMessage` が空、`x-demo-viewer-ip` が `192.0.2.10` の1件だけ（`multiValue` なし）、`x-internal-mock-token` なし。外れたら終了コード1で止まり、公開しない。
+   ```bash
+   set -euo pipefail
+   WORK='REPLACE_WORK_DIR'; EDGE_FN='REPLACE_EDGE_FUNCTION_NAME'; DEV_ETAG='REPLACE_DEV_ETAG'
+   aws cloudfront test-function --name "$EDGE_FN" --if-match "$DEV_ETAG" --stage DEVELOPMENT \
+     --event-object "fileb://$WORK/event.json" --region us-east-1 > "$WORK/test.json"
+   if ! jq -e '
+       (.TestResult.FunctionErrorMessage // "") == ""
+       and (.TestResult.FunctionOutput | fromjson | .headers
+            | (."x-demo-viewer-ip" == {value: "192.0.2.10"}) and (has("x-internal-mock-token") | not))
+     ' "$WORK/test.json" > /dev/null; then
+     echo 'DEVELOPMENTのテスト結果が期待と違います。公開しません。' >&2
+     exit 1
+   fi
+   ```
+   `viewer` を除いた入力（IPなし）では、関数がオリジンへ送らず `statusCode` 400を返す（`FunctionOutput` が `statusCode` 400を含む）ことも、同じ手順で確認する。
+   ```json
+   {"version":"1.0","context":{"eventType":"viewer-request"},"viewer":{"ip":"192.0.2.10"},
+    "request":{"method":"POST","uri":"/api/admin/question-proposals","querystring":{},"cookies":{},
+     "headers":{"x-demo-viewer-ip":{"value":"203.0.113.1","multiValue":[{"value":"203.0.113.1"},{"value":"203.0.113.2"}]},
+                "x-internal-mock-token":{"value":"forged"}}}}
+   ```
+4. **第2段階（公開と、関連付け・7メソッドを同時に反映する）。** `publish-function` は、関数をLIVEにする。LIVEのコードは、`get-function --stage LIVE` でしか読めず、コンソールのテストはDEVELOPMENTを使う。公開したら、LIVEのコードを取り出して、手順3のファイルとバイト単位で一致することを確認する。続けて、ディストリビューションの**1回の更新**で、`viewer-request` の関連付け1件と7メソッドを同時に設定する（オリジンリクエストポリシーは触らない。Managedのまま）。更新後、状態が `Deployed` になるまで待つ。
+   ```bash
+   set -euo pipefail
+   WORK='REPLACE_WORK_DIR'; EDGE_FN='REPLACE_EDGE_FUNCTION_NAME'; DEV_ETAG='REPLACE_DEV_ETAG'
+   [ -s "$WORK/viewer-ip.js" ] || { echo 'レビュー済みソースがありません（手順3）。中止します。' >&2; exit 1; }
+   aws cloudfront publish-function --name "$EDGE_FN" --if-match "$DEV_ETAG" --region us-east-1
+   aws cloudfront get-function --name "$EDGE_FN" --stage LIVE "$WORK/live.js" --region us-east-1 > /dev/null
+   # 不一致なら、ここで終了コード1になり、下の関連付けと7メソッドの更新へ進まない（`cmp && echo` は使わない）
+   if ! cmp -s "$WORK/live.js" "$WORK/viewer-ip.js"; then
+     echo 'LIVEのコードがレビュー済みソースと一致しません。関連付けと7メソッドの更新はしません。' >&2
+     exit 1
+   fi
+   echo 'LIVE == レビュー済み'
 
-実AWSでの動作（CloudFrontのポリシー適用、ヘッダーの上書き、DSQLの衝突検出と費用、権限）は、この変更では確認していない。ローカルのPostgreSQL・偽のAWSによるテストで確認したのは、アプリとCDの検査の論理だけである。
+   DIST_ID='REPLACE_DISTRIBUTION_ID'
+   ACCOUNT_ID='REPLACE_ACCOUNT_ID'
+   EDGE_ARN="arn:aws:cloudfront::${ACCOUNT_ID}:function/${EDGE_FN}"
+   aws cloudfront get-distribution-config --id "$DIST_ID" --region us-east-1 > "$WORK/dist.json"
+   ETAG="$(jq -r .ETag "$WORK/dist.json")"
+   jq --arg arn "$EDGE_ARN" '.DistributionConfig
+     | .DefaultCacheBehavior.AllowedMethods.Quantity = 7
+     | .DefaultCacheBehavior.AllowedMethods.Items = ["GET","HEAD","OPTIONS","PUT","POST","PATCH","DELETE"]
+     | .DefaultCacheBehavior.FunctionAssociations = {Quantity:1, Items:[{FunctionARN:$arn, EventType:"viewer-request"}]}' \
+     "$WORK/dist.json" > "$WORK/dist-write.json"
+   aws cloudfront update-distribution --id "$DIST_ID" --if-match "$ETAG" \
+     --distribution-config "file://$WORK/dist-write.json" --region us-east-1
+   aws cloudfront wait distribution-deployed --id "$DIST_ID" --region us-east-1
+   # 反映後の設定を読み戻し、7メソッドと関連付け1件・Managedポリシーのままであることを確認する
+   aws cloudfront get-distribution-config --id "$DIST_ID" --region us-east-1 > "$WORK/dist-after.json"
+   if ! jq -e --arg arn "$EDGE_ARN" '.DistributionConfig.DefaultCacheBehavior
+       | (.AllowedMethods.Quantity == 7)
+         and (.FunctionAssociations.Quantity == 1)
+         and (.FunctionAssociations.Items[0] == {FunctionARN: $arn, EventType: "viewer-request"})
+         and (.OriginRequestPolicyId == "b689b0a8-53d0-40ab-baf2-68738e2966ac")' "$WORK/dist-after.json" > /dev/null; then
+     echo '反映後の設定が期待と違います。手順6で読み取り構成へ戻してください。' >&2
+     exit 1
+   fi
+   ```
+   `CachedMethods` は読み取りの2〜3種のまま変えない（CDは、書き込みメソッドのキャッシュを拒否する）。リポジトリ変数 `CLOUDFRONT_VIEWER_FUNCTION_ARN` に `EDGE_ARN` を設定すると、以後のCDが7メソッドの構成を検証できる（未設定のままでは、CDは変更の前に止まる）。
+5. `Deployed` になってから、トラフィックを受ける前に、次を確認する（**確認できるまで利用者へ公開しない**）。
+   1. 架空の案件の受付（201）・判定保存（200）・開き直して保存済みが表示される。設問またはルールの提案とYes、別ブラウザでの共有一覧、最新ルールでの未判定案件の照合。保存済み判定の再保存と、公開側からの内部モックPOSTが拒否されること（`POST /mock/v1/auto-answers/A09` は、トークンなし・偽のトークンありのどちらも405）。依頼IDを固定した再送は409で、枠が1つだけ消費されること。枠超過は検証用のカウンターを事前に用意し、不要な推論を発生させず429を確認する。
+   2. **偽の接続元ヘッダーの確認（必須）。** 自分の実際の接続元の枠を、検証日（日本時間）の上限（5）まで事前に埋め、全体の枠には空き（24以下）を残す。実際のIPの枠が使われていれば、偽のIPを付けても429（接続元の枠超過）になる。偽の値が使われると別の枠で通り、推論が始まるため、事前の用意なしでは行わない。主体の値は、秘密の鍵（`AI_QUOTA_HMAC_KEY`）で計算する（鍵と計算結果は書き残さない）。
+      ```bash
+      # 主体: IPv4は "v4:<IP>"、IPv6は "v6:<先頭64ビットのネットワーク>/64"（アプリと同じ正規化）
+      python3 -I -c 'import hashlib,hmac,os,sys; print(hmac.new(os.environ["AI_QUOTA_HMAC_KEY"].encode(), sys.argv[1].encode(), hashlib.sha256).hexdigest())' 'v4:REPLACE_YOUR_PUBLIC_IP'
+      # 検証用の行（ai_usage_counters）: usage_day=検証日(JST)、scope='ip'、subject=上の値、used=5（人がDSQLで実行する）
+      ```
+      次のスクリプトは、ステータスと本文の両方を確認し、期待と違えば終了コード1で止まる。期待は、**429で、本文が接続元ごとの枠（「この接続元からの」）を示す**こと。全体の枠の本文（「デモ全体の」）の429や、201・400・403などは失敗として扱う（枠の超過がIPごとでなく全体で起きている・偽の値が使われた・要求が別の理由で拒否された、のいずれかのため）。
+      ```bash
+      set -euo pipefail
+      BASE='https://REPLACE_ID.cloudfront.net'
+      BODY='{"prompt":"検証"}'
+      HASH="$(printf '%s' "$BODY" | sha256sum | cut -d' ' -f1)"
+      TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
+      expect_ip_429() {   # 引数: 偽のヘッダーの -H 指定（1つ以上）
+        local code
+        code="$(curl -sS -o "$TMP" -w '%{http_code}' -X POST "$BASE/api/admin/question-proposals" \
+          -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuidgen)" -H "x-amz-content-sha256: $HASH" \
+          "$@" --data "$BODY")"
+        if [ "$code" != 429 ] || ! grep -q 'この接続元からの' "$TMP" || grep -q 'デモ全体の' "$TMP"; then
+          echo "期待外れ: HTTP $code。接続元ごとの429ではありません。7メソッドと関連付けを戻してください（手順6）。" >&2
+          exit 1
+        fi
+        echo "OK: 429（接続元の枠）"
+      }
+      expect_ip_429 -H 'X-Demo-Viewer-Ip: 203.0.113.9'                                   # 偽の単一ヘッダー
+      expect_ip_429 -H 'X-Demo-Viewer-Ip: 203.0.113.9' -H 'X-Demo-Viewer-Ip: 203.0.113.10'   # 偽の重複ヘッダー
+      expect_ip_429 -H 'X-Demo-Viewer-Ip: 203.0.113.9' -H 'x-internal-mock-token: forged'    # 偽のIPと偽のトークン
+      ```
+      429が返っても、枠は増えない（接続元の枠は上限のまま）ことを確認する。全体の枠・偽のIP（`v4:203.0.113.9`）の枠の行が増えていないことを、DSQLの読み取りで確認する。201が返った・スクリプトが終了コード1で止まったときは、直ちに7メソッドと関連付けを戻す（手順6）。
+   3. Lambda関数URLへの未署名の直接アクセスが403のままであること。
+6. 問題があれば最初にCloudFrontを元の読み取り構成に戻す。**1回の更新で、許可メソッドを3種（GET・HEAD・OPTIONS）へ戻し、エッジ関数の関連付けを外す**（同じ `get-distribution-config` → `jq` → `update-distribution`。`AllowedMethods` を3種、`FunctionAssociations` を `{Quantity:0}` にする）。`Deployed` になるまで待ち、読み取り（`/`・`/health`・`/release` が200）と、書き込み（POST）が拒否されることを確認する。伝播（`Deployed`）が終わるまでは、一部のエッジが古い構成のまま応答し得るため、確認は `Deployed` の後にだけ行う。
+   ```bash
+   set -euo pipefail
+   DIST_ID='REPLACE_DISTRIBUTION_ID'; BASE='https://REPLACE_ID.cloudfront.net'
+   WORK="$(mktemp -d)"
+   aws cloudfront get-distribution-config --id "$DIST_ID" --region us-east-1 > "$WORK/dist.json"
+   ETAG="$(jq -r .ETag "$WORK/dist.json")"
+   jq '.DistributionConfig
+     | .DefaultCacheBehavior.AllowedMethods.Quantity = 3
+     | .DefaultCacheBehavior.AllowedMethods.Items = ["GET","HEAD","OPTIONS"]
+     | .DefaultCacheBehavior.FunctionAssociations = {Quantity:0}' "$WORK/dist.json" > "$WORK/dist-read.json"
+   aws cloudfront update-distribution --id "$DIST_ID" --if-match "$ETAG" \
+     --distribution-config "file://$WORK/dist-read.json" --region us-east-1
+   aws cloudfront wait distribution-deployed --id "$DIST_ID" --region us-east-1
+   for path in / /health /release; do
+     code="$(curl -sS -o /dev/null -w '%{http_code}' "$BASE$path")"
+     [ "$code" = 200 ] || { echo "読み取り $path が $code です（期待 200）。" >&2; exit 1; }
+   done
+   code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/api/admin/question-proposals" \
+     -H 'Content-Type: application/json' --data '{}')"
+   case "$code" in 403|405) echo "POST は拒否されました（$code）";; *) echo "POST が $code です（期待 403 または 405）。" >&2; exit 1;; esac
+   ```
+   **この確認の後にだけ**、必要ならLambdaの版を戻す。この戻しは、保存済みの共有データを変えない。設定データを戻す場合は、権限のある作業環境で `SharedConfigDb.restore(target_revision)` を使い、過去版を新しい共有設定として追加する（過去版は変えない）。反映前後の共有一覧を照合する。復元で無効になる設問も廃止済みとしてIDを保持する。公開された判定の登録済みの結果は読み取り専用で、承認した共有設定の変更・復元でも更新しない（運営も、判定の編集・解除は行わない）。設定を戻した後に開く判定未登録の案件だけ、戻した後のルールで照合される。
+7. Lambdaの版を戻す場合、書き込みを許可した構成のままでは、`guard=1` と `viewerip=1` の両方の印のない版へは戻せない（CDも、印のない版を現在の版とする書き込み構成の配布を止める）。印のない古い版（接続元の専用ヘッダーを読まない版）へ戻すときは、先に手順6でCloudFrontを読み取り構成へ戻し、読み取りと書き込みの拒否を確認してから、エイリアスを戻す（この順序を逆にすると、古い版が偽の接続元を信じ得る）。
 
-本文ハッシュはブラウザでシリアライズした書き込み本文のUTF-8バイト列から計算する。公開環境はHTTPSが必要。ローカル開発で共有設定をPostgreSQLに保存する場合は、初期化済みのDBに対して `SHARED_CONFIG_DB=1` を指定する。
+### LIVEの公開とアクセスの限界
 
-[AWSのLambda OAC要件](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-lambda.html) · [CloudFrontの接続元ヘッダー](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/adding-cloudfront-headers.html) · [配布ロールの権限表](https://docs.aws.amazon.com/service-authorization/latest/reference/list_cloudfront.html)
+- エッジ関数は、LIVEステージだけがディストリビューションに関連付けられる。`publish-function` は、その関数を使う全ディストリビューションの動作を即時に変えるため、公開の前に、DEVELOPMENTでのテストと手順3のソース照合を終える。
+- CDが確認できるのは、配布の実行時点のLIVEのコードだけ。公開後に別の人がLIVEを更新・再公開しても、次のCDまで検出しない（継続的な監視ではない）。配布用ロールに `UpdateFunction`・`PublishFunction` を与えない。関数を変更できる人は、利用枠の迂回ができるため、AWSの権限を最小にする。
+- `get-function --stage LIVE` の出力ファイルは、読み取り専用の確認用で、コードに秘密は含まない。CDは一時ディレクトリで読み、すぐ削除する。
+- 実AWSでの動作（CloudFront Functionsの実行、`event.viewer.ip` の実際の値、関連付けの反映、`get-function` の出力形式、7メソッドの更新、費用・Freeプランでの利用可否）は、この変更では確認していない。ローカルで確認したのは、エッジ関数のNodeでの実行、アプリの検証、偽のAWSによるCDの検査の論理だけである。
+
+本文ハッシュはブラウザでシリアライズした書き込み本文のUTF-8バイト列から計算する（変更なし）。公開環境はHTTPSが必要。ローカル開発で共有設定をPostgreSQLに保存する場合は、初期化済みのDBに対して `SHARED_CONFIG_DB=1` を指定する。ローカル開発・E2Eでは、エッジがないため、必要なテストが専用ヘッダー（`X-Demo-Viewer-Ip`）を直接付ける。
+
+[AWSのLambda OAC要件](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-lambda.html) · [CloudFront Functionsのイベント構造](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/functions-event-structure.html) · [GetFunction](https://docs.aws.amazon.com/cloudfront/latest/APIReference/API_GetFunction.html) · [配布ロールの権限表](https://docs.aws.amazon.com/service-authorization/latest/reference/list_cloudfront.html)

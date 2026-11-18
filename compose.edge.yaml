@@ -1,0 +1,13 @@
+# エッジ（CloudFront Functions）のテスト専用。scripts/edge-test.sh が使う（通常の `docker compose up` には入らない）。
+# AWSへは接続しない。ソースは読み取り専用でマウントし、ネットワークなしで実行する。
+# Nodeのイメージは frontend/Dockerfile・infra/cd/Dockerfile と同じdigest。
+services:
+  edge-test:
+    image: node:26.13.0-trixie-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072
+    network_mode: none
+    read_only: true
+    working_dir: /edge
+    volumes:
+      # EDGE_SRC_DIR は、変異テスト（壊した写しで失敗を確認する）用。通常は未設定。
+      - ${EDGE_SRC_DIR:-./infra/edge}:/edge:ro
+    command: ["node", "--test", "viewer-ip.test.js"]

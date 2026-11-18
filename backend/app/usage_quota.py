@@ -3,9 +3,11 @@
 方針（docs/development-workflow.md「公開時の書き込みと利用枠」）:
 - 接続元IPごとに1日5回、デモ全体で1日25回。両方に空きがあれば推論を始める。
 - 日の区切りは日本時間（JST）の午前0時。
-- 接続元は、CloudFront が付ける CloudFront-Viewer-Address（「IP:ポート」）だけを使う。
+- 接続元は、CloudFront Functions（viewer-request）が event.viewer.ip から付ける
+  専用ヘッダー（X-Demo-Viewer-Ip。ポートなしのIPだけ）だけを使う。フォールバックはない。
   IPv6 は /64 の先頭部分にまとめる（同じ /64 の端末は枠を共有する）。
-  読み取れない値は拒否する（推測で別の値にしない）。
+  IPv4射影のIPv6はIPv4にする。
+  読み取れない値・複数の値は拒否する（推測で別の値にしない）。
 - 保存するのは鍵付きHMAC-SHA256の結果。鍵はサーバーで管理する。
   IPは利用者本人の識別ではない。同じIPの利用者は枠を共有する。
 """
@@ -23,7 +25,9 @@ DEFAULT_GLOBAL_LIMIT = 25
 # 設定で変えられる範囲（0・負数・極端な値は起動時に失敗させる）。
 LIMIT_RANGE = (1, 1000)
 
-VIEWER_ADDRESS_HEADER = "CloudFront-Viewer-Address"
+# エッジ（infra/edge/viewer-ip.js）が、実際の接続元IPで項目ごと置き換える専用ヘッダー。
+# 利用者が送った同名のヘッダーはエッジが捨てる。値はポートなしのIP1つだけ。
+VIEWER_IP_HEADER = "x-demo-viewer-ip"
 GLOBAL_SUBJECT = "*"
 # 利用枠の行（日別の件数）を残す日数。これより古い日の行は、消してよい。
 RETENTION_DAYS = 7
@@ -75,24 +79,21 @@ def seconds_until_reset(now: datetime) -> int:
 
 
 def viewer_key(header_value: str | None) -> str:
-    """CloudFront-Viewer-Address から、接続元の正規化した文字列を作る。
+    """専用ヘッダー（ポートなしのIP1つ）から、接続元の正規化した文字列を作る。
 
-    受け付ける形: 「IPv4:ポート」「IPv6:ポート」「[IPv6]:ポート」。
-    複数の値（カンマ区切り）、ポートのない値、IPとして読めない値は拒否する。
+    受け付ける形: 「IPv4」「IPv6」だけ。複数の値（カンマ区切り）、ポート・角括弧・空白・
+    スコープID・IPとして読めない値は拒否する。
     """
     if header_value is None:
         raise ViewerAddressUnavailable("ヘッダーがありません")
-    text = header_value.strip()
-    if not text or "," in text or any(c.isspace() for c in text):
+    if (
+        not header_value
+        or not header_value.isascii()
+        or not all(c in "0123456789abcdefABCDEF:." for c in header_value)
+    ):
         raise ViewerAddressUnavailable("ヘッダーの形式が不正です")
-    if text.startswith("["):
-        host, sep, port = text[1:].partition("]:")
-    else:
-        host, sep, port = text.rpartition(":")
-    if not sep or not port.isascii() or not port.isdigit() or int(port) > 65535:
-        raise ViewerAddressUnavailable("ポートを読み取れません")
     try:
-        address = ipaddress.ip_address(host)
+        address = ipaddress.ip_address(header_value)
     except ValueError:
         raise ViewerAddressUnavailable("IPアドレスを読み取れません") from None
     if isinstance(address, ipaddress.IPv6Address):

@@ -41,7 +41,7 @@ from app.question_validation import (
     validate_model_output,
 )
 from app.usage_quota import (
-    VIEWER_ADDRESS_HEADER,
+    VIEWER_IP_HEADER,
     DuplicateAiRequest,
     QuotaExceeded,
     ViewerAddressUnavailable,
@@ -205,7 +205,7 @@ def reserve_ai_call(request: Request, proposer: Any) -> None:
             status_code=503, detail="AI提案の利用枠の管理先がありません"
         )
     try:
-        addresses = request.headers.getlist(VIEWER_ADDRESS_HEADER)
+        addresses = request.headers.getlist(VIEWER_IP_HEADER)
         key = viewer_key(addresses[0] if len(addresses) == 1 else None)
     except ViewerAddressUnavailable:
         raise HTTPException(

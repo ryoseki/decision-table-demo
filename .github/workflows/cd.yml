@@ -177,6 +177,7 @@ jobs:
           CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
           CLOUDFRONT_OAC_ID: ${{ vars.CLOUDFRONT_OAC_ID }}
           WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+          CLOUDFRONT_VIEWER_FUNCTION_ARN: ${{ vars.CLOUDFRONT_VIEWER_FUNCTION_ARN }}
           LAMBDA_LAYER_CODE_SHA256: ${{ vars.LAMBDA_LAYER_CODE_SHA256 }}
         run: |
           for name in AWS_ROLE_ARN LAMBDA_FUNCTION_NAME CD_BASE_URL CLOUDFRONT_DISTRIBUTION_ID CLOUDFRONT_OAC_ID WAF_WEB_ACL_ARN LAMBDA_LAYER_CODE_SHA256 CD_APPROVER_LOGIN; do
@@ -201,6 +202,12 @@ jobs:
           fi
           if ! [[ "$WAF_WEB_ACL_ARN" =~ ^arn:aws:wafv2:us-east-1:[0-9]{12}:global/webacl/[A-Za-z0-9_-]{1,128}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
             echo "WAF_WEB_ACL_ARN の形式が不正です（us-east-1のglobal scopeのWeb ACL）。" >&2
+            exit 1
+          fi
+          # 承認したエッジ関数（任意）。読み取り構成（許可メソッド3種）では未設定でよい。書き込み構成では必須で、
+          # 未設定なら配布ヘルパーが変更の前に止まる。設定する場合は形式を確認する。
+          if [ -n "${CLOUDFRONT_VIEWER_FUNCTION_ARN//[[:space:]]/}" ] && ! [[ "$CLOUDFRONT_VIEWER_FUNCTION_ARN" =~ ^arn:aws:cloudfront::[0-9]{12}:function/[A-Za-z0-9_-]{1,64}$ ]]; then
+            echo "CLOUDFRONT_VIEWER_FUNCTION_ARN の形式が不正です。" >&2
             exit 1
           fi
           if ! [[ "$ZIP_SHA256" =~ ^[0-9a-f]{64}$ ]] || ! [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
@@ -236,6 +243,7 @@ jobs:
           CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
           CLOUDFRONT_OAC_ID: ${{ vars.CLOUDFRONT_OAC_ID }}
           WAF_WEB_ACL_ARN: ${{ vars.WAF_WEB_ACL_ARN }}
+          CLOUDFRONT_VIEWER_FUNCTION_ARN: ${{ vars.CLOUDFRONT_VIEWER_FUNCTION_ARN }}
           LAMBDA_LAYER_CODE_SHA256: ${{ vars.LAMBDA_LAYER_CODE_SHA256 }}
         run: |
           python3 -B -I scripts/deploy-lambda.py \
@@ -251,6 +259,7 @@ jobs:
             --oac-id "$CLOUDFRONT_OAC_ID" \
             --web-acl-arn "$WAF_WEB_ACL_ARN" \
             --layer-code-sha256 "$LAMBDA_LAYER_CODE_SHA256" \
+            --edge-function-arn "$CLOUDFRONT_VIEWER_FUNCTION_ARN" \
             --result-file cd-result/result.json
 
       - name: 結果のサマリー

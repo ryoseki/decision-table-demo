@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -46,6 +47,9 @@ WAF_NAME = "demo-acl"
 WAF_ID = "11111111-2222-3333-4444-555555555555"
 WAF_ARN = f"arn:aws:wafv2:us-east-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"
 SECRET = "SUPER-SECRET-ENV-VALUE"
+EDGE_FUNCTION = "demo-viewer-ip"
+EDGE_ARN = f"arn:aws:cloudfront::{ACCOUNT}:function/{EDGE_FUNCTION}"
+EDGE_SOURCE = (ROOT / "infra" / "edge" / "viewer-ip.js").read_bytes()  # レビュー済みのソース
 OLD_ZIP = hashlib.sha256(b"previous zip").hexdigest()
 MUTATING = {
     "update-function-code",
@@ -229,11 +233,24 @@ def make_policy_document() -> dict:
 
 
 def make_artifact(
-    directory: Path, sha: str = NEW_SHA, payload: bytes = b"new zip", guard: bool | None = None
+    directory: Path,
+    sha: str = NEW_SHA,
+    payload: bytes = b"new zip",
+    guard: bool | None = None,
+    viewer_ip: bool | None = None,
+    manifest_edge_hex: str | None = None,
+    edge_entry: bytes = EDGE_SOURCE,
 ) -> str:
+    """viewer_ip が None 以外のときは、エッジのソースを含む本物のZIPを作る（True: 契約あり、False: 宣言なし）。"""
     directory.mkdir(parents=True)
     zip_path = directory / f"lambda-{sha}.zip"
-    zip_path.write_bytes(payload)
+    if viewer_ip is None:
+        zip_path.write_bytes(payload)
+    else:
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr("app/main.py", payload)
+            archive.writestr("edge/viewer-ip.js", edge_entry)
+        payload = zip_path.read_bytes()
     digest = hashlib.sha256(payload)
     manifest = {
         "schema": 1,
@@ -258,43 +275,29 @@ def make_artifact(
     }
     if guard is not None:
         manifest["capabilities"] = {"publicWriteGuard": 1 if guard else 0}
+    if viewer_ip is not None:
+        manifest.setdefault("capabilities", {})["viewerIpContract"] = 1 if viewer_ip else 0
+        manifest["edge"] = {
+            "file": "edge/viewer-ip.js",
+            "sha256Hex": manifest_edge_hex or hashlib.sha256(EDGE_SOURCE).hexdigest(),
+        }
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return digest.hexdigest()
 
 
-WRITE_POLICY_ID = "11111111-2222-3333-4444-555555555555"
+APPROVED_ASSOCIATION = {"FunctionARN": EDGE_ARN, "EventType": "viewer-request"}
 
 
-def enable_write(aws, *, methods=None, cookie="none", query="none", headers=None) -> None:
-    """FakeAws の公開経路を、書き込み許可（7メソッド・専用ポリシー）の形にする。"""
+def enable_write(aws, *, methods=None, associations=None, live="source") -> None:
+    """FakeAws の公開経路を、書き込み許可（7メソッド・管理ポリシーのまま・承認したエッジ関数の関連付け1件）の形にする。
+
+    live: "source"=レビュー済みと同じコード / bytes=別のコード / None=取得に失敗する / "nofile"=ファイルを出さない
+    """
     items = sorted(methods if methods is not None else dl.WRITE_ENABLED_METHODS)
     aws.behavior["AllowedMethods"].update(Quantity=len(items), Items=items)
-    aws.behavior["OriginRequestPolicyId"] = WRITE_POLICY_ID
-    names = sorted(headers if headers is not None else dl.WRITE_ORIGIN_HEADERS)
-    aws.origin_request_policy = {"OriginRequestPolicy": {
-        "Id": WRITE_POLICY_ID,
-        "OriginRequestPolicyConfig": {
-            "HeadersConfig": {"HeaderBehavior": "whitelist",
-                              "Headers": {"Quantity": len(names), "Items": names}},
-            "CookiesConfig": {"CookieBehavior": cookie},
-            "QueryStringsConfig": {"QueryStringBehavior": query},
-        },
-    }}
-
-
-class TestWriteOriginPolicy(unittest.TestCase):
-    def test_policy_requires_cloudfront_address_and_excludes_internal_token(self):
-        policy_id = "11111111-2222-3333-4444-555555555555"
-        headers = sorted(dl.WRITE_ORIGIN_HEADERS)
-        config = {
-            "HeadersConfig": {"HeaderBehavior": "whitelist", "Headers": {"Quantity": 4, "Items": headers}},
-            "CookiesConfig": {"CookieBehavior": "none"},
-            "QueryStringsConfig": {"QueryStringBehavior": "none"},
-        }
-        response = {"OriginRequestPolicy": {"Id": policy_id, "OriginRequestPolicyConfig": config}}
-        self.assertEqual(dl.write_policy_problems(response, policy_id), [])
-        headers[headers.index("cloudfront-viewer-address")] = "x-internal-mock-token"
-        self.assertEqual(dl.write_policy_problems(response, policy_id), ["writeOriginRequestPolicyHeaders"])
+    found = [APPROVED_ASSOCIATION] if associations is None else associations
+    aws.behavior["FunctionAssociations"] = {"Quantity": len(found), "Items": found}
+    aws.live_edge = EDGE_SOURCE if live == "source" else live
 
 
 class FakeAws:
@@ -355,6 +358,8 @@ class FakeAws:
         self.policy_doc = make_policy_document()
         # get-function-concurrency の応答（未設定なら実APIはキーを返さない想定）
         self.concurrency = {"ReservedConcurrentExecutions": 3}
+        self.live_edge = EDGE_SOURCE
+        self.edge_outfiles = []
 
     # テストから設定を書き換えやすくする入口
     @property
@@ -427,12 +432,15 @@ class FakeAws:
             if opts["--id"] != DIST_ID:
                 raise dl.AwsError(op, 254)  # 存在しないID
             return json.loads(json.dumps(self.dist))
-        if op == "get-origin-request-policy":
-            assert args[0] == "cloudfront" and set(opts) == {"--id"}
-            policy = self.origin_request_policy
-            if opts["--id"] != policy["OriginRequestPolicy"]["Id"]:
+        if op == "get-function" and args[0] == "cloudfront":
+            # 実CLIの形: --name <名前> --stage LIVE <出力ファイル>（本文はファイルへ、標準出力はメタデータ）
+            assert args[2:5] == ["--name", EDGE_FUNCTION, "--stage"] and args[5] == "LIVE" and len(args) == 7
+            self.edge_outfiles.append(Path(args[6]))
+            if self.live_edge is None:
                 raise dl.AwsError(op, 254)
-            return json.loads(json.dumps(policy))
+            if self.live_edge != "nofile":
+                Path(args[6]).write_bytes(self.live_edge)
+            return {"ETag": "E1", "ContentType": "application/octet-stream"}
         if op == "get-origin-access-control":
             assert args[0] == "cloudfront" and set(opts) == {"--id"}
             if opts["--id"] != OAC_ID:
@@ -531,6 +539,7 @@ class DeployTestCase(unittest.TestCase):
             oac_id=OAC_ID,
             web_acl_arn=WAF_ARN,
             layer_code_sha256=LAYER_SHA,
+            edge_function_arn=EDGE_ARN,
             result_file=self.result_file,
             aws=self.aws,
             smoke=self.smoke,
@@ -1636,20 +1645,29 @@ BOUNDARY_CASES = [
 ]
 
 
-class WriteGuardGate(DeployTestCase):
-    """書き込みを許可した公開経路は、ガード・利用枠を含む版だけを許す（AWSの変更の前に止める）。"""
+class WriteEdgeGate(DeployTestCase):
+    """書き込みを許可した公開経路（7メソッド）の条件。AWSの変更の前に、すべて満たさなければ止める。
+
+    条件: 管理ポリシー・承認したエッジ関数の関連付けがちょうど1件・LIVEのコードがレビュー済みのソースと
+    一致・今回の版と戻し先の版が、ガード（guard=1）と接続元IPの契約（viewerip=1）の両方を持つ。
+    """
 
     def setUp(self):
         super().setUp()
-        self.zip_hex = make_artifact(self.dir / "g", guard=True)
+        self.zip_hex = make_artifact(self.dir / "g", guard=True, viewer_ip=True)
         self.artifact = self.dir / "g"
 
-    def mark_previous(self):
-        self.aws.versions["1"] = self.aws._snapshot(
-            "1", dl.make_description(OLD_SHA, OLD_ZIP, "100", guard=True)
-        )
+    def mark_previous(self, guard=True, viewer_ip=True):
+        description = dl.make_description(OLD_SHA, OLD_ZIP, "100", guard=guard, viewer_ip=viewer_ip)
+        self.aws.versions["1"] = self.aws._snapshot("1", description)
 
-    def assert_blocked_before_mutation(self, expect):
+    def fresh(self):
+        self.aws = FakeAws()
+        self.smoke = FakeSmoke()
+        self.result_file.unlink(missing_ok=True)
+        self.mark_previous()
+
+    def assert_blocked_before_mutation(self, expect, absent=()):
         self.assertEqual(self.deploy(), 1)
         self.assertEqual(self.aws.mutating(), [])
         result = self.result()
@@ -1657,42 +1675,208 @@ class WriteGuardGate(DeployTestCase):
         self.assertFalse(result["mutationStarted"])
         self.assertEqual(self.smoke.calls, [])
         self.assertIn(expect, result["error"])
-        self.assertNotIn("rollbackTargetWithoutWriteGuard" if expect.startswith("candidate") else "candidateWithoutWriteGuard", result["error"])
+        for name in absent:
+            self.assertNotIn(name, result["error"])
 
-    def test_guarded_candidate_and_marked_rollback_target_deploy_and_leave_a_marker(self):
+    def test_fully_prepared_write_stage_deploys_and_marks_both_capabilities(self):
         enable_write(self.aws)
         self.mark_previous()
         self.assertEqual(self.deploy(), 0)
-        self.assertIn("get-origin-request-policy", self.aws.ops())
-        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1"))
+        ops = self.aws.ops()
+        self.assertNotIn("get-origin-request-policy", ops)  # 専用ポリシーは使わない（管理ポリシーのまま）
+        cloudfront = {call[1] for call in self.aws.calls if call[0] == "cloudfront"}
+        self.assertEqual(cloudfront, {"get-distribution", "get-origin-access-control", "get-function"})  # 読み取りだけ
+        self.assertLess(ops.index("get-function"), ops.index("update-function-code"))
+        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1;viewerip=1"))
 
-    def test_candidate_without_marker_is_blocked_on_a_write_stage(self):
+    def test_live_code_is_fetched_with_the_cli_file_output_and_the_temp_file_is_removed(self):
         enable_write(self.aws)
         self.mark_previous()
-        self.zip_hex = make_artifact(self.dir / "plain", guard=None)
-        self.artifact = self.dir / "plain"
-        self.assert_blocked_before_mutation("candidateWithoutWriteGuard")
+        self.assertEqual(self.deploy(), 0)
+        self.assertEqual(len(self.aws.edge_outfiles), 1)
+        self.assertFalse(self.aws.edge_outfiles[0].exists())
+        self.assertFalse(self.aws.edge_outfiles[0].parent.exists())
 
-    def test_candidate_marker_zero_is_blocked(self):
-        enable_write(self.aws)
+    def test_temp_file_is_removed_even_when_the_code_differs(self):
+        enable_write(self.aws, live=b"function handler(e){return e.request;}")
         self.mark_previous()
-        self.zip_hex = make_artifact(self.dir / "zero", guard=False)
-        self.artifact = self.dir / "zero"
-        self.assert_blocked_before_mutation("candidateWithoutWriteGuard")
+        self.assertEqual(self.deploy(), 1)
+        self.assertFalse(self.aws.edge_outfiles[0].parent.exists())
 
-    def test_rollback_target_without_marker_is_blocked(self):
-        enable_write(self.aws)  # 版1はガード導入前（印なし）
+    def test_candidate_without_guard_is_blocked_on_a_write_stage(self):
+        for name, kwargs in (("plain", dict(guard=None)), ("zero", dict(guard=False))):
+            with self.subTest(name):
+                self.fresh()
+                enable_write(self.aws)
+                self.zip_hex = make_artifact(self.dir / name, **kwargs)
+                self.artifact = self.dir / name
+                self.assert_blocked_before_mutation("candidateWithoutWriteGuard")
+
+    def test_candidate_without_the_viewer_ip_contract_is_blocked(self):
+        for name, kwargs in (
+            ("guard-only", dict(guard=True)),  # 宣言なし
+            ("zero", dict(guard=True, viewer_ip=False)),
+        ):
+            with self.subTest(name):
+                self.fresh()
+                enable_write(self.aws)
+                self.zip_hex = make_artifact(self.dir / name, **kwargs)
+                self.artifact = self.dir / name
+                self.assert_blocked_before_mutation(
+                    "candidateWithoutViewerIpContract", absent=("rollbackTarget",)
+                )
+                self.assertNotIn("get-function", self.aws.ops())  # 契約のないZIPでは、LIVEも読まない
+
+    def test_rollback_target_needs_both_markers(self):
+        for name, kwargs, expect in (
+            ("no markers", dict(guard=False, viewer_ip=False), "rollbackTargetWithoutWriteGuard"),
+            ("guard only", dict(guard=True, viewer_ip=False), "rollbackTargetWithoutViewerIpContract"),
+            ("viewer ip only", dict(guard=False, viewer_ip=True), "rollbackTargetWithoutWriteGuard"),
+        ):
+            with self.subTest(name):
+                self.fresh()
+                enable_write(self.aws)
+                self.mark_previous(**kwargs)
+                self.assert_blocked_before_mutation(expect, absent=("candidateWith",))
+
+    def test_unmarked_old_rollback_target_is_blocked(self):
+        enable_write(self.aws)  # 版1は印なし（ガード導入前）
         self.assert_blocked_before_mutation("rollbackTargetWithoutWriteGuard")
 
-    def test_read_only_stage_bootstraps_old_version_and_adds_the_marker(self):
-        self.assertEqual(self.deploy(), 0)  # 読み取り専用: 印のない版1からでも進める
-        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1"))
+    def test_read_only_stage_bootstraps_from_an_old_version_and_adds_both_markers(self):
+        self.assertEqual(self.deploy(), 0)  # 印のない版1から、3メソッドのまま進める
+        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1;viewerip=1"))
+        self.assertNotIn("get-function", self.aws.ops())  # 読み取り構成では、エッジ関数を読まない
 
-    def test_read_only_stage_without_marker_in_candidate_still_deploys_without_marker(self):
+    def test_read_only_stage_accepts_a_guard_only_previous_version(self):
+        self.mark_previous(guard=True, viewer_ip=False)
+        self.assertEqual(self.deploy(), 0)
+
+    def test_read_only_stage_without_markers_in_candidate_deploys_without_markers(self):
         self.zip_hex = make_artifact(self.dir / "plain", guard=None)
         self.artifact = self.dir / "plain"
         self.assertEqual(self.deploy(), 0)
         self.assertNotIn("guard", self.aws.versions["2"]["Description"])
+        self.assertNotIn("viewerip", self.aws.versions["2"]["Description"])
+
+    def test_read_only_stage_rejects_any_edge_association(self):
+        for associations in (
+            [APPROVED_ASSOCIATION],
+            [{"FunctionARN": EDGE_ARN, "EventType": "viewer-response"}],
+        ):
+            with self.subTest(associations):
+                self.fresh()
+                self.aws.behavior["FunctionAssociations"] = {
+                    "Quantity": len(associations),
+                    "Items": associations,
+                }
+                self.assertEqual(self.deploy(), 1)
+                self.assertEqual(self.aws.mutating(), [])
+                self.assertIn("edgeFunctions", self.result()["error"])
+                self.assertNotIn("get-function", self.aws.ops())
+
+    def test_write_stage_requires_exactly_one_approved_viewer_request_association(self):
+        other = {"FunctionARN": f"arn:aws:cloudfront::{ACCOUNT}:function/other", "EventType": "viewer-request"}
+        cases = {
+            "none": [],
+            "two associations": [APPROVED_ASSOCIATION, other],
+            "duplicated approved": [APPROVED_ASSOCIATION, dict(APPROVED_ASSOCIATION)],
+            "other function": [other],
+            "other account": [{**APPROVED_ASSOCIATION, "FunctionARN": EDGE_ARN.replace(ACCOUNT, OTHER_ACCOUNT)}],
+            "viewer-response": [{**APPROVED_ASSOCIATION, "EventType": "viewer-response"}],
+            "origin-request": [{**APPROVED_ASSOCIATION, "EventType": "origin-request"}],
+            "origin-response": [{**APPROVED_ASSOCIATION, "EventType": "origin-response"}],
+            "missing event type": [{"FunctionARN": EDGE_ARN}],
+            "extra field": [{**APPROVED_ASSOCIATION, "IncludeBody": True}],
+        }
+        for name, associations in cases.items():
+            with self.subTest(name):
+                self.fresh()
+                enable_write(self.aws, associations=associations)
+                self.assert_blocked_before_mutation("edgeFunctionAssociation")
+                self.assertNotIn("get-function", self.aws.ops())
+
+    def test_malformed_association_blocks_are_rejected(self):
+        for name, block in (
+            ("missing", None),
+            ("quantity mismatch", {"Quantity": 2, "Items": [APPROVED_ASSOCIATION]}),
+            ("not a list", {"Quantity": 1, "Items": APPROVED_ASSOCIATION}),
+        ):
+            with self.subTest(name):
+                self.fresh()
+                enable_write(self.aws)
+                if block is None:
+                    del self.aws.behavior["FunctionAssociations"]
+                else:
+                    self.aws.behavior["FunctionAssociations"] = block
+                self.assertEqual(self.deploy(), 1)
+                self.assertEqual(self.aws.mutating(), [])
+                self.assertEqual(self.result()["publicPath"], "failed")
+
+    def test_write_stage_without_a_configured_approved_function_is_blocked(self):
+        enable_write(self.aws)
+        self.mark_previous()
+        self.assertEqual(self.deploy(edge_function_arn=None), 1)
+        self.assertEqual(self.aws.mutating(), [])
+        self.assertIn("edgeFunctionNotConfigured", self.result()["error"])
+        self.assertNotIn("get-function", self.aws.ops())
+
+    def test_write_stage_keeps_lambda_edge_forbidden_and_the_managed_policy(self):
+        enable_write(self.aws)
+        self.mark_previous()
+        self.aws.behavior["LambdaFunctionAssociations"] = {"Quantity": 1, "Items": [{"LambdaFunctionARN": "x"}]}
+        self.assertEqual(self.deploy(), 1)
+        self.assertIn("lambdaEdge", self.result()["error"])
+        for name, policy_id in (
+            ("custom policy", "11111111-2222-3333-4444-555555555555"),
+            ("other managed policy", "216adef6-5c7f-47e4-b989-5492eafa07d3"),
+            ("viewer-address policy", "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"),
+        ):
+            with self.subTest(name):
+                self.fresh()
+                enable_write(self.aws)
+                self.aws.behavior["OriginRequestPolicyId"] = policy_id
+                self.assertEqual(self.deploy(), 1)
+                self.assertEqual(self.aws.mutating(), [])
+                self.assertIn("originRequestPolicy", self.result()["error"])
+
+    def test_live_code_retrieval_failures_and_mismatches_stop_before_any_mutation(self):
+        cases = {
+            "get-function fails": (None, "edgeFunctionRetrieval"),
+            "no output file": ("nofile", "edgeFunctionRetrieval"),
+            "empty output file": (b"", "edgeFunctionRetrieval"),
+            "different code": (b"function handler(e){return e.request;}", "edgeFunctionCodeMismatch"),
+            "source plus a byte": (EDGE_SOURCE + b"\n", "edgeFunctionCodeMismatch"),
+            "source minus a byte": (EDGE_SOURCE[:-1], "edgeFunctionCodeMismatch"),
+        }
+        for name, (live, expect) in cases.items():
+            with self.subTest(name):
+                self.fresh()
+                enable_write(self.aws, live=live)
+                self.assert_blocked_before_mutation(expect)
+                self.assertEqual(self.result()["publicPath"], "failed")
+                self.assertEqual(self.aws.alias["FunctionVersion"], "1")  # ロールバック・切り替えのどちらにも進まない
+
+    def test_manifest_edge_hash_must_match_the_zip_entry_before_any_aws_call(self):
+        self.zip_hex = make_artifact(self.dir / "bad-hash", guard=True, viewer_ip=True, manifest_edge_hex="0" * 64)
+        self.artifact = self.dir / "bad-hash"
+        enable_write(self.aws)
+        self.mark_previous()
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.aws.calls, [])
+        self.assertIn("edgeSource", self.result()["error"])
+
+    def test_zip_entry_that_differs_from_the_reviewed_source_cannot_claim_the_contract(self):
+        # ZIPとmanifestが同じ改ざんされたコードを指していても、LIVEと照合するのはZIPの中の写し。
+        tampered = EDGE_SOURCE + b"// extra\n"
+        self.zip_hex = make_artifact(
+            self.dir / "tampered", guard=True, viewer_ip=True, edge_entry=tampered,
+            manifest_edge_hex=hashlib.sha256(tampered).hexdigest(),
+        )
+        self.artifact = self.dir / "tampered"
+        enable_write(self.aws)  # LIVEは、レビュー済みの本物
+        self.mark_previous()
+        self.assert_blocked_before_mutation("edgeFunctionCodeMismatch")
 
     def test_partial_method_sets_are_rejected(self):
         for methods in (
@@ -1701,43 +1885,62 @@ class WriteGuardGate(DeployTestCase):
             dl.WRITE_ENABLED_METHODS - {"OPTIONS"},
         ):
             with self.subTest(methods=sorted(methods)):
-                self.aws = FakeAws()
-                self.smoke = FakeSmoke()
-                self.result_file.unlink(missing_ok=True)
-                self.mark_previous()
+                self.fresh()
                 enable_write(self.aws, methods=methods)
                 self.assertEqual(self.deploy(), 1)
                 self.assertEqual(self.aws.mutating(), [])
                 self.assertIn("allowedMethods", self.result()["error"])
 
-    def test_forwarding_and_header_problems_are_rejected_before_mutation(self):
-        names = sorted(dl.WRITE_ORIGIN_HEADERS)
-        cases = {
-            "cookies": dict(cookie="all"),
-            "query": dict(query="all"),
-            "internal token header": dict(
-                headers=[h if h != "cloudfront-viewer-address" else "x-internal-mock-token" for h in names]
-            ),
-            "missing viewer address": dict(headers=[h for h in names if h != "cloudfront-viewer-address"]),
-            "extra header": dict(headers=names + ["authorization"]),
-        }
-        for name, options in cases.items():
-            with self.subTest(name):
-                self.aws = FakeAws()
-                self.smoke = FakeSmoke()
-                self.result_file.unlink(missing_ok=True)
-                self.mark_previous()
-                enable_write(self.aws, **options)
-                self.assertEqual(self.deploy(), 1)
-                self.assertEqual(self.aws.mutating(), [])
-                self.assertEqual(self.result()["publicPath"], "failed")
-                self.assertIn("writeOriginRequestPolicy", self.result()["error"])
-
-    def test_reusing_a_published_version_requires_the_same_marker(self):
+    def prepare_existing(self, **markers):
         enable_write(self.aws)
         self.mark_previous()
         self.aws.dedupe_publish = True
+        self.aws.function["CodeSha256"] = code_sha(self.zip_hex)
+        self.aws.versions["2"] = self.aws._snapshot(
+            "2", dl.make_description(NEW_SHA, self.zip_hex, "150", **markers)
+        )
+
+    def test_reusing_a_published_version_requires_the_same_markers(self):
+        self.prepare_existing(guard=True, viewer_ip=True)
         self.assertEqual(self.deploy(), 0)
+        self.assertEqual(self.result()["versions"], {"previous": "1", "new": "2", "reused": True})
+        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
+
+    def test_reusing_a_version_without_the_viewer_ip_marker_fails_closed(self):
+        for markers in (dict(guard=True), dict()):
+            with self.subTest(markers):
+                self.fresh()
+                self.prepare_existing(**markers)
+                self.assertEqual(self.deploy(), 1)
+                self.assertIn("手動", self.result()["error"])
+                self.assertEqual(self.aws.alias["FunctionVersion"], "1")
+                self.assertNotIn("update-alias", self.aws.ops())
+
+    def test_failed_smoke_rolls_back_to_the_marked_previous_version(self):
+        enable_write(self.aws)
+        self.mark_previous()
+        self.smoke = FakeSmoke({"new": False})
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
+        self.assertEqual(self.result()["rollback"], "succeeded")
+
+
+class DescriptionMarkers(unittest.TestCase):
+    def test_markers_round_trip_in_a_fixed_order(self):
+        self.assertEqual(dl.make_description(NEW_SHA, OLD_ZIP, "1"), f"source={NEW_SHA};zip={OLD_ZIP};run=1")
+        both = dl.make_description(NEW_SHA, OLD_ZIP, "1", guard=True, viewer_ip=True)
+        self.assertTrue(both.endswith(";guard=1;viewerip=1"))
+        meta = dl.parse_description(both)
+        self.assertTrue(meta["guard"] and meta["viewerip"])
+        only_guard = dl.parse_description(dl.make_description(NEW_SHA, OLD_ZIP, "1", guard=True))
+        self.assertTrue(only_guard["guard"])
+        self.assertNotIn("viewerip", only_guard)
+
+    def test_unknown_or_reordered_markers_are_not_trusted(self):
+        base = f"source={NEW_SHA};zip={OLD_ZIP};run=1"
+        for text in (base + ";viewerip=1;guard=1", base + ";viewerip=2", base + ";viewerip=1;viewerip=1", base + ";edge=1"):
+            with self.subTest(text):
+                self.assertIsNone(dl.parse_description(text))
 
 
 class PublicPathBoundaries(DeployTestCase):
@@ -1943,6 +2146,13 @@ class RunAwsRegions(unittest.TestCase):
                 self.assertEqual(self.region_of(command), "us-east-1")
                 self.assertEqual(command[:2], ["aws", args[0]])
 
+    def test_get_function_live_writes_the_code_to_a_file_argument_in_us_east_1(self):
+        command = self.command(["cloudfront", "get-function", "--name", EDGE_FUNCTION, "--stage", "LIVE", "/tmp/out"])
+        self.assertEqual(self.region_of(command), "us-east-1")
+        self.assertEqual(
+            command[:8], ["aws", "cloudfront", "get-function", "--name", EDGE_FUNCTION, "--stage", "LIVE", "/tmp/out"]
+        )
+
     def test_lambda_uses_tokyo(self):
         command = self.command(["lambda", "get-policy", "--function-name", FUNCTION, "--qualifier", "demo"])
         self.assertEqual(self.region_of(command), "ap-northeast-1")
@@ -2049,13 +2259,17 @@ class TemplatesMatchTheCode(unittest.TestCase):
             value = statement["Action"]
             for action in [value] if isinstance(value, str) else value:
                 actions.setdefault(action.split(":")[0], set()).add(action)
-        self.assertEqual(actions["cloudfront"], {"cloudfront:GetDistribution", "cloudfront:GetOriginAccessControl", "cloudfront:GetOriginRequestPolicy"})
+        self.assertEqual(actions["cloudfront"], {"cloudfront:GetDistribution", "cloudfront:GetOriginAccessControl", "cloudfront:GetFunction"})
         self.assertEqual(actions["wafv2"], {"wafv2:GetWebACL"})
         self.assertNotIn("iam", actions)
         self.assertNotIn("PassRole", text)
         # リソース指定が未対応のCloudFrontの読み取りだけをワイルドカードにする
         wildcard = {sid for sid, s in by_sid.items() if s["Resource"] == "*"}
-        self.assertEqual(wildcard, {"ReadOriginAccessControlsResourceScopingUnsupported", "ReadDemoOriginRequestPolicy"})
+        self.assertEqual(wildcard, {"ReadOriginAccessControlsResourceScopingUnsupported"})
+        edge = by_sid["ReadTheApprovedViewerRequestFunctionOnly"]
+        self.assertEqual(edge["Action"], "cloudfront:GetFunction")
+        self.assertEqual(edge["Resource"], "arn:aws:cloudfront::<ACCOUNT_ID>:function/<EDGE_FUNCTION_NAME>")
+        self.assertNotIn("OriginRequestPolicy", text)
         self.assertEqual(by_sid["ReadTheTargetDistributionOnly"]["Resource"].count("<DISTRIBUTION_ID>"), 1)
         self.assertEqual(by_sid["ReadTheTargetWebAclOnly"]["Resource"], "<WEB_ACL_ARN>")
         policy = by_sid["ReadTheDemoAliasResourcePolicyOnly"]
@@ -2510,6 +2724,7 @@ class InputValidation(unittest.TestCase):
             oac_id=OAC_ID,
             web_acl_arn=WAF_ARN,
             layer_code_sha256=LAYER_SHA,
+            edge_function_arn=None,
             ci_run_url="https://github.com/example/repo/actions/runs/1",
         )
         values.update(overrides)
@@ -2550,6 +2765,42 @@ class InputValidation(unittest.TestCase):
         for overrides in bad:
             with self.subTest(overrides), self.assertRaises(SystemExit):
                 dl.validate_inputs(self.args(**overrides))
+
+    def test_edge_function_arn_is_optional_but_must_be_exact_when_given(self):
+        with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}):
+            dl.validate_inputs(self.args(edge_function_arn=EDGE_ARN))
+            dl.validate_inputs(self.args(edge_function_arn=""))
+        bad = (
+            EDGE_ARN + "/extra",
+            EDGE_ARN + "\n",
+            EDGE_ARN.replace("function/", "distribution/"),
+            EDGE_ARN.replace("cloudfront::", "cloudfront:us-east-1:"),
+            f"arn:aws:cloudfront::{ACCOUNT}:function/",
+            f"arn:aws:cloudfront::{ACCOUNT}:function/bad name",
+            "arn:aws:cloudfront::123:function/x",
+            123,
+        )
+        for value in bad:
+            with self.subTest(value), self.assertRaises(SystemExit):
+                dl.validate_inputs(self.args(edge_function_arn=value))
+
+    def test_edge_function_in_another_account_is_rejected_at_validation(self):
+        aws = FakeAws()
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            zip_hex = make_artifact(directory / "a", guard=True, viewer_ip=True)
+            enable_write(aws)
+            deployer = dl.Deployer(
+                artifact_dir=directory / "a", source_sha=NEW_SHA, zip_hex=zip_hex,
+                ci_run_url="https://github.com/example/repo/actions/runs/1", run_id="1", run_attempt="1",
+                function_name=FUNCTION, base_url=BASE_URL, distribution_id=DIST_ID, oac_id=OAC_ID,
+                web_acl_arn=WAF_ARN, layer_code_sha256=LAYER_SHA,
+                edge_function_arn=EDGE_ARN.replace(ACCOUNT, OTHER_ACCOUNT),
+                result_file=directory / "r.json", aws=aws, smoke=FakeSmoke(),
+            )
+            self.assertEqual(deployer.run(), 1)
+        self.assertEqual(aws.mutating(), [])
+        self.assertNotIn("get-function", aws.ops())
 
     def test_rejects_short_sha_and_blank_values(self):
         for overrides in ({"source_sha": "abc"}, {"layer_code_sha256": ""}, {"function_name": ""}):
