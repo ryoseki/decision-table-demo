@@ -1,9 +1,12 @@
+import hmac
+import http.client
 import json
 import os
 import unittest
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from unittest import mock
 from uuid import uuid4
 
@@ -15,7 +18,12 @@ from app.public_guard import PublicWriteGuard
 from app.question_store import InMemoryQuestionStore
 from app.quota_store import InMemoryAiQuota
 from app.rule_store import InMemoryRuleStore
-from app.usage_quota import QuotaLimits
+from app.usage_quota import (
+    QuotaLimits,
+    ViewerAddressUnavailable,
+    hash_subject,
+    viewer_key,
+)
 from tests.test_intake import _Server, send
 
 
@@ -38,7 +46,7 @@ class TestPublicWrite(unittest.TestCase):
         app.state.question_proposer = Proposer()
         app.state.ai_quota = InMemoryAiQuota(b"x" * 32)
         headers = {
-            "CloudFront-Viewer-Address": "192.0.2.1:5000",
+            "X-Demo-Viewer-Ip": "192.0.2.1",
             "Idempotency-Key": str(uuid4()),
         }
         with _Server(app) as server:
@@ -70,7 +78,7 @@ class TestPublicWrite(unittest.TestCase):
             path = "/mock/v1/auto-answers/A09"
             for headers in (
                 {},
-                {"CloudFront-Viewer-Address": "192.0.2.1:5000"},
+                {"X-Demo-Viewer-Ip": "192.0.2.1"},
                 {"X-Internal-Mock-Token": "fake"},
             ):
                 self.assertEqual(
@@ -243,6 +251,25 @@ def send_full(method, url, payload=None, headers=None):
         return error.code, error.headers, body
 
 
+def raw_post(server, path, header_lines):
+    """同名ヘッダーを複数行で送る（urllibの辞書では送れない）。ステータスだけ返す。"""
+    host, port = server.base_url.removeprefix("http://").split(":")
+    connection = http.client.HTTPConnection(host, int(port), timeout=15)
+    try:
+        body = json.dumps({"prompt": "追加して"})
+        connection.putrequest("POST", path)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(len(body.encode())))
+        for name, value in header_lines:
+            connection.putheader(name, value)
+        connection.endheaders(body.encode())
+        response = connection.getresponse()
+        response.read()
+        return response.status
+    finally:
+        connection.close()
+
+
 class CountingProposer:
     """Bedrock実接続の代役（生成の回数を数える）。"""
 
@@ -282,7 +309,7 @@ def admin_app(kind="bedrock", limits=None):
 
 def viewer(ip="192.0.2.1", key=None):
     return {
-        "CloudFront-Viewer-Address": f"{ip}:5000",
+        "X-Demo-Viewer-Ip": ip,
         "Idempotency-Key": key or str(uuid4()),
     }
 
@@ -291,6 +318,54 @@ PATHS = {
     "question": ("/api/admin/question-proposals", "question_proposer"),
     "rule": ("/api/admin/rule-proposals", "rule_proposer"),
 }
+
+
+class TestViewerKey(unittest.TestCase):
+    def test_accepted_forms_are_normalized_as_before(self):
+        for value, key in (
+            ("192.0.2.1", "v4:192.0.2.1"),
+            ("::ffff:192.0.2.1", "v4:192.0.2.1"),
+            ("2001:db8:1:2::1", "v6:2001:db8:1:2::/64"),
+            ("2001:DB8:1:2:ffff:ffff:ffff:ffff", "v6:2001:db8:1:2::/64"),
+            # エッジ（infra/edge/viewer-ip.test.js）が通す形と同じ値。
+            # 両方のテストに同じ値を置く
+            ("::ffff:c000:201", "v4:192.0.2.1"),
+            ("::FFFF:C000:201", "v4:192.0.2.1"),
+            ("2001:0db8:0001:0002:0000:0000:0000:0001", "v6:2001:db8:1:2::/64"),
+            ("2001:db8::", "v6:2001:db8::/64"),
+            ("::1", "v6:::/64"),
+        ):
+            with self.subTest(value):
+                self.assertEqual(viewer_key(value), key)
+
+    def test_values_the_edge_prefilter_passes_but_are_not_ips_are_still_rejected(self):
+        # エッジは粗い形の確認だけ（IPの文法は解釈しない）。実際のIPなら来ない値だが、
+        # 形だけ通る値が来ても、アプリが拒否して枠の予約・推論をしない
+        for value in (
+            "999.1.1.1",
+            ":::",
+            "1:2:3:4:5:6:7:8:9",
+            "12345::1",
+            "::ffff:999.1.1.1",
+        ):
+            with self.subTest(value), self.assertRaises(ViewerAddressUnavailable):
+                viewer_key(value)
+
+    def test_dirty_or_missing_values_fail_closed(self):
+        for value in (
+            None, "", " ", " 192.0.2.1", "192.0.2.1 ", "192.0.2.1:80", "[2001:db8::1]",
+            "[2001:db8::1]:80", "1.2.3.4,5.6.7.8", "2001:db8::1%eth0", "256.0.0.1",
+            "01.2.3.4", "example.com", "192.0.2.1\n", "１９２.0.2.1",
+        ):  # fmt: skip
+            with self.subTest(value), self.assertRaises(ViewerAddressUnavailable):
+                viewer_key(value)
+
+    def test_hmac_subject_is_unchanged(self):
+        secret = b"k" * 32
+        self.assertEqual(
+            hash_subject(secret, viewer_key("::ffff:192.0.2.1")),
+            hmac.new(secret, b"v4:192.0.2.1", sha256).hexdigest(),
+        )
 
 
 class TestAiQuotaContract(unittest.TestCase):
@@ -340,15 +415,18 @@ class TestAiQuotaContract(unittest.TestCase):
         good = viewer()
         cases = {
             "no viewer header": {"Idempotency-Key": good["Idempotency-Key"]},
-            "malformed viewer": {**good, "CloudFront-Viewer-Address": "not-an-address"},
-            "viewer without port": {**good, "CloudFront-Viewer-Address": "192.0.2.1"},
+            "malformed viewer": {**good, "X-Demo-Viewer-Ip": "not-an-address"},
+            "viewer with port": {**good, "X-Demo-Viewer-Ip": "192.0.2.1:5000"},
+            "bracketed ipv6 with port": {**good, "X-Demo-Viewer-Ip": "[2001:db8::1]:1"},
             "comma separated viewer": {
                 **good,
-                "CloudFront-Viewer-Address": "192.0.2.1:1, 192.0.2.2:2",
+                "X-Demo-Viewer-Ip": "192.0.2.1, 192.0.2.2",
             },
-            "no idempotency key": {
-                "CloudFront-Viewer-Address": good["CloudFront-Viewer-Address"]
+            "old cloudfront header is no fallback": {
+                "Idempotency-Key": good["Idempotency-Key"],
+                "CloudFront-Viewer-Address": "192.0.2.1:5000",
             },
+            "no idempotency key": {"X-Demo-Viewer-Ip": good["X-Demo-Viewer-Ip"]},
             "bad idempotency key": {**good, "Idempotency-Key": "not-a-uuid"},
             "upper case idempotency key": {
                 **good,
@@ -364,6 +442,43 @@ class TestAiQuotaContract(unittest.TestCase):
                     self.assertEqual(status, 400)
                     self.assertEqual(getattr(app.state, PATHS[kind][1]).calls, 0)
                     self.assertEqual(app.state.ai_quota.used("v4:192.0.2.1"), (0, 0))
+
+    def test_duplicate_viewer_header_lines_reject_before_generation(self):
+        for kind in PATHS:
+            with self.subTest(kind):
+                app = admin_app()
+                with _Server(app) as server:
+                    status = raw_post(
+                        server,
+                        PATHS[kind][0],
+                        [
+                            ("X-Demo-Viewer-Ip", "192.0.2.1"),
+                            ("x-demo-viewer-ip", "192.0.2.2"),
+                            ("Idempotency-Key", str(uuid4())),
+                        ],
+                    )
+                self.assertEqual(status, 400)
+                self.assertEqual(getattr(app.state, PATHS[kind][1]).calls, 0)
+                self.assertEqual(app.state.ai_quota.used("v4:192.0.2.1"), (0, 0))
+                self.assertEqual(app.state.ai_quota.used("v4:192.0.2.2"), (0, 0))
+
+    def test_ip_forms_share_the_exact_existing_slots(self):
+        app = admin_app(limits=QuotaLimits(1, 25))
+        with _Server(app) as server:
+            self.assertEqual(self.post(server, "question", viewer("192.0.2.7"))[0], 201)
+            # IPv4射影のIPv6は、同じIPv4の枠
+            mapped = viewer("::ffff:192.0.2.7")
+            self.assertEqual(self.post(server, "question", mapped)[0], 429)
+            # IPv6は /64 で1つの枠
+            self.assertEqual(
+                self.post(server, "question", viewer("2001:db8:1:2::1"))[0], 201
+            )
+            same64 = viewer("2001:db8:1:2:ffff:ffff:ffff:ffff")
+            self.assertEqual(self.post(server, "question", same64)[0], 429)
+            other64 = viewer("2001:db8:1:3::1")
+            self.assertEqual(self.post(server, "question", other64)[0], 201)
+        self.assertEqual(app.state.ai_quota.used("v4:192.0.2.7"), (1, 3))
+        self.assertEqual(app.state.ai_quota.used("v6:2001:db8:1:2::/64"), (1, 3))
 
     def test_missing_quota_store_fails_closed_without_generation(self):
         app = admin_app()
@@ -394,7 +509,7 @@ class TestAiQuotaContract(unittest.TestCase):
                         "POST",
                         f"{server.base_url}{path}/{created['proposal_id']}/decision",
                         {"decision": decision},
-                        {"CloudFront-Viewer-Address": "192.0.2.1:5000"},
+                        {"X-Demo-Viewer-Ip": "192.0.2.1"},
                     )
                     self.assertIn(status, (200, 409), (kind, decision))
                     self.assertEqual(app.state.ai_quota.used("v4:192.0.2.1"), used)
@@ -441,6 +556,55 @@ class TestInternalMockThroughGuard(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(body["answers"]["A09"], "pending")
 
+    def test_viewer_header_with_a_valid_token_is_still_public(self):
+        """エッジの印（専用ヘッダー）がある要求は、トークンがあっても内部扱いにしない。"""
+        app = self.intake_app("internal-test-token")
+        with _Server(app) as server:
+            status, _ = send(
+                "POST",
+                server.base_url + "/mock/v1/auto-answers/A09",
+                {"user_id": "12345"},
+                {
+                    "X-Demo-Viewer-Ip": "192.0.2.1",
+                    "X-Internal-Mock-Token": "internal-test-token",
+                },
+            )
+        self.assertEqual(status, 405)
+
+    def test_duplicate_internal_token_is_rejected(self):
+        app = self.intake_app("internal-test-token")
+        with _Server(app) as server:
+            host, port = server.base_url.removeprefix("http://").split(":")
+            connection = http.client.HTTPConnection(host, int(port), timeout=15)
+            try:
+                connection.putrequest("POST", "/mock/v1/auto-answers/A09")
+                connection.putheader("Content-Type", "application/json")
+                connection.putheader("Content-Length", "2")
+                connection.putheader("X-Internal-Mock-Token", "internal-test-token")
+                connection.putheader("X-Internal-Mock-Token", "internal-test-token")
+                connection.endheaders(b"{}")
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 405)
+            finally:
+                connection.close()
+
+    def test_public_non_listed_methods_and_paths_stay_denied_with_the_edge_header(self):
+        app = self.intake_app("internal-test-token")
+        edge = {"X-Demo-Viewer-Ip": "192.0.2.1"}
+        with _Server(app) as server:
+            for method, path in (
+                ("DELETE", "/api/intake/cases"),
+                ("PATCH", "/api/cases/x/judgment"),
+                ("POST", "/api/cases/x/judgment"),
+                ("PUT", "/api/intake/cases"),
+                ("POST", "/mock/v1/auto-answers/A09/../A10"),
+                ("POST", "/api/admin/other"),
+            ):
+                with self.subTest(method=method, path=path):
+                    status, _ = send(method, server.base_url + path, {}, edge)
+                    self.assertEqual(status, 405)
+
     def test_viewer_header_is_not_a_bypass_for_the_mock(self):
         app = self.intake_app("internal-test-token")
         with _Server(app) as server:
@@ -448,6 +612,6 @@ class TestInternalMockThroughGuard(unittest.TestCase):
                 "POST",
                 server.base_url + "/mock/v1/auto-answers/A09",
                 {"user_id": "12345"},
-                {"CloudFront-Viewer-Address": "192.0.2.1:5000"},
+                {"X-Demo-Viewer-Ip": "192.0.2.1"},
             )
         self.assertEqual(status, 405)

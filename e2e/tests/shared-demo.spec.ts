@@ -5,13 +5,13 @@ import { backendUrl, frontendUrl } from "../playwright.config";
 const SHARED_BACKEND = "http://e2e-shared-backend:8000";
 const PROMPT = "E2E用の架空の共有設問";
 
-async function openSharedQuestions(page: Page, address: string | null = "192.0.2.10:4000") {
-  // CloudFrontで付与されるヘッダーを、テストのHTTP境界で再現する。
+async function openSharedQuestions(page: Page, address: string | null = "192.0.2.10") {
+  // エッジ（CloudFront Functions）が付与する専用ヘッダーを、テストのHTTP境界で再現する。
   await page.route("**/api/admin/**", async (route) => {
     const request = route.request();
     const response = await route.fetch({
       url: SHARED_BACKEND + new URL(request.url()).pathname,
-      headers: { ...request.headers(), ...(address === null ? {} : { "CloudFront-Viewer-Address": address }) },
+      headers: { ...request.headers(), ...(address === null ? {} : { "X-Demo-Viewer-Ip": address }) },
     });
     await route.fulfill({ response });
   });
@@ -75,7 +75,7 @@ test("共有DBで承認した判定ルールが、判定未登録の案件の照
     const url = new URL(route.request().url());
     const response = await route.fetch({
       url: SHARED_BACKEND + url.pathname + url.search,
-      headers: { ...route.request().headers(), "CloudFront-Viewer-Address": "192.0.2.20:4000" },
+      headers: { ...route.request().headers(), "X-Demo-Viewer-Ip": "192.0.2.20" },
     });
     await route.fulfill({ response });
   });
@@ -129,7 +129,7 @@ test("未知の依頼はBedrockで差分を作り、Yesで反映すると自動�
 });
 
 test("初期の定型文は、Bedrockを呼ばずに差分を作り、Yesで反映する。同じ依頼は、現在の状態で操作できない理由を出す", async ({ page }) => {
-  await openSharedQuestions(page, "192.0.2.30:4000");
+  await openSharedQuestions(page, "192.0.2.30");
   await page.goto("/#/admin/rules");
   const prompt = "ルールR03を削除して";
   await page.getByLabel("変更の依頼（自然文）").fill(prompt);

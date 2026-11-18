@@ -28,8 +28,9 @@ COPY --from=python-deps /deps /in/deps
 COPY backend/app /in/app
 COPY --from=frontend-build /src/dist /in/static
 COPY infra/cd/run.sh /in/run.sh
+COPY infra/edge/viewer-ip.js /in/edge/viewer-ip.js
 RUN python -I /tool/package-lambda.py \
-      --deps /in/deps --app /in/app --static /in/static --run-sh /in/run.sh \
+      --deps /in/deps --app /in/app --static /in/static --run-sh /in/run.sh --edge-function /in/edge/viewer-ip.js \
       --source-sha "$SOURCE_SHA" --release-eligible "$RELEASE_ELIGIBLE" --dirty "$DIRTY" \
       --output /out
 

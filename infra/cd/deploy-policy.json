@@ -55,10 +55,10 @@
       "Resource": "*"
     },
     {
-      "Sid": "ReadDemoOriginRequestPolicy",
+      "Sid": "ReadTheApprovedViewerRequestFunctionOnly",
       "Effect": "Allow",
-      "Action": "cloudfront:GetOriginRequestPolicy",
-      "Resource": "*"
+      "Action": "cloudfront:GetFunction",
+      "Resource": "arn:aws:cloudfront::<ACCOUNT_ID>:function/<EDGE_FUNCTION_NAME>"
     }
   ]
 }

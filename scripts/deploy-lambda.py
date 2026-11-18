@@ -39,6 +39,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -64,9 +65,15 @@ CLOUDFRONT_SERVICE = "cloudfront.amazonaws.com"
 INVOKE_ACTIONS = {"lambda:InvokeFunctionUrl", "lambda:InvokeFunction"}
 ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS"}
 WRITE_ENABLED_METHODS = ALLOWED_METHODS | {"PUT", "POST", "PATCH", "DELETE"}
-WRITE_ORIGIN_HEADERS = {
-    "cloudfront-viewer-address", "content-type", "idempotency-key", "x-amz-content-sha256",
-}
+# 書き込みを許可した構成（7メソッド）でも、オリジンリクエストポリシーは読み取り構成と同じManagedのまま。
+# 接続元IPは、承認したCloudFront Functions（viewer-request）が専用ヘッダー（x-demo-viewer-ip）へ入れる。
+# 7メソッドの条件は、承認したエッジ関数の関連付けがちょうど1件（viewer-request）で、そのLIVEのコードが
+# ZIPの中のレビュー済みソースと一致すること。3メソッドの読み取り構成は、エッジ関数の関連付けなし。
+EDGE_EVENT_TYPE = "viewer-request"
+EDGE_ARTIFACT_PATH = "edge/viewer-ip.js"
+EDGE_FUNCTION_ARN_RE = re.compile(
+    r"arn:aws:cloudfront::(?P<account>[0-9]{12}):function/(?P<name>[A-Za-z0-9_-]{1,64})"
+)
 # WAFの必須のレートベース規則（実際の接続元IPごと）の閾値。infra/cd/waf-rules.json と同じ値。
 # 近似で厳密な保証ではない。全体（CONSTANT）の規則は2026-11-10に要件から外した（受け入れない）。
 RATE_WINDOW_SEC = 300
@@ -102,7 +109,7 @@ WEB_ACL_ARN_RE = re.compile(
 )
 DESCRIPTION_RE = re.compile(
     r"source=(?P<source>[0-9a-f]{40});zip=(?P<zip>[0-9a-f]{64});run=(?P<run>[0-9]{1,20})"
-    r"(?P<guard>;guard=1)?"
+    r"(?P<guard>;guard=1)?(?P<viewerip>;viewerip=1)?"
 )
 
 AwsRunner = Callable[[list[str]], dict]
@@ -124,10 +131,21 @@ class Interrupted(Exception):
     pass
 
 
-def make_description(source_sha: str, zip_hex: str, run_id: str, guard: bool = False) -> str:
-    """版のdescription。guard=True は「公開書き込みのガード・利用枠を含むZIPを、この配布が検証して発行した」印。"""
-    base = f"source={source_sha};zip={zip_hex};run={run_id}"
-    return base + ";guard=1" if guard else base
+def make_description(
+    source_sha: str, zip_hex: str, run_id: str, guard: bool = False, viewer_ip: bool = False
+) -> str:
+    """版のdescription。
+
+    guard=True: 公開書き込みのガード・利用枠を含むZIPを、この配布が検証して発行した印。
+    viewer_ip=True: 接続元IPの契約（専用ヘッダー x-demo-viewer-ip・ポートなしのIP1つ。
+    エッジのソースがZIPに入り、manifestとZIPが一致する）を満たすZIPを、この配布が検証して発行した印。
+    """
+    text = f"source={source_sha};zip={zip_hex};run={run_id}"
+    if guard:
+        text += ";guard=1"
+    if viewer_ip:
+        text += ";viewerip=1"
+    return text
 
 
 def parse_description(text: object) -> dict[str, str] | None:
@@ -238,6 +256,7 @@ class PublicPath:
     public_host: str  # CD_BASE_URL のホスト（<id>.cloudfront.net）
     origin_host: str  # 関数URLのホスト
     account: str
+    edge_function_arn: str | None = None  # 承認したエッジ関数（CloudFront Functions）のARN。未設定ならNone
 
     @property
     def distribution_arn(self) -> str:
@@ -286,7 +305,7 @@ def origin_problems(origin: object, path: PublicPath) -> list[str]:
     return problems
 
 
-def behavior_problems(behavior: object, origin: object) -> list[str]:
+def behavior_problems(behavior: object, origin: object, edge_function_arn: str | None = None) -> list[str]:
     if not isinstance(behavior, dict):
         return ["defaultCacheBehavior"]
     problems = []
@@ -296,6 +315,7 @@ def behavior_problems(behavior: object, origin: object) -> list[str]:
         problems.append("viewerProtocol")
     methods = behavior.get("AllowedMethods")
     items = block_items(methods) if isinstance(methods, dict) else None
+    method_set = None
     if (
         items is None
         or not all(isinstance(item, str) for item in items)
@@ -304,6 +324,7 @@ def behavior_problems(behavior: object, origin: object) -> list[str]:
     ):
         problems.append("allowedMethods")
     else:
+        method_set = set(items)
         cached = block_items(methods.get("CachedMethods"))
         if cached is None or not all(isinstance(item, str) for item in cached):
             problems.append("cachedMethods")
@@ -311,42 +332,30 @@ def behavior_problems(behavior: object, origin: object) -> list[str]:
             problems.append("cachedMethods")
     if behavior.get("CachePolicyId") != CACHING_DISABLED_POLICY_ID:
         problems.append("cachePolicy")
-    policy_id = behavior.get("OriginRequestPolicyId")
-    if items is not None and all(isinstance(item, str) for item in items) and set(items) == WRITE_ENABLED_METHODS:
-        if not isinstance(policy_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", policy_id):
-            problems.append("originRequestPolicy")
-    elif policy_id != ALL_VIEWER_EXCEPT_HOST_POLICY_ID:
+    # 両方の構成で、Managedの AllViewerExceptHostHeader のまま（専用のポリシーは使わない）
+    if behavior.get("OriginRequestPolicyId") != ALL_VIEWER_EXCEPT_HOST_POLICY_ID:
         problems.append("originRequestPolicy")
-    # エッジでの書き換え（検証の回避）を許さない
+    # Lambda@Edgeは使わない
     if block_items(behavior.get("LambdaFunctionAssociations")) != []:
         problems.append("lambdaEdge")
-    if block_items(behavior.get("FunctionAssociations")) != []:
+    associations = block_items(behavior.get("FunctionAssociations"))
+    if method_set == WRITE_ENABLED_METHODS:
+        # 書き込み構成: 承認した viewer-request の関連付けがちょうど1件（他は不可）
+        if edge_function_arn is None:
+            problems.append("edgeFunctionNotConfigured")
+        elif not (
+            associations is not None
+            and len(associations) == 1
+            and isinstance(associations[0], dict)
+            and set(associations[0]) == {"FunctionARN", "EventType"}
+            and associations[0]["FunctionARN"] == edge_function_arn
+            and associations[0]["EventType"] == EDGE_EVENT_TYPE
+        ):
+            problems.append("edgeFunctionAssociation")
+    elif associations != []:
+        # 読み取り構成（3メソッド）: エッジ関数の関連付けなし。書き換えによる検証の回避も許さない
         problems.append("edgeFunctions")
     return problems
-
-
-def write_policy_problems(response: dict, expected_id: str) -> list[str]:
-    policy = response.get("OriginRequestPolicy")
-    if not isinstance(policy, dict) or policy.get("Id") != expected_id:
-        return ["writeOriginRequestPolicy"]
-    config = policy.get("OriginRequestPolicyConfig")
-    if not isinstance(config, dict):
-        return ["writeOriginRequestPolicy"]
-    headers_config = config.get("HeadersConfig")
-    if not isinstance(headers_config, dict) or headers_config.get("HeaderBehavior") != "whitelist":
-        return ["writeOriginRequestPolicyHeaders"]
-    headers = block_items(headers_config.get("Headers"))
-    if (
-        headers is None or len(headers) != len(WRITE_ORIGIN_HEADERS)
-        or not all(isinstance(header, str) for header in headers)
-        or {header.lower() for header in headers} != WRITE_ORIGIN_HEADERS
-    ):
-        return ["writeOriginRequestPolicyHeaders"]
-    for key, field in (("CookiesConfig", "CookieBehavior"), ("QueryStringsConfig", "QueryStringBehavior")):
-        entry = config.get(key)
-        if not isinstance(entry, dict) or entry.get(field) != "none":
-            return ["writeOriginRequestPolicyForwarding"]
-    return []
 
 
 def distribution_problems(response: dict, path: PublicPath) -> list[str]:
@@ -386,7 +395,7 @@ def distribution_problems(response: dict, path: PublicPath) -> list[str]:
     origins = block_items(config.get("Origins"))
     origin = origins[0] if origins is not None and len(origins) == 1 else None
     problems += origin_problems(origin, path)
-    problems += behavior_problems(config.get("DefaultCacheBehavior"), origin)
+    problems += behavior_problems(config.get("DefaultCacheBehavior"), origin, path.edge_function_arn)
     return problems
 
 
@@ -648,6 +657,25 @@ def manifest_has_write_guard(manifest: dict) -> bool:
     return isinstance(capabilities, dict) and capabilities.get("publicWriteGuard") == 1
 
 
+def manifest_has_viewer_ip_contract(manifest: dict) -> bool:
+    """manifest（ZIPのハッシュ・中のエッジのソースと照合済み）が、接続元IPの契約を宣言しているか。"""
+    capabilities = manifest.get("capabilities")
+    return (
+        isinstance(capabilities, dict)
+        and capabilities.get("viewerIpContract") == 1
+        and capabilities.get("publicWriteGuard") == 1
+    )
+
+
+def zip_edge_source(zip_path: Path) -> bytes:
+    """ZIPの中のエッジ関数のソース（レビュー済みのものを、ビルドが入れた写し）。"""
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            return archive.read(EDGE_ARTIFACT_PATH)
+    except (OSError, KeyError, zipfile.BadZipFile, RuntimeError):
+        raise DeployError("ZIPにエッジ関数のソースがありません") from None
+
+
 def load_manifest(artifact_dir: Path, source_sha: str, zip_hex: str) -> tuple[Path, dict]:
     """成果物のmanifestとZIPを検証する。ビルド結果の出力（期待値）とも照合する。"""
     zip_name = f"lambda-{source_sha}.zip"
@@ -692,6 +720,20 @@ def load_manifest(artifact_dir: Path, source_sha: str, zip_hex: str) -> tuple[Pa
     failed = sorted(name for name, ok in checks.items() if not ok)
     if failed:
         raise DeployError("manifest検証に失敗: " + ",".join(failed))
+    # 接続元IPの契約を宣言するmanifestは、ZIPの中のエッジのソースのSHA-256をmanifestと照合する。
+    # 以後、LIVEのコードと照合するのは、manifestの値ではなく、このZIPの中の写し。
+    capabilities = manifest.get("capabilities")
+    if isinstance(capabilities, dict) and capabilities.get("viewerIpContract") == 1:
+        edge = manifest.get("edge")
+        recorded = edge.get("sha256Hex") if isinstance(edge, dict) else None
+        embedded = hashlib.sha256(zip_edge_source(zip_path)).hexdigest()
+        if (
+            not isinstance(edge, dict)
+            or edge.get("file") != EDGE_ARTIFACT_PATH
+            or recorded != embedded
+            or capabilities.get("publicWriteGuard") != 1
+        ):
+            raise DeployError("manifest検証に失敗: edgeSource")
     return zip_path, manifest
 
 
@@ -738,6 +780,7 @@ class Deployer:
         result_file: Path,
         aws: AwsRunner,
         smoke: SmokeRunner,
+        edge_function_arn: str | None = None,
     ):
         self.artifact_dir = artifact_dir
         self.source_sha = source_sha
@@ -750,6 +793,7 @@ class Deployer:
         self.oac_id = oac_id
         self.web_acl_arn = web_acl_arn
         self.layer_code_sha256 = layer_code_sha256
+        self.edge_function_arn = edge_function_arn  # 承認したエッジ関数（書き込み構成だけで必須）
         self.aws = aws
         self.smoke = smoke
         self.code_sha = code_sha_from_hex(zip_hex)
@@ -764,6 +808,8 @@ class Deployer:
         self.already_current = False
         self.write_enabled = False  # 公開経路が書き込みメソッドを許可しているか（検証で確定）
         self.candidate_guard = False  # 今回のZIPがガード・利用枠を含むか（manifestで確認）
+        self.candidate_viewer_ip = False  # 今回のZIPが接続元IPの契約を満たすか（manifest・ZIPの写しで確認）
+        self.edge_source: bytes | None = None  # ZIPの中のレビュー済みエッジのソース（契約があるときだけ）
         self.result = Result(
             result_file,
             {
@@ -865,6 +911,11 @@ class Deployer:
         account = arn_match["account"]
         if acl_match["account"] != account:
             raise DeployError("関数とWAFのアカウントが一致しません")
+        edge_match = (
+            EDGE_FUNCTION_ARN_RE.fullmatch(self.edge_function_arn) if self.edge_function_arn else None
+        )
+        if self.edge_function_arn and (edge_match is None or edge_match["account"] != account):
+            raise DeployError("エッジ関数のARNが不正、または関数とアカウントが一致しません")
         path = PublicPath(
             distribution_id=self.distribution_id,
             oac_id=self.oac_id,
@@ -872,6 +923,7 @@ class Deployer:
             public_host=self.base_url.removeprefix("https://"),
             origin_host=url_match["host"],
             account=account,
+            edge_function_arn=self.edge_function_arn or None,
         )
         problems: list[str] = []
         distribution = self._cloudfront("get-distribution", "--id", self.distribution_id)
@@ -881,9 +933,8 @@ class Deployer:
             behavior = distribution["Distribution"]["DistributionConfig"]["DefaultCacheBehavior"]
             if set(behavior["AllowedMethods"]["Items"]) == WRITE_ENABLED_METHODS:
                 self.write_enabled = True
-                policy_id = behavior["OriginRequestPolicyId"]
-                write_policy = self._cloudfront("get-origin-request-policy", "--id", policy_id)
-                problems += write_policy_problems(write_policy, policy_id)
+                # 書き込み構成では、LIVEのコードがレビュー済みのソースと一致することを、AWSの変更の前に確認する
+                problems += self._live_edge_problems(edge_match["name"] if edge_match else None)
         oac = self._cloudfront("get-origin-access-control", "--id", self.oac_id)
         problems += oac_problems(oac, self.oac_id)
         acl = self._wafv2(
@@ -901,6 +952,30 @@ class Deployer:
         problems += policy_problems(policy, path.distribution_arn, resource_arn)
         if problems:
             raise DeployError("公開経路の設定が期待と一致しません: " + ",".join(sorted(set(problems))))
+
+    def _live_edge_problems(self, name: str | None) -> list[str]:
+        """承認したエッジ関数のLIVEのコードを読み（読み取りだけ）、ZIPの中のレビュー済みソースと照合する。
+
+        問題の名前だけ返す。関連付けの検査と同じく、AWSの変更の前に呼ぶ。取得の失敗・出力の欠落・
+        空・不一致は、すべて拒否（閉じて失敗）。コードの本文は結果・出力に残さない。
+        一時ファイルは専用の一時ディレクトリに置き、成功・失敗のどちらでも削除する。
+        """
+        if name is None:
+            return []  # 未設定は、関連付けの検査（edgeFunctionNotConfigured）が止める
+        if self.edge_source is None:
+            return []  # 契約のないZIPは、版の検査（candidateWithoutViewerIpContract）が止める。LIVEは読まない
+        with tempfile.TemporaryDirectory(prefix="edge-live-") as directory:
+            outfile = Path(directory) / "live-function-code"
+            try:
+                self._cloudfront("get-function", "--name", name, "--stage", "LIVE", str(outfile))
+                live = outfile.read_bytes() if outfile.is_file() and not outfile.is_symlink() else b""
+            except (DeployError, OSError):
+                return ["edgeFunctionRetrieval"]
+        if not live:
+            return ["edgeFunctionRetrieval"]
+        if hashlib.sha256(live).digest() != hashlib.sha256(self.edge_source).digest():
+            return ["edgeFunctionCodeMismatch"]
+        return []
 
     def _validate_concurrency(self) -> None:
         """予約済み同時実行数がちょうど3であることを、読み取り（修飾子なしの関数）だけで確認する。
@@ -928,6 +1003,10 @@ class Deployer:
         self.zip_path, self.manifest = load_manifest(
             self.artifact_dir, self.source_sha, self.zip_hex
         )
+        self.candidate_guard = manifest_has_write_guard(self.manifest)
+        self.candidate_viewer_ip = manifest_has_viewer_ip_contract(self.manifest)
+        # LIVEのコードと照合する「レビュー済みのソース」は、ハッシュ検証済みのZIPの中の写し
+        self.edge_source = zip_edge_source(self.zip_path) if self.candidate_viewer_ip else None
         self.result.update(stage="validate-aws")
 
         url = self._lambda(
@@ -966,19 +1045,24 @@ class Deployer:
             raise DeployError("直前の版に利用できる出所情報（description）がありません")
         if old.get("CodeSha256") != code_sha_from_hex(meta["zip"]):
             raise DeployError("直前の版のコードと出所情報のハッシュが一致しません")
-        self.candidate_guard = manifest_has_write_guard(self.manifest)
         if self.write_enabled:
-            # 書き込み可能な公開経路では、今回の版も戻し先の版も、ガード・利用枠を含む版だけを許す。
-            # 古い版は読み取り専用の段階（許可メソッド3種）で配布して、印を付けてから書き込みへ切り替える。
+            # 書き込み可能な公開経路では、今回の版も戻し先の版も、ガード・利用枠（guard=1）と、
+            # 接続元IPの契約（viewerip=1）の両方を持つ版だけを許す。古い版は読み取り専用の段階（許可
+            # メソッド3種）で配布して、印を付けてから書き込みへ切り替える。ロールバック（エイリアスの
+            # 切り替え）もこの検証の後にだけ行う。
             guard_problems = []
             if not self.candidate_guard:
                 guard_problems.append("candidateWithoutWriteGuard")
+            if not self.candidate_viewer_ip:
+                guard_problems.append("candidateWithoutViewerIpContract")
             if not meta.get("guard"):
                 guard_problems.append("rollbackTargetWithoutWriteGuard")
+            if not meta.get("viewerip"):
+                guard_problems.append("rollbackTargetWithoutViewerIpContract")
             if guard_problems:
                 raise DeployError(
-                    "書き込みを許可した公開経路では、ガード・利用枠を含まない版を配布・戻し先にできません: "
-                    + ",".join(guard_problems)
+                    "書き込みを許可した公開経路では、ガード・利用枠と接続元IPの契約を含まない版を"
+                    "配布・戻し先にできません: " + ",".join(guard_problems)
                 )
         self.prev = {
             "version": version,
@@ -1100,7 +1184,11 @@ class Deployer:
             completed_revision,
             "--description",
             make_description(
-                self.source_sha, self.zip_hex, self.run_id, self.candidate_guard
+                self.source_sha,
+                self.zip_hex,
+                self.run_id,
+                self.candidate_guard,
+                self.candidate_viewer_ip,
             ),
         )
         version = published.get("Version")
@@ -1192,6 +1280,7 @@ class Deployer:
             or meta["source"] != self.source_sha
             or meta["zip"] != self.zip_hex
             or bool(meta.get("guard")) != self.candidate_guard
+            or bool(meta.get("viewerip")) != self.candidate_viewer_ip
         ):
             problems.append("description")
         if problems:
@@ -1433,6 +1522,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--oac-id", help="Origin Access ControlのID")
     parser.add_argument("--web-acl-arn", help="WAF（CLOUDFRONT scope、us-east-1）のWeb ACLのARN")
     parser.add_argument("--layer-code-sha256")
+    parser.add_argument(
+        "--edge-function-arn",
+        help="承認したCloudFront Functions（viewer-request）のARN。書き込み構成（7メソッド）では必須、"
+        "読み取り構成では未指定でよい",
+    )
     parser.add_argument("--result-file", type=Path)
     return parser.parse_args(argv)
 
@@ -1485,6 +1579,10 @@ def validate_inputs(args: argparse.Namespace) -> None:
             (CODE_SHA_RE.fullmatch(args.layer_code_sha256), "layer-code-sha256"),
             (args.ci_run_url.startswith("https://github.com/"), "ci-run-url"),
         ]
+        edge_arn = getattr(args, "edge_function_arn", None)
+        if edge_arn not in (None, ""):
+            if not isinstance(edge_arn, str) or EDGE_FUNCTION_ARN_RE.fullmatch(edge_arn) is None:
+                raise SystemExit("入力が不正です: edge-function-arn")
     bad = [name for ok, name in rules if not ok]
     if bad:
         raise SystemExit("入力が不正です: " + ",".join(bad))
@@ -1522,6 +1620,7 @@ def main(argv: list[str] | None = None) -> int:
         oac_id=args.oac_id,
         web_acl_arn=args.web_acl_arn,
         layer_code_sha256=args.layer_code_sha256,
+        edge_function_arn=args.edge_function_arn or None,
         result_file=args.result_file,
         aws=run_aws,
         smoke=run_smoke,

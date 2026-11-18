@@ -42,7 +42,7 @@ from app.question_validation import (
     validate_model_output,
 )
 from app.usage_quota import (
-    VIEWER_ADDRESS_HEADER,
+    VIEWER_IP_HEADER,
     DuplicateAiRequest,
     QuotaExceeded,
     ViewerAddressUnavailable,
@@ -254,10 +254,14 @@ def reserve_ai_call(request: Request, proposer: Any) -> None:
             status_code=503, detail="AI提案の利用枠の管理先がありません"
         )
     try:
-        addresses = request.headers.getlist(VIEWER_ADDRESS_HEADER)
+        addresses = request.headers.getlist(VIEWER_IP_HEADER)
+        # ローカル専用: 専用ヘッダーがなく、ローカルの再利用構成のときだけ、
+        # 直接の接続元（ポートなし）を使う。
+        # 重複・不正な専用ヘッダーはフォールバックせず拒否する。
+        # 公開側（既定）は厳格なまま。
         if not addresses and getattr(request.app.state, "local_quota_address", False):
             if request.client is not None:
-                addresses = [f"[{request.client.host}]:{request.client.port}"]
+                addresses = [request.client.host]
         key = viewer_key(addresses[0] if len(addresses) == 1 else None)
     except ViewerAddressUnavailable:
         raise HTTPException(

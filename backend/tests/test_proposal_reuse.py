@@ -1,3 +1,4 @@
+import http.client
 import unittest
 from uuid import uuid4
 
@@ -93,7 +94,7 @@ class TestProposalReuse(unittest.TestCase):
                         url,
                         {"prompt": prompt, **kwargs},
                         {
-                            "CloudFront-Viewer-Address": "192.0.2.1:5000",
+                            "X-Demo-Viewer-Ip": "192.0.2.1",
                             "Idempotency-Key": str(uuid4()),
                         },
                     )
@@ -390,7 +391,7 @@ RULE_ADD = {
         "conditions": {"A01": "yes", "A02": "no"},
     },
 }
-VIEWER = {"CloudFront-Viewer-Address": "192.0.2.1:5000"}
+VIEWER = {"X-Demo-Viewer-Ip": "192.0.2.1"}
 
 
 class ScriptedQuestions:
@@ -871,3 +872,53 @@ class TestAutoRegistration(unittest.TestCase):
                         self.assertEqual(body["source"], {"kind": "bedrock"})
         self.assertEqual(app.state.question_proposer.calls, 2)
         self.assertEqual(app.state.rule_proposer.calls, 2)
+
+
+class TestLocalOnlyViewerFallback(unittest.TestCase):
+    """専用ヘッダーなしの直接接続は、ローカル専用の旗がある構成だけで受け付ける。"""
+
+    def _app(self, local):
+        app = auto_app(InMemoryProposalTemplates(), ScriptedQuestions("bedrock"))
+        if local:
+            app.state.local_quota_address = True
+        return app
+
+    def _post(self, app, header_values=()):
+        """専用ヘッダーを、渡した個数だけ（0件も可）同名で送る。"""
+        with _Server(app) as server:
+            conn = http.client.HTTPConnection(
+                *server.base_url.removeprefix("http://").split(":")
+            )
+            body = b'{"prompt": "fallback case"}'
+            conn.putrequest("POST", "/api/admin/question-proposals")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", str(len(body)))
+            conn.putheader("Idempotency-Key", str(uuid4()))
+            for value in header_values:
+                conn.putheader("X-Demo-Viewer-Ip", value)
+            conn.endheaders(body)
+            status = conn.getresponse().status
+            conn.close()
+            return status
+
+    def test_public_default_rejects_missing_header_without_calling_ai(self):
+        app = self._app(local=False)
+        self.assertEqual(self._post(app), 400)
+        self.assertEqual(app.state.question_proposer.calls, 0)
+
+    def test_local_flag_uses_raw_client_host_when_no_header(self):
+        app = self._app(local=True)
+        self.assertEqual(self._post(app), 201)
+        self.assertEqual(app.state.question_proposer.calls, 1)
+        self.assertEqual(app.state.ai_quota.used("v4:127.0.0.1"), (1, 1))
+
+    def test_local_flag_still_rejects_invalid_or_duplicate_header(self):
+        for values in (
+            ("192.0.2.1:4000",),
+            ("192.0.2.1, 192.0.2.2",),
+            ("",),
+            ("192.0.2.1", "192.0.2.2"),
+        ):
+            app = self._app(local=True)
+            self.assertEqual(self._post(app, values), 400, values)
+            self.assertEqual(app.state.question_proposer.calls, 0)

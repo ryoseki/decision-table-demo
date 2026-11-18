@@ -9,6 +9,7 @@
 !frontend/vite.config.ts
 !frontend/src
 !infra/cd/run.sh
+!infra/edge/viewer-ip.js
 !scripts/package-lambda.py
 **/__pycache__
 **/*.pyc

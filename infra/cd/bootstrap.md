@@ -359,6 +359,7 @@ aws iam put-role-policy --role-name "$DEPLOY_ROLE" --policy-name deploy-demo-onl
 | `CLOUDFRONT_DISTRIBUTION_ID` | CloudFrontのディストリビューションID（`$CF_DIST_ID`） | 設定済み（同上） |
 | `CLOUDFRONT_OAC_ID` | Origin Access ControlのID（作成済みなら、そのIDを読み取りで確認して設定する） | 設定済み（同上） |
 | `WAF_WEB_ACL_ARN` | Web ACLのARN（us-east-1・CLOUDFRONT scope、`$WAF_ARN`） | 設定済み（同上） |
+| `CLOUDFRONT_VIEWER_FUNCTION_ARN` | 承認したCloudFront Functions（viewer-request）のARN（`arn:aws:cloudfront::<アカウント>:function/<名前>`）。**任意**: 読み取り構成（許可メソッド3種）では未設定でよい。書き込み構成（7メソッド）の配布の前に設定する（未設定ならCDは変更の前に止まる）。手順は [開発手順](../../docs/development-workflow.md#公開時の書き込みと利用枠) | 未設定（書き込み構成の切り替えで、人が設定する） |
 | `LAMBDA_LAYER_CODE_SHA256` | 上で記録したレイヤーのCodeSha256（base64） | 設定・読み戻し済み（Codex。値は書かない） |
 
 Environment `demo`（名前は運用上の選択）。設定済みですが、CDは自動作成に頼らず、既存のEnvironmentが次の設定であることを確認できないと、AWSの資格情報の前に止まります。

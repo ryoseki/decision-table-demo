@@ -10,7 +10,9 @@ PATCH・DELETE の7つになる。そこで、サーバー側で、書き込み�
 - 上の提案経路に /{id}/decision を付けた承認POST
 
 受付が自分自身のHTTPモック（POST /mock/v1/...）を呼ぶ内部の呼び出しだけは、CloudFront を
-通らないため、公開環境ではインスタンス内の秘密トークンで確認する。
+通らないため、公開環境ではインスタンス内の秘密トークンで確認する。エッジの専用ヘッダー
+（接続元IP）がある要求は、トークンが付いていても内部扱いにしない。トークンが複数あれば拒否する。
+エッジ（CloudFront Functions）は、利用者が送ったトークンのヘッダーも捨てる。
 """
 
 import hmac
@@ -19,7 +21,7 @@ import re
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.usage_quota import VIEWER_ADDRESS_HEADER
+from app.usage_quota import VIEWER_IP_HEADER
 
 _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _SEGMENT = r"[^/]+"
@@ -30,7 +32,7 @@ PUBLIC_WRITE_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("POST", re.compile(rf"/api/admin/(question|rule)-proposals/{_SEGMENT}/decision")),
 )
 _INTERNAL_MOCK = re.compile(r"/mock/v1/auto-answers/[A-Za-z0-9_-]+")
-_VIEWER_HEADER = VIEWER_ADDRESS_HEADER.lower().encode("ascii")
+_VIEWER_HEADER = VIEWER_IP_HEADER.encode("ascii")
 _INTERNAL_TOKEN_HEADER = b"x-internal-mock-token"
 
 

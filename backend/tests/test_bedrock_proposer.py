@@ -448,7 +448,7 @@ class BedrockApiTestCase(unittest.TestCase):
             f"{self.base}/api/admin/{path}",
             {"prompt": prompt},
             {
-                "CloudFront-Viewer-Address": "192.0.2.1:4321",
+                "X-Demo-Viewer-Ip": "192.0.2.1",
                 "Idempotency-Key": str(uuid4()),
             },
         )
@@ -847,7 +847,7 @@ class TestMainWiring(unittest.TestCase):
                 f"{base}/question-proposals",
                 {"prompt": "追加して"},
                 {
-                    "CloudFront-Viewer-Address": "192.0.2.1:4321",
+                    "X-Demo-Viewer-Ip": "192.0.2.1",
                     "Idempotency-Key": str(uuid4()),
                 },
             )
@@ -858,7 +858,7 @@ class TestMainWiring(unittest.TestCase):
                 f"{base}/rule-proposals",
                 {"prompt": "追加して"},
                 {
-                    "CloudFront-Viewer-Address": "192.0.2.1:4321",
+                    "X-Demo-Viewer-Ip": "192.0.2.1",
                     "Idempotency-Key": str(uuid4()),
                 },
             )

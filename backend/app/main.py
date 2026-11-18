@@ -72,6 +72,8 @@ if _use_db:
         templates = template_store.PostgresProposalTemplates(db_store.connect_from_env)
         templates.bootstrap()
         app.state.proposal_reuse = templates
+        # ローカル専用（Lambda・DSQLでは _reuse_enabled が偽）。
+        # 専用ヘッダーがないときだけ直接の接続元を使う。
         app.state.local_quota_address = True
         app.include_router(template_admin.router)
     app.state.question_store = shared_db.DbQuestionStore(_shared)
