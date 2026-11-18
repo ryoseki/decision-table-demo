@@ -64,7 +64,7 @@ AWSの公式資料（Lambda関数URLのスロットリング。Codexが2026-11-1
 - 月額の上限でもありません。CloudFront・Lambda・ログなどの料金は、届いたリクエストの量に応じて発生し得ます。
 - IPごとの規則（300件/300秒、平均1RPS相当）は、多数のIPから分散したアクセスでは効きません。30件以上のIPから分散すれば、IPごとの上限内のまま同時実行数3の上限に達し得ます。そのとき正規の利用者にも429が返り得ます。
 - このため、分散したアクセスや、継続的なアクセスによるオリジン（Lambda）側の料金は残ります。異常時は、これまでどおり人が予約済み同時実行数を0にして止めます。429の応答に料金がかかるかは、この文書では確認していません。
-- CDは予約済み同時実行数を自動で設定・変更しません。読み取りで1でなければ、変更の前に止まります（未設定・0・2以上など。結果JSONの `reservedConcurrency` に種類を記録）。
+- CDは予約済み同時実行数を自動で設定・変更しません。読み取りでちょうど3でなければ、変更の前に止まります（未設定・0・3以外・取得失敗。`error` に記録）。
 
 #### 任意の観測グループ（Count）
 
@@ -258,7 +258,7 @@ aws cloudfront create-origin-access-control --region us-east-1 --origin-access-c
 - 公開URLはCloudFrontだけ。関数URLのホストは `get-function-url-config`（エイリアス `demo`）の実値から導き、CloudFrontのオリジンと一致することを検証する。
 - リポジトリ変数: `CD_BASE_URL`（CloudFrontのオリジン）、`CLOUDFRONT_DISTRIBUTION_ID`、`CLOUDFRONT_OAC_ID`、`WAF_WEB_ACL_ARN`（us-east-1・globalのWeb ACLのARN）、ほかは従来どおり。**いずれもAWS作成後に人が設定する（未設定）**。
 - 配布用ロールの追加権限は読み取りだけ: `cloudfront:GetDistribution`（対象のディストリビューション）、`cloudfront:GetOriginAccessControl`（OACの読み取りはリソース指定ができないため `Resource: *`）、`cloudfront:GetFunction`（承認したエッジ関数だけ。LIVEのコードの読み取り。別の文 `ReadTheApprovedViewerRequestFunctionOnly`）、`wafv2:GetWebACL`（対象のWeb ACL）、`lambda:GetPolicy`（エイリアス `demo`）、`lambda:GetFunctionConcurrency`（修飾子なしの対象関数だけ。別の文 `ReadTheDemoFunctionReservedConcurrencyOnly`）。CloudFront（`UpdateDistribution`・`UpdateFunction`・`PublishFunction` を含む）・WAF・IAMの書き込み、同時実行数の設定・削除（`PutFunctionConcurrency`・`DeleteFunctionConcurrency`）と `iam:PassRole` は含めない。
-- 検証が失敗した場合は、AWSの変更を1件もせず、スモーク確認もせずに止まる。予約済み同時実行数がちょうど3でない場合（未設定・0・3以外・取得失敗）も同じで、結果JSONの `reservedConcurrency` に `missing`・`zero`・`mismatch`・`read-failed` を記録する。
+- 検証が失敗した場合は、AWSの変更を1件もせず、スモーク確認もせずに止まる。予約済み同時実行数がちょうど3でない場合（未設定・0・3以外・取得失敗）も同じ。
 - 検証コードが拒否する項目（初期構成）: 必須のIPごとの規則の欠落・変更・重複、全体（`CONSTANT`）の規則など未対応の規則、既知の観測グループ（`Count`）3種以外のWAF規則・規則グループ、観測グループの重複・`Count` 以外の動作・絞り込みや上書き、合計5件以上の規則、Firewall Managerの管理・前処理/後処理の規則グループ、CloudFrontの継続的デプロイのポリシー・ステージング、`AuthType` が `AWS_IAM` 以外のLambdaの許可、ワイルドカードの `AWS:SourceArn` など。これらの項目名（`ManagedByFirewallManager`・`PreProcessFirewallManagerRuleGroups`・`PostProcessFirewallManagerRuleGroups`・`ContinuousDeploymentPolicyId`・`Staging`）について、Codexが2026-11-09に公式API本文で項目名（`Staging`・`ContinuousDeploymentPolicyId`・`ManagedByFirewallManager`・`PreProcessFirewallManagerRuleGroups`・`PostProcessFirewallManagerRuleGroups`）の存在を確認済みです。実際のAWS応答の値との突合は未実施です。
 
 ## 出典（2026-11-09にCodexが本文を確認した記録を引き継ぐ。この作業では再読していない）

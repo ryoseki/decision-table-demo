@@ -2,27 +2,20 @@
 """承認済みのLambda ZIPを、既存のエイリアス demo へ配布する（標準ライブラリのみ）。
 
 AWS CLI（`aws lambda ...`）をsubprocessで呼ぶ。初回構築・IAM・関数URL・同時実行数・CloudFront・WAFの
-変更はしない（infra/cd/bootstrap.md と infra/cd/cloudfront-plan.md の人の操作）。CloudFront・WAFは
-読み取り（get-*）だけで、公開経路（CloudFront → OAC → AWS_IAMの関数URL）が期待どおりか、AWSの変更の前に
-検証する。公開URLはCloudFrontだけで、関数URLへの直接の公開はフォールバックにもしない。
-予約済み同時実行数は読み取り（get-function-concurrency）でちょうど3であることを確認するだけで、
-設定・削除は自動ではしない（違えば変更の前に止まる）。
-コード更新は検証時に読んだRevisionIdを条件にし、更新の完了を待った後に読み直した設定を、検証時の設定の
-指紋（環境変数を含む版に固定される設定全体。揮発性のメタデータは除く）と照合する。版に固定される設定・
-コードが検証時と違えば検出して発行しない。一致し、コードのハッシュが期待どおりで、State=Active・
-LastUpdateStatus=Successful（どちらも明示的な値が必須）、完了後のRevisionIdが空でないときだけ、その完了後の
-RevisionIdとコードのハッシュを条件に版を発行する（読んだ後に関数が変われば発行は拒否される）。更新の応答の
-RevisionIdは完了後と一致するとは限らず（実際のCDで不一致を観測。通常の遷移か同時期の手動変更かは未確定）、
-比較にも発行の条件にも使わない。ただし、読み直しの前に別の操作があっても、版に固定される設定・コードが
-検証時と同一（元に戻された変更を含む）なら区別できず、他者の操作が無かったとは証明できない。比較の対象は
-除外一覧（VOLATILE_CONFIG_KEYS）以外のすべての項目（未知の項目を含む）で、未知のAWSの差異は閉じて止まる。
-変更の前にすべて検証し（fail closed）、変更後は
-スモーク確認に失敗したら、こちらが切り替えたエイリアスだけを記録した直前の正常版へ戻す。
-結果は常に --result-file のJSONへ書く。Lambdaの設定全体や資格情報は出力・保存しない。
-プロセスが強制終了・タイムアウトした場合は戻し処理が走らないことがある。その場合は結果JSONの
-recoveryNote と infra/cd/bootstrap.md の手順で人が確認する。
-エイリアスが既に同じソースSHA・ZIPの版を指し、既存のスモーク確認が合格した場合は、変更しない
-成功（overall=no-change-success）として終え、新しい配布の成功とは扱わない。
+変更はしない（infra/cd/bootstrap.md と infra/cd/cloudfront-plan.md の人の操作）。CloudFront・WAF・
+予約済み同時実行数（ちょうど3）は読み取り（get-*）だけで、期待と違えばAWSの変更の前に止まる（fail closed）。
+
+流れ: 検証（成果物・公開経路・関数設定・直前の版）→ 現行版のスモーク確認 → コード更新（検証時の
+RevisionIdが条件）→ 完了待ち → 設定とコードのハッシュの確認 → 版の発行（完了後のRevisionIdとコードの
+ハッシュが条件）→ 発行した版の確認 → エイリアスの切り替え（検証時のRevisionIdが条件・加重なし）→
+スモーク確認。新しい版のスモーク確認が失敗したら、こちらの切り替えが返したRevisionIdを条件に、直前の
+正常版へ戻して、戻した版のスモーク確認を行う（戻しが成功しても全体は失敗）。
+
+エイリアスの更新結果が確認できない場合（エラー・想定外の応答・外部の変更）と、強制終了・タイムアウトは、
+自動では戻さず、失敗として終え、結果JSONの recoveryNote に人の復旧手順を残す（新しい版を指していても
+上書きしない）。エイリアスが既に同じソースSHA・ZIPの版を指し、スモーク確認が合格した場合は、変更しない
+成功（overall=no-change-success）で、新しい配布の成功とは扱わない。結果は常に --result-file のJSONへ
+段階ごとに書き、Lambdaの設定全体や資格情報は出力・保存しない。
 `--verify-artifact-only` は成果物の検証だけを行い、AWS CLI・資格情報・通信を使わない。
 """
 
@@ -31,18 +24,15 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
-import hmac
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 REGION = "ap-northeast-1"
@@ -127,9 +117,6 @@ class AwsError(DeployError):
         self.conflict = conflict
 
 
-class Interrupted(Exception):
-    pass
-
 
 def make_description(
     source_sha: str, zip_hex: str, run_id: str, guard: bool = False, viewer_ip: bool = False
@@ -186,64 +173,6 @@ def config_problems(config: dict, *, require_status: bool = False) -> list[str]:
         problems.append("lastUpdateStatus")
     return problems
 
-
-# 版の発行で固定される設定の比較から外す、揮発性・状態・コード由来のメタデータ（AWSの
-# GetFunctionConfiguration の項目名。プロジェクト独自の正規化で、公式がこの一覧を定めているわけではない）。
-# コード更新の完了で正当に変わり得る（RevisionId・LastModified・CodeSize・CodeSha256・状態の遷移・
-# 署名情報）ものだけを外し、それ以外の項目（未知の項目を含む）はすべて比較する（fail closed）。
-# 比較する項目は、環境変数（検査対象外の変数も）・実行ロール・メモリ・タイムアウト・説明・VPC・KMS・
-# トレース・レイヤー・一時ストレージ・ファイルシステム・アーキテクチャ・ランタイムなど。
-VOLATILE_CONFIG_KEYS = frozenset(
-    {
-        "RevisionId",
-        "CodeSha256",
-        "CodeSize",
-        "LastModified",
-        "Version",
-        "State",
-        "StateReason",
-        "StateReasonCode",
-        "LastUpdateStatus",
-        "LastUpdateStatusReason",
-        "LastUpdateStatusReasonCode",
-        "SigningProfileVersionArn",
-        "SigningJobArn",
-        "ResponseMetadata",
-    }
-)
-SETTING_NAME_RE = re.compile(r"[A-Za-z0-9]{1,64}")
-
-
-def versionable_settings(config: dict) -> dict[str, object]:
-    """関数設定から、揮発性のメタデータとnullを除いた比較用の写し（メモリ内だけで使う）。"""
-    view = {
-        name: value
-        for name, value in config.items()
-        if name not in VOLATILE_CONFIG_KEYS and value is not None
-    }
-    snap = view.get("SnapStart")
-    if isinstance(snap, dict):  # 最適化の状態は発行・更新の進行で変わる状態の項目
-        view["SnapStart"] = {k: v for k, v in snap.items() if k != "OptimizationStatus"}
-    return view
-
-
-def settings_fingerprint(config: dict, key: bytes) -> dict[str, str]:
-    """比較用の設定の項目ごとの指紋（HMAC-SHA-256。キーはプロセスごとの乱数でメモリ内だけ）。
-
-    環境変数などの値そのものは保持・出力しない。キーを保存しないため、結果やログから値を推測できない。
-    """
-    return {
-        name: hmac.new(
-            key, json.dumps(value, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256
-        ).hexdigest()
-        for name, value in versionable_settings(config).items()
-    }
-
-
-def setting_differences(before: dict[str, str], after: dict[str, str]) -> list[str]:
-    """指紋が違う（または片方にしかない）項目の名前だけを返す（値は含めない）。"""
-    names = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
-    return [f"setting:{name}" if SETTING_NAME_RE.fullmatch(name) else "setting:unknown" for name in names]
 
 
 @dataclass(frozen=True)
@@ -440,7 +369,7 @@ def ip_rate_rule_ok(rule: object) -> bool:
         return False
     limit = rate["Limit"]
     window = rate["EvaluationWindowSec"]
-    # bool は int の一種（True == 1）なので、型も厳密に確かめる
+    # 300.0 == 300 は真になるため、型も整数に限る
     return (
         rate["AggregateKeyType"] == "IP"
         and type(limit) is int
@@ -513,31 +442,10 @@ def web_acl_rules_ok(rules: object) -> bool:
     return ip_rules == 1 and len(set(observers)) == len(observers)
 
 
-CONCURRENCY_MESSAGES = {
-    "missing": "予約済み同時実行数が設定されていません",
-    "zero": "予約済み同時実行数が0です（公開停止中の可能性があります）",
-    "mismatch": "予約済み同時実行数が3ではありません",
-}
-
-
-def reserved_concurrency_problem(response: object) -> str | None:
-    """get-function-concurrency の応答。ちょうど整数の3なら None、違えば問題の種類。
-
-    未設定（キーなし・null）は "missing"、0は "zero"、それ以外（3以外の整数・負・bool・文字列・小数）は
-    "mismatch"。値は結果に残さず、種類だけ返す。
-    """
-    if not isinstance(response, dict):
-        return "missing"
-    value = response.get("ReservedConcurrentExecutions")
-    if value is None:
-        return "missing"
-    if type(value) is not int:  # True・"3"・3.0 は整数の3と扱わない
-        return "mismatch"
-    if value == 0:
-        return "zero"
-    if value != REQUIRED_RESERVED_CONCURRENCY:
-        return "mismatch"
-    return None
+def reserved_concurrency_ok(response: object) -> bool:
+    """get-function-concurrency の応答が、ちょうど整数の3か（未設定・0・他の値・bool・文字列・小数は不可）。"""
+    value = response.get("ReservedConcurrentExecutions") if isinstance(response, dict) else None
+    return type(value) is int and value == REQUIRED_RESERVED_CONCURRENCY
 
 
 def web_acl_problems(response: dict, arn: str, name: str, acl_id: str) -> list[str]:
@@ -746,10 +654,6 @@ class Result:
 
     def update(self, **fields: object) -> None:
         self.data.update(fields)
-        self.data["updatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        self.flush()
-
-    def flush(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle, temp = tempfile.mkstemp(dir=self.path.parent, prefix=".result-", suffix=".tmp")
         try:
@@ -762,135 +666,132 @@ class Result:
 
 
 class Deployer:
-    def __init__(
-        self,
-        *,
-        artifact_dir: Path,
-        source_sha: str,
-        zip_hex: str,
-        ci_run_url: str,
-        run_id: str,
-        run_attempt: str,
-        function_name: str,
-        base_url: str,
-        distribution_id: str,
-        oac_id: str,
-        web_acl_arn: str,
-        layer_code_sha256: str,
-        result_file: Path,
-        aws: AwsRunner,
-        smoke: SmokeRunner,
-        edge_function_arn: str | None = None,
-    ):
-        self.artifact_dir = artifact_dir
-        self.source_sha = source_sha
-        self.zip_hex = zip_hex
-        self.run_id = run_id
-        self.run_attempt = run_attempt
-        self.function = function_name
-        self.base_url = base_url  # 公開URL（CloudFront）。スモーク確認もここで行う
-        self.distribution_id = distribution_id
-        self.oac_id = oac_id
-        self.web_acl_arn = web_acl_arn
-        self.layer_code_sha256 = layer_code_sha256
-        self.edge_function_arn = edge_function_arn  # 承認したエッジ関数（書き込み構成だけで必須）
+    """`args` は parse_args の結果（入力は validate_inputs で検証済み）。aws・smoke は差し替え可能。"""
+
+    def __init__(self, args: argparse.Namespace, aws: AwsRunner, smoke: SmokeRunner):
+        self.a = args
         self.aws = aws
         self.smoke = smoke
-        self.code_sha = code_sha_from_hex(zip_hex)
-        self.prev: dict | None = None  # version/source/zip/aliasRevision
-        self.new_version: str | None = None
-        self.alias_rev: str | None = None  # こちらの最新の更新が返したRevisionId
-        self.switched = False
-        self.function_revision: str | None = None  # 検証時の設定のRevisionId
-        # 検証時の設定の項目ごとの指紋（値は持たない）。コード更新の完了後の設定と比べる
-        self._fingerprint_key = os.urandom(32)
-        self.settings_baseline: dict[str, str] | None = None
-        self.already_current = False
+        self.code_sha = code_sha_from_hex(args.zip_sha256)
+        self.edge_arn = args.edge_function_arn or None
+        self.prev: dict[str, str] = {}  # version / source / zip / aliasRevision（検証で確定）
+        self.switched_revision: str | None = None  # こちらの切り替えが返したRevisionId（戻しの根拠）
+        self.no_change = False
         self.write_enabled = False  # 公開経路が書き込みメソッドを許可しているか（検証で確定）
-        self.candidate_guard = False  # 今回のZIPがガード・利用枠を含むか（manifestで確認）
-        self.candidate_viewer_ip = False  # 今回のZIPが接続元IPの契約を満たすか（manifest・ZIPの写しで確認）
+        self.guard = self.viewer_ip = False  # 今回のZIPが持つ印（manifestで確認）
         self.edge_source: bytes | None = None  # ZIPの中のレビュー済みエッジのソース（契約があるときだけ）
         self.result = Result(
-            result_file,
+            args.result_file,
             {
-                "schema": 1,
-                "sourceSHA": source_sha,
-                "zipSha256": zip_hex,
-                "ciRunUrl": ci_run_url,
-                "runId": run_id,
-                "runAttempt": run_attempt,
+                "schema": 2,
+                "sourceSHA": args.source_sha,
+                "zipSha256": args.zip_sha256,
+                "ciRunUrl": args.ci_run_url,
+                "runId": args.run_id,
+                "runAttempt": args.run_attempt,
                 "overall": "in-progress",
                 "stage": "start",
-                "validation": "not-run",
-                # CloudFront・OAC・WAF・関数のリソースポリシーの読み取り検証（変更なし）の結果
-                "publicPath": "not-run",
-                # 予約済み同時実行数の読み取り検証（変更なし）。passed / missing / zero / mismatch /
-                # read-failed（取得に失敗）/ not-run
-                "reservedConcurrency": "not-run",
-                "deployment": "not-started",
-                # AWSの変更操作を始める直前に true にする。成功を意味せず、結果の書き込み自体が
-                # 失敗した場合は記録されない（その場合の有無は未確認）。
+                # AWSの変更操作を始める直前に true にする。成功を意味しない。
                 "mutationStarted": False,
-                "previousSmoke": "not-run",
-                "smoke": "not-run",
+                "versions": {"previous": None, "new": None},
+                # untouched / unknown（切り替え中・結果不明・外部の変更）/ switched / rolled-back
+                "alias": "untouched",
+                "smoke": {"previous": "not-run", "new": "not-run", "rollback": "not-run"},
                 "rollback": "not-needed",
-                "versions": {"previous": None, "new": None, "reused": False},
                 "note": None,
-                "alias": {"name": ALIAS, "version": None, "revisionId": None, "state": "untouched"},
-                "lastGood": None,
                 "error": None,
                 "recoveryNote": None,
             },
         )
 
-    # --- AWS呼び出し（結果は必要な項目だけ取り出す） ---
-    def _lambda(self, *args: str) -> dict:
+    def lam(self, *args: str) -> dict:
         return self.aws(["lambda", *args])
 
-    # CloudFront・WAFは読み取り（get-*）だけ。書き込みの呼び出しは作らない。
-    def _cloudfront(self, *args: str) -> dict:
-        return self.aws(["cloudfront", *args])
+    def stage(self, name: str) -> None:
+        self.result.update(stage=name)
 
-    def _wafv2(self, *args: str) -> dict:
-        return self.aws(["wafv2", *args])
+    def run_smoke(self, label: str, expected_sha: str) -> bool:
+        self.stage(f"smoke-{label}")
+        a = self.a
+        ok = self.smoke(a.base_url, expected_sha, f"run{a.run_id}-{a.run_attempt}-{label}")
+        self.result.data["smoke"][label] = "passed" if ok else "failed"
+        self.result.update()
+        return ok
 
-    def _versions(self, new: str | None = None, reused: bool = False) -> dict:
-        previous = self.prev["version"] if self.prev else None
-        return {"previous": previous, "new": new, "reused": reused}
+    # --- 検証（変更なし） ---
+    def validate(self) -> None:
+        a = self.a
+        self.stage("validate")
+        self.zip_path, manifest = load_manifest(a.artifact_dir, a.source_sha, a.zip_sha256)
+        self.guard = manifest_has_write_guard(manifest)
+        self.viewer_ip = manifest_has_viewer_ip_contract(manifest)
+        # LIVEのコードと照合する「レビュー済みのソース」は、ハッシュ検証済みのZIPの中の写し
+        self.edge_source = zip_edge_source(self.zip_path) if self.viewer_ip else None
 
-    def _report_id(self, label: str) -> str:
-        return f"run{self.run_id}-{self.run_attempt}-{label}"
+        url = self.lam("get-function-url-config", "--function-name", a.function_name, "--qualifier", ALIAS)
+        self._check_public_path(url)
 
-    def _alias_state(self, response: dict) -> tuple[str, str]:
-        version = response.get("FunctionVersion")
-        revision = response.get("RevisionId")
-        weights = (response.get("RoutingConfig") or {}).get("AdditionalVersionWeights")
-        if weights:
+        config = self.lam("get-function-configuration", "--function-name", a.function_name)
+        problems = config_problems(config)
+        self.function_revision = config.get("RevisionId")
+        if not isinstance(self.function_revision, str) or not self.function_revision:
+            problems.append("revisionId")
+        if problems:
+            raise DeployError("関数設定が期待と一致しません: " + ",".join(problems))
+
+        # 予約済み同時実行数は読み取りだけ。自動では設定・修正しない
+        if not reserved_concurrency_ok(self.lam("get-function-concurrency", "--function-name", a.function_name)):
+            raise DeployError(
+                "予約済み同時実行数がちょうど3ではありません（未設定・0を含む）。"
+                "配布ヘルパーは同時実行数を変更しません（人が確認してください）"
+            )
+        layer = self.lam("get-layer-version-by-arn", "--arn", PINNED_LAYER_ARN)
+        if (layer.get("Content") or {}).get("CodeSha256") != a.layer_code_sha256:
+            raise DeployError("レイヤーのCodeSha256が記録した期待値と一致しません")
+
+        alias = self.lam("get-alias", "--function-name", a.function_name, "--name", ALIAS)
+        version, revision = alias.get("FunctionVersion"), alias.get("RevisionId")
+        if (alias.get("RoutingConfig") or {}).get("AdditionalVersionWeights"):
             raise DeployError("エイリアスが加重ルーティングです。人が確認してください")
         if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
             raise DeployError("エイリアスの指す版が数値の版ではありません")
         if not isinstance(revision, str) or not revision:
             raise DeployError("エイリアスのRevisionIdを取得できません")
-        return version, revision
-
-    # --- 検証（変更なし） ---
-    def _validate_public_path(self, url: dict) -> None:
-        """公開経路（CloudFront → OAC → AWS_IAMの関数URL）を、実APIの応答で読んで検証する。
-
-        読み取りだけで、AWSの変更の前に呼ぶ。1つでも期待と違えば例外で止まる。問題は名前だけを
-        メッセージに入れる（アカウントを含むARNの全文・設定の値は結果に残さない）。
-        """
-        self.result.update(stage="validate-public-path")
-        try:
-            self._check_public_path(url)
-        except DeployError:
-            self.result.update(publicPath="failed")
-            raise
-        self.result.update(publicPath="passed")
+        old = self.lam("get-function-configuration", "--function-name", a.function_name, "--qualifier", version)
+        meta = parse_description(old.get("Description"))
+        if meta is None:
+            raise DeployError("直前の版に利用できる出所情報（description）がありません")
+        if old.get("CodeSha256") != code_sha_from_hex(meta["zip"]):
+            raise DeployError("直前の版のコードと出所情報のハッシュが一致しません")
+        if self.write_enabled:
+            # 書き込み可能な公開経路では、今回の版も戻し先の版も、ガード・利用枠（guard=1）と接続元IPの
+            # 契約（viewerip=1）の両方の印を持つ版だけを許す。古い版は、読み取り構成（許可メソッド3種）で
+            # 配布して印を付けてから書き込みへ切り替える。
+            missing = [
+                name
+                for name, present in (
+                    ("candidateWithoutWriteGuard", self.guard),
+                    ("candidateWithoutViewerIpContract", self.viewer_ip),
+                    ("rollbackTargetWithoutWriteGuard", meta.get("guard")),
+                    ("rollbackTargetWithoutViewerIpContract", meta.get("viewerip")),
+                )
+                if not present
+            ]
+            if missing:
+                raise DeployError(
+                    "書き込みを許可した公開経路では、ガード・利用枠と接続元IPの契約を含まない版を"
+                    "配布・戻し先にできません: " + ",".join(missing)
+                )
+        self.prev = {"version": version, "source": meta["source"], "zip": meta["zip"], "aliasRevision": revision}
+        self.result.update(versions={"previous": version, "new": None})
 
     def _check_public_path(self, url: dict) -> None:
-        # 公開URLはCloudFrontだけ。関数URL（lambda-url）を公開URLにするフォールバックはない
-        if not BASE_URL_RE.fullmatch(self.base_url):
+        """公開経路（CloudFront → OAC → AWS_IAMの関数URL）を、実APIの応答で読んで検証する（読み取りだけ）。
+
+        1つでも期待と違えば例外で止まる。メッセージには問題の名前だけを入れる（ARNの全文・設定の値は残さない）。
+        """
+        a = self.a
+        if not BASE_URL_RE.fullmatch(a.base_url):
             raise DeployError("公開URLがCloudFrontのオリジンの形式ではありません")
         # オリジンは設定値ではなく、エイリアス demo の関数URLの実値から導く
         url_match = LAMBDA_URL_RE.fullmatch(str(url.get("FunctionUrl", "")))
@@ -900,55 +801,43 @@ class Deployer:
             or url.get("InvokeMode") != "BUFFERED"
             or url_match is None
             or arn_match is None
-            or arn_match["name"] != self.function
+            or arn_match["name"] != a.function_name
         ):
-            raise DeployError(
-                "関数URLの設定が期待と一致しません（AWS_IAM・BUFFERED・東京の関数ARNが必要）"
-            )
-        acl_match = WEB_ACL_ARN_RE.fullmatch(self.web_acl_arn)
+            raise DeployError("関数URLの設定が期待と一致しません（AWS_IAM・BUFFERED・東京の関数ARNが必要）")
+        acl_match = WEB_ACL_ARN_RE.fullmatch(a.web_acl_arn)
         if acl_match is None:
             raise DeployError("WAFのARNがus-east-1のglobal（CLOUDFRONT）scopeの形式ではありません")
         account = arn_match["account"]
         if acl_match["account"] != account:
             raise DeployError("関数とWAFのアカウントが一致しません")
-        edge_match = (
-            EDGE_FUNCTION_ARN_RE.fullmatch(self.edge_function_arn) if self.edge_function_arn else None
-        )
-        if self.edge_function_arn and (edge_match is None or edge_match["account"] != account):
+        edge_match = EDGE_FUNCTION_ARN_RE.fullmatch(self.edge_arn) if self.edge_arn else None
+        if self.edge_arn and (edge_match is None or edge_match["account"] != account):
             raise DeployError("エッジ関数のARNが不正、または関数とアカウントが一致しません")
         path = PublicPath(
-            distribution_id=self.distribution_id,
-            oac_id=self.oac_id,
-            web_acl_arn=self.web_acl_arn,
-            public_host=self.base_url.removeprefix("https://"),
+            distribution_id=a.distribution_id,
+            oac_id=a.oac_id,
+            web_acl_arn=a.web_acl_arn,
+            public_host=a.base_url.removeprefix("https://"),
             origin_host=url_match["host"],
             account=account,
-            edge_function_arn=self.edge_function_arn or None,
+            edge_function_arn=self.edge_arn,
         )
-        problems: list[str] = []
-        distribution = self._cloudfront("get-distribution", "--id", self.distribution_id)
-        distribution_errors = distribution_problems(distribution, path)
-        problems += distribution_errors
-        if not distribution_errors:
+        distribution = self.aws(["cloudfront", "get-distribution", "--id", a.distribution_id])
+        problems = distribution_problems(distribution, path)
+        if not problems:
             behavior = distribution["Distribution"]["DistributionConfig"]["DefaultCacheBehavior"]
             if set(behavior["AllowedMethods"]["Items"]) == WRITE_ENABLED_METHODS:
                 self.write_enabled = True
                 # 書き込み構成では、LIVEのコードがレビュー済みのソースと一致することを、AWSの変更の前に確認する
                 problems += self._live_edge_problems(edge_match["name"] if edge_match else None)
-        oac = self._cloudfront("get-origin-access-control", "--id", self.oac_id)
-        problems += oac_problems(oac, self.oac_id)
-        acl = self._wafv2(
-            "get-web-acl",
-            "--name",
-            acl_match["name"],
-            "--scope",
-            "CLOUDFRONT",
-            "--id",
-            acl_match["id"],
+        oac = self.aws(["cloudfront", "get-origin-access-control", "--id", a.oac_id])
+        problems += oac_problems(oac, a.oac_id)
+        acl = self.aws(
+            ["wafv2", "get-web-acl", "--name", acl_match["name"], "--scope", "CLOUDFRONT", "--id", acl_match["id"]]
         )
-        problems += web_acl_problems(acl, self.web_acl_arn, acl_match["name"], acl_match["id"])
-        policy = self._lambda("get-policy", "--function-name", self.function, "--qualifier", ALIAS)
-        resource_arn = f"arn:aws:lambda:{REGION}:{account}:function:{self.function}:{ALIAS}"
+        problems += web_acl_problems(acl, a.web_acl_arn, acl_match["name"], acl_match["id"])
+        policy = self.lam("get-policy", "--function-name", a.function_name, "--qualifier", ALIAS)
+        resource_arn = f"arn:aws:lambda:{REGION}:{account}:function:{a.function_name}:{ALIAS}"
         problems += policy_problems(policy, path.distribution_arn, resource_arn)
         if problems:
             raise DeployError("公開経路の設定が期待と一致しません: " + ",".join(sorted(set(problems))))
@@ -956,241 +845,63 @@ class Deployer:
     def _live_edge_problems(self, name: str | None) -> list[str]:
         """承認したエッジ関数のLIVEのコードを読み（読み取りだけ）、ZIPの中のレビュー済みソースと照合する。
 
-        問題の名前だけ返す。関連付けの検査と同じく、AWSの変更の前に呼ぶ。取得の失敗・出力の欠落・
-        空・不一致は、すべて拒否（閉じて失敗）。コードの本文は結果・出力に残さない。
-        一時ファイルは専用の一時ディレクトリに置き、成功・失敗のどちらでも削除する。
+        取得の失敗・空・不一致はすべて拒否（閉じて失敗）。コードの本文は残さず、一時ファイルは成功・失敗の
+        どちらでも削除する。未設定・契約のないZIPは、関連付け・版の印の検査が止めるのでここでは読まない。
         """
-        if name is None:
-            return []  # 未設定は、関連付けの検査（edgeFunctionNotConfigured）が止める
-        if self.edge_source is None:
-            return []  # 契約のないZIPは、版の検査（candidateWithoutViewerIpContract）が止める。LIVEは読まない
+        if name is None or self.edge_source is None:
+            return []
         with tempfile.TemporaryDirectory(prefix="edge-live-") as directory:
             outfile = Path(directory) / "live-function-code"
             try:
-                self._cloudfront("get-function", "--name", name, "--stage", "LIVE", str(outfile))
+                self.aws(["cloudfront", "get-function", "--name", name, "--stage", "LIVE", str(outfile)])
                 live = outfile.read_bytes() if outfile.is_file() and not outfile.is_symlink() else b""
             except (DeployError, OSError):
                 return ["edgeFunctionRetrieval"]
         if not live:
             return ["edgeFunctionRetrieval"]
-        if hashlib.sha256(live).digest() != hashlib.sha256(self.edge_source).digest():
-            return ["edgeFunctionCodeMismatch"]
-        return []
+        return [] if live == self.edge_source else ["edgeFunctionCodeMismatch"]
 
-    def _validate_concurrency(self) -> None:
-        """予約済み同時実行数がちょうど3であることを、読み取り（修飾子なしの関数）だけで確認する。
-
-        AWSの変更の前に呼ぶ。違えば例外で止まり、put/delete-function-concurrency は呼ばない
-        （自動で設定・修正しない。人が確認する）。
-        """
-        self.result.update(stage="validate-concurrency")
-        try:
-            response = self._lambda("get-function-concurrency", "--function-name", self.function)
-        except DeployError:
-            self.result.update(reservedConcurrency="read-failed")
-            raise
-        problem = reserved_concurrency_problem(response)
-        if problem is not None:
-            self.result.update(reservedConcurrency=problem)
-            raise DeployError(
-                CONCURRENCY_MESSAGES[problem]
-                + "。ちょうど3が必要です。配布ヘルパーは同時実行数を変更しません（人が確認してください）"
-            )
-        self.result.update(reservedConcurrency="passed")
-
-    def validate(self) -> None:
-        self.result.update(stage="validate-manifest")
-        self.zip_path, self.manifest = load_manifest(
-            self.artifact_dir, self.source_sha, self.zip_hex
-        )
-        self.candidate_guard = manifest_has_write_guard(self.manifest)
-        self.candidate_viewer_ip = manifest_has_viewer_ip_contract(self.manifest)
-        # LIVEのコードと照合する「レビュー済みのソース」は、ハッシュ検証済みのZIPの中の写し
-        self.edge_source = zip_edge_source(self.zip_path) if self.candidate_viewer_ip else None
-        self.result.update(stage="validate-aws")
-
-        url = self._lambda(
-            "get-function-url-config", "--function-name", self.function, "--qualifier", ALIAS
-        )
-        self._validate_public_path(url)
-
-        config = self._lambda("get-function-configuration", "--function-name", self.function)
-        problems = config_problems(config)
-        revision = config.get("RevisionId")
-        if not isinstance(revision, str) or not revision:
-            problems.append("revisionId")
-        if not problems:
-            # 版に固定される設定全体の項目ごとの指紋。コード更新の完了後の設定と比べる（値は保持しない）
-            self.settings_baseline = settings_fingerprint(config, self._fingerprint_key)
-        del config  # 環境変数を保持しない
-        if problems:
-            raise DeployError("関数設定が期待と一致しません: " + ",".join(problems))
-        # 検証した設定のRevisionId。コード更新はこの版を条件にする（検証後に変わっていたら更新は失敗する）
-        self.function_revision = revision
-
-        self._validate_concurrency()
-        self.result.update(stage="validate-aws")
-
-        layer = self._lambda("get-layer-version-by-arn", "--arn", PINNED_LAYER_ARN)
-        if (layer.get("Content") or {}).get("CodeSha256") != self.layer_code_sha256:
-            raise DeployError("レイヤーのCodeSha256が記録した期待値と一致しません")
-
-        alias = self._lambda("get-alias", "--function-name", self.function, "--name", ALIAS)
-        version, alias_revision = self._alias_state(alias)
-        old = self._lambda(
-            "get-function-configuration", "--function-name", self.function, "--qualifier", version
-        )
-        meta = parse_description(old.get("Description"))
-        if meta is None:
-            raise DeployError("直前の版に利用できる出所情報（description）がありません")
-        if old.get("CodeSha256") != code_sha_from_hex(meta["zip"]):
-            raise DeployError("直前の版のコードと出所情報のハッシュが一致しません")
-        if self.write_enabled:
-            # 書き込み可能な公開経路では、今回の版も戻し先の版も、ガード・利用枠（guard=1）と、
-            # 接続元IPの契約（viewerip=1）の両方を持つ版だけを許す。古い版は読み取り専用の段階（許可
-            # メソッド3種）で配布して、印を付けてから書き込みへ切り替える。ロールバック（エイリアスの
-            # 切り替え）もこの検証の後にだけ行う。
-            guard_problems = []
-            if not self.candidate_guard:
-                guard_problems.append("candidateWithoutWriteGuard")
-            if not self.candidate_viewer_ip:
-                guard_problems.append("candidateWithoutViewerIpContract")
-            if not meta.get("guard"):
-                guard_problems.append("rollbackTargetWithoutWriteGuard")
-            if not meta.get("viewerip"):
-                guard_problems.append("rollbackTargetWithoutViewerIpContract")
-            if guard_problems:
-                raise DeployError(
-                    "書き込みを許可した公開経路では、ガード・利用枠と接続元IPの契約を含まない版を"
-                    "配布・戻し先にできません: " + ",".join(guard_problems)
-                )
-        self.prev = {
-            "version": version,
-            "sourceSHA": meta["source"],
-            "zipSha256": meta["zip"],
-            "aliasRevision": alias_revision,
-        }
-        self.alias_rev = alias_revision
-        self.result.update(
-            validation="passed",
-            versions=self._versions(),
-            alias={
-                "name": ALIAS,
-                "version": version,
-                "revisionId": alias_revision,
-                "state": "untouched",
-            },
-        )
-
-    def check_previous(self) -> None:
-        assert self.prev is not None
-        self.result.update(stage="previous-smoke")
-        ok = self.smoke(self.base_url, self.prev["sourceSHA"], self._report_id("previous"))
-        self.result.update(previousSmoke="passed" if ok else "failed")
-        if not ok:
+    # --- 変更 ---
+    def deploy(self) -> None:
+        a, prev, r = self.a, self.prev, self.result
+        if not self.run_smoke("previous", prev["source"]):
             raise DeployError("現在のエイリアスの版が正常ではないため、変更しませんでした")
-        self.result.update(
-            lastGood={
-                "version": self.prev["version"],
-                "sourceSHA": self.prev["sourceSHA"],
-                "zipSha256": self.prev["zipSha256"],
-                "smoke": "passed",
-            }
-        )
+        if prev["source"] == a.source_sha and prev["zip"] == a.zip_sha256:
+            self.no_change = True
+            r.update(
+                stage="done",
+                note="エイリアスは既に同じソースSHA・ZIPの版を指し、その版のスモーク確認は合格した。"
+                "変更なしの成功で、新しい版は発行しておらず、新しい配布の成功ではない。",
+            )
+            return
 
-    # --- 変更 ---
-    def already_current_check(self) -> bool:
-        """直前の版が今回と同じソース・ZIPで、全項目のスモーク確認も合格済みなら、変更しない。"""
-        assert self.prev is not None
-        if (
-            self.prev["sourceSHA"] != self.source_sha
-            or self.prev["zipSha256"] != self.zip_hex
-            or self.result.data["previousSmoke"] != "passed"
-        ):
-            return False
-        self.already_current = True
-        self.result.update(
-            stage="done",
-            deployment="already-current",
-            smoke="not-run",
-            versions=self._versions(),
-            note=(
-                "エイリアスは既に同じソースSHA・ZIPの版を指し、その版の既存スモーク確認は合格した。"
-                "変更なしの成功で、新しい版は発行しておらず、新しい配布の成功ではない。"
-            ),
-        )
-        return True
-
-    # --- 変更 ---
-    def mutate(self) -> None:
-        assert self.prev is not None and self.function_revision is not None
-        prev = self.prev
-        assert self.settings_baseline is not None
-        self.result.update(
-            deployment="in-progress",
-            recoveryNote=(
-                "強制終了・タイムアウトの場合は戻し処理が走らない。エイリアス demo の指す版を確認し、"
-                f"直前の正常版（版 {prev['version']}）へ戻すか、infra/cd/bootstrap.md の公開停止を使う。"
-            ),
-        )
-        self.result.update(stage="update-code", mutationStarted=True)
-        # 検証時に取得したRevisionIdを条件にする。以後に設定が変わっていれば更新は失敗する
-        updated = self._lambda(
-            "update-function-code",
-            "--function-name",
-            self.function,
-            "--zip-file",
-            f"fileb://{self.zip_path}",
-            "--revision-id",
-            self.function_revision,
-        )
+        # 検証時に取得したRevisionIdを条件にする。以後に関数が変わっていれば更新は失敗する
+        r.update(stage="update-code", mutationStarted=True)
+        updated = self.lam(
+            "update-function-code", "--function-name", a.function_name,
+            "--zip-file", f"fileb://{self.zip_path}", "--revision-id", self.function_revision,
+        )  # fmt: skip
         if updated.get("CodeSha256") != self.code_sha:
             raise DeployError("アップロード後のCodeSha256がmanifestと一致しません")
-        # 更新の応答のRevisionIdは、完了後のRevisionIdと同じとは限らない（実際のCDの実行で、完了後は
-        # 別の値だった。通常の遷移か、同時期の手動変更かは未確定）。応答の値は発行の条件にも比較にも使わない。
-
-        self.result.update(stage="wait-update")
-        self._lambda("wait", "function-updated-v2", "--function-name", self.function)
-        current = self._lambda("get-function-configuration", "--function-name", self.function)
-        # 完了後の最終確認は、State=Active・LastUpdateStatus=Successful の明示的な値を必須にする
+        # この応答のRevisionIdは、完了後と同じとは限らない（実際のCDで不一致を観測）。比較にも発行の条件にも使わない。
+        self.stage("wait-update")
+        self.lam("wait", "function-updated-v2", "--function-name", a.function_name)
+        current = self.lam("get-function-configuration", "--function-name", a.function_name)
         problems = config_problems(current, require_status=True)
         if current.get("CodeSha256") != self.code_sha:
             problems.append("codeSha256")
-        # 更新の完了後に読み直したRevisionIdを、発行の条件にする。読んだ後に関数が変われば、発行が拒否される
-        completed_revision = current.get("RevisionId")
-        if not isinstance(completed_revision, str) or not completed_revision:
+        completed = current.get("RevisionId")  # 完了後に読み直した値。発行の条件にする
+        if not isinstance(completed, str) or not completed:
             problems.append("revisionId")
-        # 検証時に捕捉した設定の指紋と比べる。コード更新の完了で変わるメタデータ以外が違えば発行しない
-        # （別の操作で版に固定される設定が変わっていれば検出する）。一方、読み直しの前の操作でも、設定・コードが
-        # 検証時と同一（元に戻された変更を含む）なら区別できず、他者の操作が無かったとは証明できない。
-        assert self.settings_baseline is not None
-        problems += setting_differences(
-            self.settings_baseline, settings_fingerprint(current, self._fingerprint_key)
-        )
-        del current
         if problems:
-            raise DeployError(
-                "コード更新後の関数の状態が期待と一致しません（発行しません）: " + ",".join(problems)
-            )
+            raise DeployError("コード更新後の関数の状態が期待と一致しません（発行しません）: " + ",".join(problems))
 
-        self.result.update(stage="publish")
-        published = self._lambda(
-            "publish-version",
-            "--function-name",
-            self.function,
-            "--code-sha256",
-            self.code_sha,
-            "--revision-id",
-            completed_revision,
-            "--description",
-            make_description(
-                self.source_sha,
-                self.zip_hex,
-                self.run_id,
-                self.candidate_guard,
-                self.candidate_viewer_ip,
-            ),
-        )
+        self.stage("publish")
+        description = make_description(a.source_sha, a.zip_sha256, a.run_id, self.guard, self.viewer_ip)
+        published = self.lam(
+            "publish-version", "--function-name", a.function_name,
+            "--code-sha256", self.code_sha, "--revision-id", completed, "--description", description,
+        )  # fmt: skip
         version = published.get("Version")
         if (
             not isinstance(version, str)
@@ -1198,262 +909,116 @@ class Deployer:
             or published.get("CodeSha256") != self.code_sha
         ):
             raise DeployError("発行された版の内容が期待と一致しません")
-        # 発行直後の版は Pending のことがある（既存の版を再利用する場合も同じ手順）。Active になるまで
-        # 待ってから確認する。待機はAWS CLIの上限つき。失敗・タイムアウトはエイリアスを動かさず止まる。
-        self.result.update(stage="wait-published")
-        self._lambda(
-            "wait",
-            "function-active-v2",
-            "--function-name",
-            self.function,
-            "--qualifier",
-            version,
-        )
-        reused = self._verify_published(version)
-        self.new_version = version
-        self.result.update(versions=self._versions(version, reused))
+        # 発行直後の版は Pending のことがある。Active になるまで待ってから確認する（待機の失敗はエイリアスを動かさず止まる）
+        self.stage("wait-published")
+        self.lam("wait", "function-active-v2", "--function-name", a.function_name, "--qualifier", version)
+        self._verify_published(version)
+        r.update(versions={"previous": prev["version"], "new": version})
 
-        self.result.update(stage="switch-alias")
-        try:
-            switched = self._lambda(
-                "update-alias",
-                "--function-name",
-                self.function,
-                "--name",
-                ALIAS,
-                "--function-version",
-                version,
-                "--revision-id",
-                prev["aliasRevision"],
-                "--routing-config",
-                '{"AdditionalVersionWeights":{}}',
-            )
-        except AwsError as error:
-            self._unknown_alias_outcome(error)
-            raise
-        revision = switched.get("RevisionId")
-        if (
-            switched.get("FunctionVersion") != version
-            or (switched.get("RoutingConfig") or {}).get("AdditionalVersionWeights")
-            or not isinstance(revision, str)
-            or not revision
-        ):
-            self._unknown_alias_outcome(None)
-        self._mark_switched(version, revision)
-
-        self.result.update(stage="new-smoke")
-        ok = self.smoke(self.base_url, self.source_sha, self._report_id("new"))
-        self.result.update(smoke="passed" if ok else "failed")
-        if not ok:
+        # 切り替え。結果を確認できなければ戻さず、失敗として終える（人が復旧する）
+        self.stage("switch-alias")
+        self.switched_revision = self._set_alias(version, prev["aliasRevision"])
+        r.update(alias="switched")
+        if not self.run_smoke("new", a.source_sha):
             raise DeployError("新しい版のスモーク確認に失敗しました")
-        self.result.update(
-            lastGood={
-                "version": version,
-                "sourceSHA": self.source_sha,
-                "zipSha256": self.zip_hex,
-                "smoke": "passed",
-            }
-        )
 
-    def _verify_published(self, version: str) -> bool:
-        """発行（または既存の同一内容）の版を読み、今回のソース・ZIP・検査済みの設定と証明できるか確認する。
+    def _verify_published(self, version: str) -> None:
+        """発行された版が、今回のソース・ZIP・検査済みの設定の版と確認できるか（確認できなければ止まる）。
 
-        AWSは、コードも設定も前回の版から変わらないと新しい版を作らず既存の版を返す。再利用は、
-        descriptionのソースSHA・ZIPのハッシュ、コードのハッシュ、検査対象の設定がすべて一致すると
-        確認できたときだけ。それ以外は閉じて止まり、手動確認とする（設定の変更で版を作ることはしない）。
-        戻り値: 既存の版を再利用したか。
+        AWSの公式資料は、コードも設定も変わらないと新しい版を発行しないと述べるが、既存の版を返すとは
+        明記していない（未確認）。返された版は、description（run番号以外）・コードのハッシュ・検査対象の
+        設定がすべて今回と一致すると確認できたときだけ使う。エイリアスの現在の版や、確認できない版は、
+        止まって人が確認する（設定を変えて版を作らせない）。
         """
-        assert self.prev is not None
-        manual = "。手動で確認してください（infra/cd/bootstrap.md の「発行済みの版が既にある場合」）"
-        if version == self.prev["version"]:
-            raise DeployError("発行された版がエイリアスの現在の版と同じです" + manual)
-        config = self._lambda(
-            "get-function-configuration", "--function-name", self.function, "--qualifier", version
-        )
-        meta = parse_description(config.get("Description"))
+        a = self.a
+        config = self.lam("get-function-configuration", "--function-name", a.function_name, "--qualifier", version)
+        meta = parse_description(config.get("Description")) or {}
         problems = config_problems(config)
         if config.get("CodeSha256") != self.code_sha:
             problems.append("codeSha256")
-        del config
-        if (
-            meta is None
-            or meta["source"] != self.source_sha
-            or meta["zip"] != self.zip_hex
-            or bool(meta.get("guard")) != self.candidate_guard
-            or bool(meta.get("viewerip")) != self.candidate_viewer_ip
-        ):
+        expected = (a.source_sha, a.zip_sha256, self.guard, self.viewer_ip)
+        if (meta.get("source"), meta.get("zip"), bool(meta.get("guard")), bool(meta.get("viewerip"))) != expected:
             problems.append("description")
+        if version == self.prev["version"]:
+            problems.append("sameAsCurrentVersion")
         if problems:
             raise DeployError(
-                f"発行された版 {version} を今回のソース・設定と証明できません: "
-                + ",".join(problems)
-                + manual
+                f"発行された版 {version} を今回のソース・設定と証明できません: {','.join(problems)}。"
+                "手動で確認してください（infra/cd/bootstrap.md の「発行済みの版が既にある場合」）"
             )
-        assert meta is not None
-        return meta["run"] != self.run_id
 
-    def _mark_switched(self, version: str, revision: str) -> None:
-        self.switched = True
-        self.alias_rev = revision
-        self.result.update(
-            deployment="completed",
-            alias={"name": ALIAS, "version": version, "revisionId": revision, "state": "switched"},
-        )
+    def _set_alias(self, version: str, expected_revision: str) -> str:
+        """エイリアス demo を、RevisionIdを条件に、加重なしで指定の版へ向ける。応答を確認できたときだけ新しいRevisionIdを返す。
 
-    def _unknown_alias_outcome(self, error: AwsError | None) -> None:
-        """エイリアス更新の結果を、こちらの成功応答で確認できないとき。常に例外で終える。
-
-        読み直して得たRevisionIdは、外部の変更かもしれず、戻しの根拠にしない（自動では戻さず、
-        新しい版を指していても上書きしない）。観測した状態は記録だけして、人が確認する。
+        呼ぶ前に alias を unknown にして復旧メモを残す（強制終了・タイムアウトでも、結果不明として残る）。
+        失敗・想定外の応答・条件の不一致（外部の変更）はすべて例外で、戻しの根拠にはならない。
         """
-        assert self.prev is not None
-        if error is not None and error.conflict:
-            # 条件付き更新が拒否された。こちらは切り替えていないが、実際の版は不明。
-            self.result.update(
-                alias={
-                    "name": ALIAS,
-                    "version": None,
-                    "revisionId": None,
-                    "state": "conflict-not-switched",
-                },
-                recoveryNote=(
-                    "エイリアスが外部で変更されたため切り替えなかった。エイリアスの現在の版は不明"
-                    f"（確認前に直前の版 {self.prev['version']} とは仮定しない）。"
-                    f"発行済みの版 {self.new_version} は残す。戻し処理はしない。人が確認する。"
-                ),
-            )
-            raise DeployError("エイリアスが外部で変更されたため切り替えませんでした")
-        observed = {"version": None, "revisionId": None}
-        try:
-            current = self._lambda("get-alias", "--function-name", self.function, "--name", ALIAS)
-            version, revision = self._alias_state(current)
-            observed = {"version": version, "revisionId": revision}
-        except DeployError:
-            pass
+        a, prev = self.a, self.prev
         self.result.update(
-            deployment="alias-outcome-unknown",
-            alias={"name": ALIAS, **observed, "state": "unknown-outcome"},
+            alias="unknown",
             recoveryNote=(
-                "エイリアス更新の結果を確認できない。自動の戻しはしていない。"
-                "alias の version / revisionId は読み直しの観測値で、こちらの更新の結果とは限らない"
-                f"（取得できなければ null）。直前の正常版は版 {self.prev['version']}、"
-                f"発行済みの版は {self.new_version}（どちらも削除しない）。"
-                "人がエイリアス demo の指す版を確認し、必要なら infra/cd/bootstrap.md の手順で戻す。"
+                "エイリアス demo の更新結果を確認できていない。自動では戻していない。"
+                f"`aws lambda get-alias` で指す版を確認する（直前の正常版は版 {prev['version']}、"
+                f"今回の版は {self.result.data['versions']['new']}。どちらも削除しない）。"
+                "必要なら infra/cd/bootstrap.md の手順で、現在のRevisionIdを条件に `update-alias` で戻す。"
             ),
         )
-        raise DeployError("エイリアス更新の結果が不明です。観測した状態を記録しました。人が確認してください")
-
-    def rollback(self) -> None:
-        assert self.prev is not None
-        prev = self.prev
-        self.result.update(stage="rollback", rollback="in-progress")
-        if self.alias_rev is None:
-            self.result.update(rollback="failed")
-            return
         try:
-            restored = self._lambda(
-                "update-alias",
-                "--function-name",
-                self.function,
-                "--name",
-                ALIAS,
-                "--function-version",
-                prev["version"],
-                "--revision-id",
-                self.alias_rev,
-                "--routing-config",
-                '{"AdditionalVersionWeights":{}}',
-            )
+            response = self.lam(
+                "update-alias", "--function-name", a.function_name, "--name", ALIAS,
+                "--function-version", version, "--revision-id", expected_revision,
+                "--routing-config", '{"AdditionalVersionWeights":{}}',
+            )  # fmt: skip
         except AwsError as error:
-            self.result.update(
-                rollback="failed",
-                recoveryNote=(
-                    "戻し処理に失敗"
-                    + ("（エイリアスが外部で変更された）" if error.conflict else "")
-                    + f"。手動復旧が必要。直前の正常版は版 {prev['version']}、"
-                    f"今回の版は {self.new_version}。どちらの版も削除しない。"
-                ),
-            )
-            return
-        revision = restored.get("RevisionId")
+            raise DeployError(
+                "エイリアスが外部で変更されたため更新されませんでした（実際の版は不明）"
+                if error.conflict
+                else "エイリアス更新の結果が不明です。人が確認してください"
+            ) from None
+        revision = response.get("RevisionId")
         if (
-            restored.get("FunctionVersion") != prev["version"]
-            or (restored.get("RoutingConfig") or {}).get("AdditionalVersionWeights")
+            response.get("FunctionVersion") != version
+            or (response.get("RoutingConfig") or {}).get("AdditionalVersionWeights")
             or not isinstance(revision, str)
             or not revision
         ):
-            self.alias_rev = None
-            self.result.update(
-                rollback="failed",
-                alias={"name": ALIAS, "version": None, "revisionId": None, "state": "unknown-outcome"},
-                recoveryNote=(
-                    "戻しの応答が期待と一致しない。エイリアスの状態は不明で、スモーク確認はしていない。"
-                    f"手動復旧が必要。直前の正常版は版 {prev['version']}、今回の版は {self.new_version}。"
-                    "どちらの版も削除しない。"
-                ),
-            )
+            raise DeployError("エイリアス更新の応答が期待と一致せず、結果が不明です。人が確認してください")
+        return revision
+
+    def rollback(self) -> None:
+        """こちらの切り替えが返したRevisionIdを条件に、直前の正常版へ戻し、戻した版のスモーク確認をする。"""
+        prev, r = self.prev, self.result
+        r.update(stage="rollback", rollback="in-progress")
+        try:
+            self._set_alias(prev["version"], self.switched_revision)
+        except DeployError:
+            r.update(rollback="failed")  # alias=unknown と recoveryNote は _set_alias が残している
             return
-        self.alias_rev = revision
-        self.result.update(
-            alias={
-                "name": ALIAS,
-                "version": prev["version"],
-                "revisionId": self.alias_rev,
-                "state": "rolled-back",
-            }
-        )
-        ok = self.smoke(self.base_url, prev["sourceSHA"], self._report_id("rollback"))
-        self.result.update(
-            rollback="succeeded" if ok else "alias-restored-smoke-failed",
-            lastGood=(
-                {
-                    "version": prev["version"],
-                    "sourceSHA": prev["sourceSHA"],
-                    "zipSha256": prev["zipSha256"],
-                    "smoke": "passed",
-                }
-                if ok
-                else None
-            ),
-        )
+        r.update(alias="rolled-back")
+        if self.run_smoke("rollback", prev["source"]):
+            r.update(rollback="succeeded", recoveryNote=None)
+        else:
+            r.update(rollback="alias-restored-smoke-failed")
 
     def run(self) -> int:
         failure: str | None = None
         try:
             self.validate()
-            self.check_previous()
-            if not self.already_current_check():
-                self.mutate()
-        except Interrupted:
-            failure = "処理が中断されました"
+            self.deploy()
         except DeployError as error:
             failure = str(error)
         except Exception as error:  # 想定外の例外も秘密を出さずに記録する
             failure = f"想定外のエラー: {type(error).__name__}"
         try:
-            if failure is not None:
-                if self.switched:
-                    self.rollback()
-                if self.result.data["validation"] != "passed":
-                    self.result.data["validation"] = "failed"
-                if self.result.data["deployment"] == "in-progress":
-                    self.result.data["deployment"] = "failed"
-            data = self.result.data
-            fresh = (
-                failure is None and data["deployment"] == "completed" and data["smoke"] == "passed"
-            )
-            unchanged = failure is None and self.already_current
-            ok = fresh or unchanged
-            # 変更なしの成功は、新しい配布の成功と区別する（overall を別の値にする）
-            overall = "success" if fresh else "no-change-success" if unchanged else "failed"
-            self.result.update(
-                overall=overall,
-                stage="done" if ok else data["stage"],
-                error=failure,
-            )
+            if failure is not None and self.switched_revision is not None:
+                self.rollback()
+            if failure is None:
+                self.result.update(overall="no-change-success" if self.no_change else "success", stage="done", recoveryNote=None)
+            else:
+                self.result.update(overall="failed", error=failure)
         except Exception:  # 結果の書き込みに失敗しても、終了コードは失敗にする
             return 1
-        return 0 if ok else 1
+        return 0 if failure is None else 1
 
 
 def run_aws(args: list[str]) -> dict:
@@ -1531,61 +1096,37 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-DEPLOY_ONLY_ARGS = (
-    "ci_run_url",
-    "run_id",
-    "run_attempt",
-    "function_name",
-    "base_url",
-    "distribution_id",
-    "oac_id",
-    "web_acl_arn",
-    "layer_code_sha256",
-    "result_file",
-)
+# 入力名 -> 完全一致する形式（--verify-artifact-only では先頭の2つだけ検証する）
+INPUT_FORMATS = {
+    "source_sha": SHA_RE,
+    "zip_sha256": HEX64_RE,
+    "ci_run_url": re.compile(r"https://github\.com/.+"),
+    "run_id": RUN_RE,
+    "run_attempt": RUN_RE,
+    "function_name": FUNCTION_RE,
+    "base_url": BASE_URL_RE,
+    "distribution_id": CLOUDFRONT_ID_RE,
+    "oac_id": CLOUDFRONT_ID_RE,
+    "web_acl_arn": WEB_ACL_ARN_RE,
+    "layer_code_sha256": CODE_SHA_RE,
+}
 
 
 def validate_inputs(args: argparse.Namespace) -> None:
-    names = ("source_sha", "zip_sha256")
-    if getattr(args, "verify_artifact_only", False) is not True:
-        names += DEPLOY_ONLY_ARGS
-    # 型が不正（文字列でない）な値は、正規表現でTypeErrorにせず、安全に拒否する。
-    # 不足（None）は下の「引数が不足」で扱う。result_file は Path のため除く。
-    wrong = [
+    verify_only = args.verify_artifact_only is True
+    bad = [
         name.replace("_", "-")
-        for name in names
-        if name != "result_file"
-        and getattr(args, name, None) is not None
-        and not isinstance(getattr(args, name), str)
+        for name in list(INPUT_FORMATS)[: 2 if verify_only else None]
+        if not isinstance(getattr(args, name, None), str) or not INPUT_FORMATS[name].fullmatch(getattr(args, name))
     ]
-    if wrong:
-        raise SystemExit("入力が不正です: " + ",".join(wrong))
-    rules = [
-        (SHA_RE.fullmatch(args.source_sha), "source-sha"),
-        (HEX64_RE.fullmatch(args.zip_sha256), "zip-sha256"),
-    ]
-    if getattr(args, "verify_artifact_only", False) is not True:
-        missing = [name for name in DEPLOY_ONLY_ARGS if getattr(args, name, None) is None]
-        if missing:
-            raise SystemExit("引数が不足しています: " + ",".join(missing))
-        rules += [
-            (RUN_RE.fullmatch(args.run_id), "run-id"),
-            (RUN_RE.fullmatch(args.run_attempt), "run-attempt"),
-            (FUNCTION_RE.fullmatch(args.function_name), "function-name"),
-            (BASE_URL_RE.fullmatch(args.base_url), "base-url"),
-            (CLOUDFRONT_ID_RE.fullmatch(args.distribution_id), "distribution-id"),
-            (CLOUDFRONT_ID_RE.fullmatch(args.oac_id), "oac-id"),
-            (WEB_ACL_ARN_RE.fullmatch(args.web_acl_arn), "web-acl-arn"),
-            (CODE_SHA_RE.fullmatch(args.layer_code_sha256), "layer-code-sha256"),
-            (args.ci_run_url.startswith("https://github.com/"), "ci-run-url"),
-        ]
-        edge_arn = getattr(args, "edge_function_arn", None)
-        if edge_arn not in (None, ""):
-            if not isinstance(edge_arn, str) or EDGE_FUNCTION_ARN_RE.fullmatch(edge_arn) is None:
-                raise SystemExit("入力が不正です: edge-function-arn")
-    bad = [name for ok, name in rules if not ok]
+    if not verify_only:
+        edge = args.edge_function_arn
+        if edge not in (None, "") and not (isinstance(edge, str) and EDGE_FUNCTION_ARN_RE.fullmatch(edge)):
+            bad.append("edge-function-arn")
+        if args.result_file is None:
+            bad.append("result-file")
     if bad:
-        raise SystemExit("入力が不正です: " + ",".join(bad))
+        raise SystemExit("入力が不正または不足しています: " + ",".join(bad))
     if os.environ.get("CD_ALLOW_LOCAL", "") not in ("", "false"):
         raise SystemExit("CD_ALLOW_LOCAL は配布では使えません")
 
@@ -1602,30 +1143,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("成果物の検証: 成功（manifest・ZIP・ソースSHA・ビルドのハッシュが一致）")
         return 0
-
-    def on_term(signum, frame):  # noqa: ARG001
-        raise Interrupted
-
-    signal.signal(signal.SIGTERM, on_term)
-    deployer = Deployer(
-        artifact_dir=args.artifact_dir,
-        source_sha=args.source_sha,
-        zip_hex=args.zip_sha256,
-        ci_run_url=args.ci_run_url,
-        run_id=args.run_id,
-        run_attempt=args.run_attempt,
-        function_name=args.function_name,
-        base_url=args.base_url,
-        distribution_id=args.distribution_id,
-        oac_id=args.oac_id,
-        web_acl_arn=args.web_acl_arn,
-        layer_code_sha256=args.layer_code_sha256,
-        edge_function_arn=args.edge_function_arn or None,
-        result_file=args.result_file,
-        aws=run_aws,
-        smoke=run_smoke,
-    )
-    return deployer.run()
+    return Deployer(args, run_aws, run_smoke).run()
 
 
 if __name__ == "__main__":
