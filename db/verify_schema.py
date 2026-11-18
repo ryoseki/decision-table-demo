@@ -171,7 +171,7 @@ def timeout_fetch():
     raise TimeoutError("モックの応答なし（検証用）")
 
 
-TABLES_REVERSE = ["ai_usage_requests", "ai_usage_counters", "shared_proposals", "shared_config_revisions", "case_checks", "case_results", "case_questions", "decision_rules", "review_questions", "review_cases"]
+TABLES_REVERSE = ["proposal_template_migrations", "proposal_templates", "processed_shared_proposals", "ai_usage_requests", "ai_usage_counters", "shared_proposals", "shared_config_revisions", "case_checks", "case_results", "case_questions", "decision_rules", "review_questions", "review_cases"]
 
 
 def main() -> int:

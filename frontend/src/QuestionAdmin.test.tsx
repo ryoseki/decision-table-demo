@@ -712,3 +712,92 @@ test("利用枠の上限（429）と送信済み（409）は、サーバーの�
   fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
   expect((await screen.findByRole("alert")).textContent).toBe(sent);
 });
+
+
+test("定型案のNoでは生成せず、明示的なAI再提案だけが振り分けを迂回する", async () => {
+  const generated: unknown[] = [];
+  stubFetch({
+    ...baseRoutes(),
+    "POST /api/admin/question-proposals": (init) => {
+      const body = JSON.parse(init?.body as string);
+      generated.push(body);
+      return { body: { ...proposalBody, source: { kind: body.force_ai ? "bedrock" : "template" } } };
+    },
+    "POST /api/admin/question-proposals/p1/decision": { body: { ...listBody(), applied: false } },
+  });
+  render(<QuestionAdmin />);
+  await createProposal();
+  expect(screen.getByTestId("source-badge").getAttribute("data-source")).toBe("template");
+  fireEvent.click(screen.getByRole("button", { name: "No", exact: true }));
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "別の文" } });
+  const button = await screen.findByRole("button", { name: "AIで再提案" });
+  expect(generated).toEqual([{ prompt: PROMPT }]);
+  fireEvent.click(button);
+  await screen.findByTestId("proposal");
+  expect(generated).toEqual([{ prompt: PROMPT }, { prompt: PROMPT, force_ai: true }]);
+  expect(screen.getByTestId("source-badge").getAttribute("data-source")).toBe("bedrock");
+});
+
+
+const TEMPLATE_HEADING = "AIを経由せずに反映する変更の依頼(完全一致)";
+const TEMPLATE_NOTE = "意図と異なる変更案が出る場合は、該当する依頼を削除してください。";
+
+test("定型文の一覧は初期状態で閉じ、指定の見出しと案内を出す。登録の操作はない", async () => {
+  stubFetch({
+    "GET /api/admin/questions": { body: { ...listBody(), template_reuse: true } },
+    "GET /api/admin/proposal-templates/question": { body: { prompts: ["設問A13を廃止して"] } },
+  });
+  render(<QuestionAdmin />);
+  const summary = await screen.findByText(TEMPLATE_HEADING);
+  const details = summary.closest("details")!;
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(details.open).toBe(false);
+  expect(within(details).getByText(TEMPLATE_NOTE).closest("small")).not.toBeNull();
+  await screen.findByRole("button", { name: "設問A13を廃止してを定型文から削除" });
+  expect(screen.queryByRole("button", { name: "再利用に登録" })).toBeNull();
+});
+
+test("Yesで反映すると、自動登録された定型文の一覧を取得し直し、削除で一覧を更新する。Noでは取得し直さない", async () => {
+  const templatePath = "/api/admin/proposal-templates/question";
+  let templateReads = 0;
+  const spy = stubFetch({
+    "GET /api/admin/questions": { body: { ...listBody(), template_reuse: true } },
+    ["GET " + templatePath]: () => {
+      templateReads += 1;
+      return { body: { prompts: templateReads === 1 ? [] : [PROMPT] } };
+    },
+    "POST /api/admin/question-proposals": { body: { ...proposalBody, source: { kind: "bedrock" } } },
+    "POST /api/admin/question-proposals/p1/decision": {
+      body: { ...listBody(afterQuestions, 2), applied: true, template_reuse: true },
+    },
+    ["POST " + templatePath + "/remove"]: (init) => {
+      expect(JSON.parse(init?.body as string)).toEqual({ prompt: PROMPT });
+      return { body: { prompts: [] } };
+    },
+  });
+  render(<QuestionAdmin />);
+  await createProposal();
+  await waitFor(() => expect(templateReads).toBe(1));
+  fireEvent.click(screen.getByRole("button", { name: "Yes", exact: true }));
+  const remove = await screen.findByRole("button", { name: PROMPT + "を定型文から削除" });
+  expect(templateReads).toBe(2);
+  // 登録の要求は、画面から送らない（サーバーが反映と同時に登録する）。
+  expect(spy.mock.calls.some(([url, init]) => url === templatePath && init?.method === "POST")).toBe(false);
+  fireEvent.click(remove);
+  await waitFor(() => expect(screen.queryByRole("button", { name: PROMPT + "を定型文から削除" })).toBeNull());
+});
+
+test("Noでは、定型文の一覧を取得し直さない", async () => {
+  const templatePath = "/api/admin/proposal-templates/question";
+  const spy = stubFetch({
+    "GET /api/admin/questions": { body: { ...listBody(), template_reuse: true } },
+    ["GET " + templatePath]: { body: { prompts: [] } },
+    "POST /api/admin/question-proposals": { body: { ...proposalBody, source: { kind: "bedrock" } } },
+    "POST /api/admin/question-proposals/p1/decision": { body: { ...listBody(), applied: false, template_reuse: true } },
+  });
+  render(<QuestionAdmin />);
+  await createProposal();
+  fireEvent.click(screen.getByRole("button", { name: "No", exact: true }));
+  await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
+  expect(spy.mock.calls.filter(([url]) => url === templatePath)).toHaveLength(1);
+});

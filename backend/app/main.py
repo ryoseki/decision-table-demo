@@ -20,6 +20,8 @@ from app import (
     rule_store,
     rules,
     shared_db,
+    template_admin,
+    template_store,
 )
 from app.domain import source_of
 from app.public_guard import PublicWriteGuard
@@ -29,7 +31,17 @@ app = FastAPI(title="不正審査デモ API")
 app.state.internal_mock_token = (
     secrets.token_urlsafe(32) if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") else ""
 )
-app.add_middleware(PublicWriteGuard, internal_token=app.state.internal_mock_token)
+_reuse_enabled = (
+    os.environ.get("PROPOSAL_REUSE_ENABLED") == "1"
+    and bool(os.environ.get("DB_HOST"))
+    and not os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    and not os.environ.get("DSQL_ENDPOINT")
+)
+app.add_middleware(
+    PublicWriteGuard,
+    internal_token=app.state.internal_mock_token,
+    reuse_enabled=_reuse_enabled,
+)
 question_admin.install_handlers(app)
 # DB_HOST（ローカルPostgreSQL）か DSQL_ENDPOINT（Aurora DSQL）があればDBに保存し、
 # なければ開発用の仮のメモリ保存（受付のみ）にする。
@@ -47,12 +59,23 @@ app.state.question_proposer, app.state.rule_proposer = bedrock_proposer.build_pr
     os.environ
 )
 _use_db = bool(os.environ.get("DSQL_ENDPOINT")) or (
-    bool(os.environ.get("DB_HOST")) and os.environ.get("SHARED_CONFIG_DB") == "1"
+    bool(os.environ.get("DB_HOST"))
+    and (os.environ.get("SHARED_CONFIG_DB") == "1" or _reuse_enabled)
 )
 # 設問・判定ルールの承認結果と未処理の提案は、DBがあれば共有（インスタンスをまたぐ）、
 # なければメモリ（再起動で初期化）。
 if _use_db:
-    _shared = shared_db.SharedConfigDb(db_store.connect_from_env)
+    _shared = shared_db.SharedConfigDb(
+        db_store.connect_from_env, reuse_enabled=_reuse_enabled
+    )
+    if _reuse_enabled:
+        templates = template_store.PostgresProposalTemplates(db_store.connect_from_env)
+        templates.bootstrap()
+        app.state.proposal_reuse = templates
+        # ローカル専用（Lambda・DSQLでは _reuse_enabled が偽）。
+        # 専用ヘッダーがないときだけ直接の接続元を使う。
+        app.state.local_quota_address = True
+        app.include_router(template_admin.router)
     app.state.question_store = shared_db.DbQuestionStore(_shared)
     app.state.persistence = "database"
 else:

@@ -48,8 +48,11 @@ def is_allowed_write(method: str, path: str, internal_mock: bool) -> bool:
 
 
 class PublicWriteGuard:
-    def __init__(self, app: ASGIApp, internal_token: str = "") -> None:
+    def __init__(
+        self, app: ASGIApp, internal_token: str = "", reuse_enabled: bool = False
+    ) -> None:
         self.app = app
+        self.reuse_enabled = reuse_enabled
         self.internal_token = internal_token.encode("ascii")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -67,7 +70,17 @@ class PublicWriteGuard:
                 and len(tokens) == 1
                 and hmac.compare_digest(tokens[0], self.internal_token)
             )
-        if not is_allowed_write(scope["method"], scope["path"], internal):
+        local_template = (
+            self.reuse_enabled
+            and scope["method"] == "POST"
+            and re.fullmatch(
+                r"/api/admin/proposal-templates/(question|rule)/remove",
+                scope["path"],
+            )
+        )
+        if not local_template and not is_allowed_write(
+            scope["method"], scope["path"], internal
+        ):
             response = JSONResponse(
                 {"detail": "この経路・メソッドでの書き込みは、公開デモでは使えません"},
                 status_code=405,

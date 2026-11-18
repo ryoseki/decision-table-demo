@@ -110,5 +110,37 @@ class RetirementBlocked(Exception):
         self.references = references
 
 
+def operation_from_receipt(target: str, payload: dict) -> dict:
+    """反映した提案の記録（承認時にサーバーが検証した操作）から、定型文の操作を作る。
+
+    追加の操作は、承認時に採番したIDを持たない（再利用のたびに現行の次番号を付ける）。
+    廃止・削除の対象IDは、反映した対象のものを使う。
+    """
+    if target == "question":
+        if payload["op"] == "retire":
+            return {"operation": "retire_question", "question_id": payload["target_id"]}
+        return {"operation": "add_question", "question": {"text": payload["text"]}}
+    if payload["op"] == "remove":
+        return {"operation": "remove_rule", "rule_id": payload["rule_id"]}
+    rule = payload["rule"]
+    return {
+        "operation": "add_rule",
+        "rule": {
+            "result_code": rule["result_code"],
+            "conditions": rule["conditions"],
+        },
+    }
+
+
+INITIAL_TEMPLATES = (
+    (
+        "question",
+        "設問A13を廃止して",
+        {"operation": "retire_question", "question_id": "A13"},
+    ),
+    ("rule", "ルールR03を削除して", {"operation": "remove_rule", "rule_id": "R03"}),
+)
+
+
 def new_case_id() -> str:
     return f"CASE-{uuid.uuid4().hex[:8].upper()}"  # 仮の形式（採番形式は未決）

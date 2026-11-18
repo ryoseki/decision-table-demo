@@ -36,6 +36,9 @@ TABLES = [
     "case_questions",
     "case_results",
     "decision_rules",
+    "processed_shared_proposals",
+    "proposal_template_migrations",
+    "proposal_templates",
     "review_cases",
     "review_questions",
     "shared_config_revisions",
@@ -123,6 +126,50 @@ class DevInit(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("初期化済み", out)
         self.assertEqual(self.snapshot(), first)  # テーブルも中身も変わらない
+
+    def test_old_dev_db_gets_missing_tables_and_keeps_existing_data(self):
+        # DDL更新前に作った開発用DB（定型文などのテーブルがない）を模す。
+        new_tables = {
+            "processed_shared_proposals",
+            "proposal_templates",
+            "proposal_template_migrations",
+        }
+        with _connect(self.schema) as conn:
+            for statement in self.init_dev.extract_ddl():
+                if statement.split()[2] not in new_tables:
+                    conn.execute(statement)
+            conn.execute(
+                "INSERT INTO review_questions (question_code, category, prompt,"
+                " auto_answer_key, source_kind, source_field, revision)"
+                " VALUES ('A01', '架空', '利用者が編集した設問', NULL,"
+                " 'ログイン履歴', '対象ログインの結果', 7)"
+            )
+            conn.execute(
+                "INSERT INTO decision_rules (rule_id, revision, result_code,"
+                " conditions, created_at)"
+                " VALUES ('R09', 3, 'caution', '{\"A01\": \"yes\"}',"
+                " '2026-01-01T00:00:00+00:00')"
+            )
+        before = self.snapshot()
+        self.assertTrue(new_tables.isdisjoint(before[0]))
+
+        code, out = self.run_init()
+        self.assertEqual(code, 0)
+        self.assertIn("初期化済み", out)
+        tables, questions, rules = self.snapshot()
+        self.assertEqual(tables, TABLES)  # 不足テーブルだけが足される
+        # 既存データは、そのまま。架空データの再投入も、上書きもしない。
+        self.assertEqual(questions, before[1])
+        self.assertEqual(rules, before[2])
+        self.assertEqual([q[2] for q in questions], ["利用者が編集した設問"])
+        # 足したテーブルは空。初期の定型文は、アプリの起動時の移行で入れる。
+        with _connect(self.schema) as conn:
+            for table in sorted(new_tables):
+                count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                self.assertEqual(count, 0, table)
+
+        self.assertEqual(self.run_init()[0], 0)  # 2回目も何も変えない
+        self.assertEqual(self.snapshot(), (tables, questions, rules))
 
 
 if __name__ == "__main__":
