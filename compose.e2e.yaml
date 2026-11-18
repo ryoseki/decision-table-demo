@@ -16,6 +16,7 @@ services:
       DB_USER: "${DB_USER:-demo_admin}"
       DB_PASSWORD: ""
       SHARED_CONFIG_DB: "1"
+      PROPOSAL_REUSE_ENABLED: "1"
       PYTHONPATH: /app:/fixtures
     volumes:
       - ./e2e/fixtures:/fixtures:ro

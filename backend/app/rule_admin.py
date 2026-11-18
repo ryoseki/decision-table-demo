@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from fastapi import APIRouter, HTTPException, Request
 
 from app.domain import (
+    GenerationSource,
     InvalidProposal,
     ProposalConflict,
     ProposalNotFound,
@@ -30,8 +31,11 @@ from app.question_admin import (
     DecisionRequest,
     ProposalRequest,
     admin_lock,
+    find_template,
     notice,
+    register_proposal,
     reserve_ai_call,
+    source_body,
     unavailable_error,
 )
 from app.question_validation import DemoQuestion
@@ -102,6 +106,26 @@ def list_rules(request: Request) -> dict[str, Any]:
     }
 
 
+def rule_from_template(raw: Any, next_id: str) -> Any:
+    """追加の定型文は、承認時のIDではなく、現行データの次番号で組み立て直す。
+
+    保存済みの行にidがあっても読み捨てる。検証は、通常の提案と同じ関数で行う。
+    """
+    if not isinstance(raw, dict) or raw.get("operation") != "add_rule":
+        return raw
+    rule = raw.get("rule")
+    if not isinstance(rule, dict):
+        return raw
+    return {
+        "operation": "add_rule",
+        "rule": {
+            "id": next_id,
+            "result_code": rule.get("result_code"),
+            "conditions": rule.get("conditions"),
+        },
+    }
+
+
 @router.post("/rule-proposals", status_code=201)
 def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
     store: RuleStore = request.app.state.rule_store
@@ -110,11 +134,15 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
     question_revision, questions = request.app.state.question_store.snapshot()
     revision, current = store.snapshot()
     removed = store.removed_ids()
-    reserve_ai_call(request, proposer)  # 予約を確定してから、生成を1回だけ呼ぶ
+    next_id = next_rule_id(current, removed)
+    raw = find_template(
+        request, "rule", body, lambda raw: rule_from_template(raw, next_id)
+    )
+    source = GenerationSource("template") if raw is not None else source_of(proposer)
     try:
-        raw = proposer.generate(
-            body.prompt, current, next_rule_id(current, removed), questions
-        )
+        if raw is None:
+            reserve_ai_call(request, proposer)
+            raw = proposer.generate(body.prompt.strip(), current, next_id, questions)
     except ProposerUnavailable as error:
         raise unavailable_error(error, source_of(proposer)) from None
     except InvalidProposal as error:  # 実接続の出力が、JSONとして読めないなど
@@ -136,12 +164,14 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
     else:
         detail = {"kind": "add", "added": _row(proposal.added)}
     return {
-        "proposal_id": store.register(proposal),
+        "proposal_id": register_proposal(request, store, proposal, source, body.prompt),
         "base_revision": proposal.base_revision,
         "before": _rows(proposal.base),
         "after": _rows(proposal.after),
         **detail,
         **notice(request, "rule_proposer"),
+        "source": source_body(source),
+        "mock": source.kind == "mock",
     }
 
 

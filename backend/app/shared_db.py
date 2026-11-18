@@ -34,6 +34,7 @@ from app.domain import (
     ProposalNotFound,
     QuestionBaseChanged,
     RetirementBlocked,
+    operation_from_receipt,
 )
 from app.question_store import initial_questions
 from app.question_validation import (
@@ -47,6 +48,7 @@ from app.rule_validation import (
     ValidatedRuleAdd,
     ValidatedRuleRemoval,
 )
+from app.template_store import save_template
 from app.usage_quota import (
     DEFAULT_GLOBAL_LIMIT,
     DEFAULT_PER_IP_LIMIT,
@@ -177,8 +179,11 @@ def _latest(conn: psycopg.Connection) -> SharedConfig:
 class SharedConfigDb:
     """共有設定（設問・判定ルールの版つきの一覧）と、未処理の提案のDB操作。"""
 
-    def __init__(self, connect: Callable[[], psycopg.Connection]) -> None:
+    def __init__(
+        self, connect: Callable[[], psycopg.Connection], *, reuse_enabled: bool = False
+    ) -> None:
         self._connect = connect
+        self._reuse_enabled = reuse_enabled
 
     # --- 読み取り --------------------------------------------------------------
 
@@ -229,6 +234,9 @@ class SharedConfigDb:
     @with_occ_retry
     def reject(self, kind: str, proposal_id: str) -> None:
         with self._connect() as conn:
+            if self._reuse_enabled:
+                self._take(conn, kind, proposal_id)
+                return
             deleted = conn.execute(
                 "DELETE FROM shared_proposals WHERE proposal_id = %s AND kind = %s",
                 (proposal_id, kind),
@@ -290,6 +298,7 @@ class SharedConfigDb:
                 current.removed_rule_ids,
             )
             _insert_config(conn, updated, "approval")
+            self._mark_applied(conn, "question", proposal_id, payload)
             return updated
 
     def approve_rule(self, proposal_id: str) -> SharedConfig:
@@ -340,10 +349,12 @@ class SharedConfigDb:
                 removed,
             )
             _insert_config(conn, updated, "approval")
+            self._mark_applied(conn, "rule", proposal_id, payload)
             return updated
 
-    @staticmethod
-    def _take(conn: psycopg.Connection, kind: str, proposal_id: str) -> dict[str, Any]:
+    def _take(
+        self, conn: psycopg.Connection, kind: str, proposal_id: str
+    ) -> dict[str, Any]:
         """提案を読み、同じ操作の中で消す（1回で使い切る）。なければ ProposalNotFound。
 
         消した行は、承認が失敗（例外）すれば元に戻る。拒否（返り値の例外）はコミットされ、
@@ -361,7 +372,41 @@ class SharedConfigDb:
         ).rowcount
         if deleted != 1:
             raise ProposalNotFound(proposal_id)
+        if self._reuse_enabled:
+            conn.execute(
+                "INSERT INTO processed_shared_proposals"
+                " (proposal_id, target, payload, applied) VALUES (%s, %s, %s, false)",
+                (
+                    proposal_id,
+                    kind,
+                    Jsonb({k: v for k, v in row[0].items() if k != "reuse_prompt"}),
+                ),
+            )
         return row[0]
+
+    def _mark_applied(
+        self,
+        conn: psycopg.Connection,
+        kind: str,
+        proposal_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """処理済み記録と定型文の自動登録を、設定の新しい版と同じ操作で確定する。
+
+        反映した（Yesで実際に変わった）提案だけがここへ来る。生成元は問わない。
+        同じ対象・文言があれば、今回反映した操作で置き換える。
+        """
+        if not self._reuse_enabled:
+            return
+        receipt = {k: v for k, v in payload.items() if k != "reuse_prompt"}
+        conn.execute(
+            "UPDATE processed_shared_proposals SET applied = true, payload = %s"
+            " WHERE proposal_id = %s",
+            (Jsonb(receipt), proposal_id),
+        )
+        prompt = payload.get("reuse_prompt")
+        if prompt is not None:
+            save_template(conn, kind, prompt, operation_from_receipt(kind, receipt))
 
     # --- 運営による復元 ----------------------------------------------------------
 
@@ -421,7 +466,12 @@ class DbQuestionStore:
     def retired_ids(self) -> frozenset[str]:
         return frozenset(q.id for q in self._db.latest().questions if q.retired)
 
-    def register(self, proposal: ValidatedProposal | ValidatedRetirement) -> str:
+    def register(
+        self,
+        proposal: ValidatedProposal | ValidatedRetirement,
+        *,
+        prompt: str | None = None,
+    ) -> str:
         payload: dict[str, Any]
         if isinstance(proposal, ValidatedRetirement):
             payload = {"op": "retire", "target_id": proposal.target.id}
@@ -432,7 +482,14 @@ class DbQuestionStore:
                 "text": proposal.added.text,
             }
         payload["base_revision"] = proposal.base_revision
+        if prompt is not None:
+            payload["reuse_prompt"] = prompt
         return self._db.register("question", payload)
+
+    def register_for_reuse(
+        self, proposal: ValidatedProposal | ValidatedRetirement, prompt: str
+    ) -> str:
+        return self.register(proposal, prompt=prompt)
 
     def approve(
         self,
@@ -462,7 +519,12 @@ class DbRuleStore:
     def list_rows(self) -> list[dict[str, Any]]:
         return [_rule_json(r) for r in self._db.latest().rules]
 
-    def register(self, proposal: ValidatedRuleAdd | ValidatedRuleRemoval) -> str:
+    def register(
+        self,
+        proposal: ValidatedRuleAdd | ValidatedRuleRemoval,
+        *,
+        prompt: str | None = None,
+    ) -> str:
         payload: dict[str, Any]
         if isinstance(proposal, ValidatedRuleRemoval):
             payload = {"op": "remove", "rule_id": proposal.target.rule_id}
@@ -470,7 +532,14 @@ class DbRuleStore:
             payload = {"op": "add", "rule": _rule_json(proposal.added)}
         payload["base_revision"] = proposal.base_revision
         payload["base_question_revision"] = proposal.base_question_revision
+        if prompt is not None:
+            payload["reuse_prompt"] = prompt
         return self._db.register("rule", payload)
+
+    def register_for_reuse(
+        self, proposal: ValidatedRuleAdd | ValidatedRuleRemoval, prompt: str
+    ) -> str:
+        return self.register(proposal, prompt=prompt)
 
     def pending(self, proposal_id: str) -> ValidatedRuleAdd | ValidatedRuleRemoval:
         payload, config = self._db.pending("rule", proposal_id)

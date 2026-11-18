@@ -86,6 +86,117 @@ class TestPublicWrite(unittest.TestCase):
                 200,
             )
 
+    def test_template_delete_is_open_only_when_reuse_is_enabled(self):
+        # 登録は、Yesで反映したときの自動登録だけ。登録用の経路は、有効でも開けない。
+        register = [
+            "/api/admin/proposal-templates/question",
+            "/api/admin/proposal-templates/rule",
+        ]
+        for enabled in (False, True):
+            app = FastAPI()
+            app.add_middleware(PublicWriteGuard, reuse_enabled=enabled)
+
+            @app.post("/api/admin/proposal-templates/{rest:path}")
+            def register_route(rest: str):
+                return {}
+
+            with _Server(app) as server:
+                for path in register:
+                    with self.subTest(enabled=enabled, path=path):
+                        self.assertEqual(
+                            send("POST", server.base_url + path, {})[0], 405
+                        )
+        paths = [
+            "/api/admin/proposal-templates/question/remove",
+            "/api/admin/proposal-templates/rule/remove",
+        ]
+        for enabled in (False, True):
+            app = FastAPI()
+            app.add_middleware(PublicWriteGuard, reuse_enabled=enabled)
+
+            @app.post("/api/admin/proposal-templates/{rest:path}")
+            def template(rest: str):
+                return {}
+
+            @app.delete("/api/admin/proposal-templates/{rest:path}")
+            def template_delete(rest: str):
+                return {}
+
+            with _Server(app) as server:
+                for path in paths:
+                    expected = 200 if enabled else 405
+                    with self.subTest(enabled=enabled, path=path):
+                        self.assertEqual(
+                            send("POST", server.base_url + path, {})[0], expected
+                        )
+                # 有効でも、公開する経路の外（他のメソッド・他の対象）は開けない。
+                self.assertEqual(send("DELETE", server.base_url + paths[0])[0], 405)
+                self.assertEqual(
+                    send(
+                        "POST",
+                        server.base_url + "/api/admin/proposal-templates/other",
+                        {},
+                    )[0],
+                    405,
+                )
+
+    def test_reuse_is_disabled_on_lambda_dsql_or_without_a_local_database(self):
+        import importlib.util
+        from pathlib import Path
+
+        from app import template_store
+
+        main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
+
+        class FakeTemplates:
+            def __init__(self, connect):
+                self.bootstrapped = False
+
+            def bootstrap(self):
+                self.bootstrapped = True
+
+        def load(env):
+            spec = importlib.util.spec_from_file_location("app_main_probe", main_path)
+            module = importlib.util.module_from_spec(spec)
+            with (
+                mock.patch.dict(os.environ, env, clear=True),
+                mock.patch.object(
+                    template_store, "PostgresProposalTemplates", FakeTemplates
+                ),
+            ):
+                spec.loader.exec_module(module)
+            return module.app
+
+        def guard_flag(application):
+            return application.user_middleware[0].kwargs["reuse_enabled"]
+
+        def has_template_routes(application):
+            return any(
+                path.startswith("/api/admin/proposal-templates")
+                for path in application.openapi()["paths"]
+            )
+
+        on = {"PROPOSAL_REUSE_ENABLED": "1"}
+        local = {**on, "DB_HOST": "db.invalid"}
+        cases = {
+            "local": (local, True),
+            "flag off": ({"DB_HOST": "db.invalid"}, False),
+            "flag not 1": ({"PROPOSAL_REUSE_ENABLED": "0", "DB_HOST": "db"}, False),
+            "no database": (on, False),
+            "lambda": ({**local, "AWS_LAMBDA_FUNCTION_NAME": "demo"}, False),
+            "dsql": ({**local, "DSQL_ENDPOINT": "dsql.invalid"}, False),
+            "dsql only": ({**on, "DSQL_ENDPOINT": "dsql.invalid"}, False),
+        }
+        for name, (env, expected) in cases.items():
+            with self.subTest(name):
+                application = load(env)
+                self.assertEqual(guard_flag(application), expected)
+                self.assertEqual(has_template_routes(application), expected)
+                self.assertEqual(
+                    getattr(application.state, "proposal_reuse", None) is not None,
+                    expected,
+                )
+
     def test_shared_rule_replaces_old_seed_conditions(self):
         class CaseStore:
             def list_rules(self):

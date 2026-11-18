@@ -11,7 +11,7 @@ import uuid
 from collections import OrderedDict
 from typing import Any
 
-from app.domain import ProposalConflict, ProposalNotFound
+from app.domain import ProposalConflict, ProposalNotFound, operation_from_receipt
 from app.rule_validation import DemoRule, ValidatedRuleAdd, ValidatedRuleRemoval
 
 Proposal = ValidatedRuleAdd | ValidatedRuleRemoval
@@ -43,7 +43,10 @@ def initial_rules() -> tuple[DemoRule, ...]:
 
 
 class InMemoryRuleStore:
-    def __init__(self) -> None:
+    def __init__(self, templates: Any = None) -> None:
+        # templates があれば、Yesで反映した依頼文と操作を、同じロックの中で登録する。
+        self._templates = templates
+        self._prompts: dict[str, str] = {}
         self._lock = threading.Lock()
         self._rules: tuple[DemoRule, ...] = initial_rules()
         self._removed_ids: frozenset[str] = frozenset()
@@ -82,6 +85,13 @@ class InMemoryRuleStore:
                 self._proposals.popitem(last=False)
         return proposal_id
 
+    def register_for_reuse(self, proposal: Proposal, prompt: str) -> str:
+        """register に加え、反映に成功したとき定型文へ登録する依頼文を覚える。"""
+        proposal_id = self.register(proposal)
+        with self._lock:
+            self._prompts[proposal_id] = prompt
+        return proposal_id
+
     def pending(self, proposal_id: str) -> Proposal:
         """未処理の提案を返す（消費しない）。なければ ProposalNotFound。"""
         with self._lock:
@@ -97,16 +107,35 @@ class InMemoryRuleStore:
             if proposal is None:
                 raise ProposalNotFound(proposal_id)
             del self._proposals[proposal_id]
+            prompt = self._prompts.pop(proposal_id, None)
             if proposal.base_revision != self._revision:
                 raise ProposalConflict(proposal_id)
             if isinstance(proposal, ValidatedRuleRemoval):
                 self._removed_ids = self._removed_ids | {proposal.target.rule_id}
             self._rules = proposal.after
             self._revision += 1
+            if self._templates is not None and prompt is not None:
+                if isinstance(proposal, ValidatedRuleRemoval):
+                    receipt: dict[str, Any] = {
+                        "op": "remove",
+                        "rule_id": proposal.target.rule_id,
+                    }
+                else:
+                    receipt = {
+                        "op": "add",
+                        "rule": {
+                            "result_code": proposal.added.result_code,
+                            "conditions": dict(proposal.added.conditions),
+                        },
+                    }
+                self._templates.save(
+                    "rule", prompt, operation_from_receipt("rule", receipt)
+                )
             return self._revision, self._rules
 
     def reject(self, proposal_id: str) -> None:
         """提案を破棄する。一覧は変えない。"""
         with self._lock:
+            self._prompts.pop(proposal_id, None)
             if self._proposals.pop(proposal_id, None) is None:
                 raise ProposalNotFound(proposal_id)

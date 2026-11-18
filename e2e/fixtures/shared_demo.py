@@ -35,5 +35,5 @@ class FakeRuleBedrock:
 app.state.question_proposer = FakeBedrock()
 app.state.rule_proposer = FakeRuleBedrock()
 app.state.ai_quota = PostgresAiQuota(
-    connect_from_env, b"e2e-test-key-not-used-outside-tests", QuotaLimits(1, 2)
+    connect_from_env, b"e2e-test-key-not-used-outside-tests", QuotaLimits(1, 4)
 )

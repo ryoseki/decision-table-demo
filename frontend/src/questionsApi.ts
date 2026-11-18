@@ -7,7 +7,7 @@ import { resultNameOf } from "./resultCodes";
 
 /** 廃止した設問は、一覧に残り、retired が true になる（設問文は保持）。 */
 export type DemoQuestion = { id: string; text: string; retired?: boolean };
-export type DemoQuestionList = { revision: number; questions: DemoQuestion[]; source: GenerationSource; persistence?: "database" };
+export type DemoQuestionList = { revision: number; questions: DemoQuestion[]; source: GenerationSource; persistence?: "database"; templateReuse?: boolean };
 /** 追加案。kind は持たない（既存の形のまま）。 */
 export type AddProposal = {
   kind?: undefined;
@@ -92,24 +92,25 @@ function errorMessage(status: number, detail: string, subject: string, proposalN
   }
 }
 
-type ApiList = { revision: number; questions: DemoQuestion[]; source?: unknown; persistence?: unknown };
+type ApiList = { revision: number; questions: DemoQuestion[]; source?: unknown; persistence?: unknown; template_reuse?: boolean };
 
 const toList = (b: ApiList): DemoQuestionList => ({
   revision: b.revision,
   questions: b.questions,
   source: toSource(b.source),
   ...(b.persistence === "database" ? { persistence: "database" as const } : {}),
+  ...(b.template_reuse ? { templateReuse: true } : {}),
 });
 
 export async function getDemoQuestions(): Promise<DemoQuestionList> {
   return toList((await call("/api/admin/questions")) as ApiList);
 }
 
-export async function createQuestionProposal(prompt: string, requestId = proposalRequestId()): Promise<QuestionProposal> {
+export async function createQuestionProposal(prompt: string, requestId = proposalRequestId(), forceAI = false): Promise<QuestionProposal> {
   const b = (await call("/api/admin/question-proposals", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": requestId },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify(forceAI ? { prompt, force_ai: true } : { prompt }),
   })) as ApiProposal;
   if (b.kind === "retire") {
     const toImpact = (c: ApiImpactCase): ImpactCase => ({

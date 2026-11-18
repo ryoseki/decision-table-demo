@@ -509,3 +509,85 @@ test("接続できない・503は同じ依頼ID、502・504・429は新しい依
     expect(keys[1], String(status)).not.toBe(keys[0]);
   }
 });
+
+test("定型案: 生成元を示し、Noでは再提案せず、「AIで再提案」だけが元の依頼でforce_aiを送る", async () => {
+  const sent: unknown[] = [];
+  stubFetch({
+    ...baseRoutes(),
+    "POST /api/admin/rule-proposals": (init) => {
+      const body = JSON.parse(init?.body as string);
+      sent.push(body);
+      return { status: 201, body: { ...removeBody, source: { kind: body.force_ai ? "bedrock" : "template" } } };
+    },
+    "POST /api/admin/rule-proposals/p2/decision": { body: { ...listBody(), applied: false } },
+  });
+  render(<RuleAdmin />);
+  await createProposal("ルールR03を削除して");
+  await screen.findByTestId("proposal");
+  expect(screen.getByTestId("source-badge").getAttribute("data-source")).toBe("template");
+  fireEvent.click(screen.getByRole("button", { name: "No", exact: true }));
+  const retry = await screen.findByRole("button", { name: "AIで再提案" });
+  expect(sent).toEqual([{ prompt: "ルールR03を削除して" }]); // Noだけでは、再提案の要求を送らない
+  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "入力欄を書き換えた" } });
+  fireEvent.click(retry);
+  await screen.findByTestId("proposal");
+  expect(sent).toEqual([{ prompt: "ルールR03を削除して" }, { prompt: "ルールR03を削除して", force_ai: true }]);
+  expect(screen.getByTestId("source-badge").getAttribute("data-source")).toBe("bedrock");
+  expect(screen.queryByRole("button", { name: "AIで再提案" })).toBeNull();
+});
+
+const TEMPLATE_HEADING = "AIを経由せずに反映する変更の依頼(完全一致)";
+const TEMPLATE_NOTE = "意図と異なる変更案が出る場合は、該当する依頼を削除してください。";
+
+test("定型文の一覧は初期状態で閉じ、指定の見出しと案内を出す。登録の操作はない", async () => {
+  stubFetch({
+    "GET /api/admin/rules": { body: { ...listBody(), template_reuse: true } },
+    "GET /api/admin/proposal-templates/rule": { body: { prompts: ["ルールR03を削除して"] } },
+  });
+  render(<RuleAdmin />);
+  const summary = await screen.findByText(TEMPLATE_HEADING);
+  const details = summary.closest("details")!;
+  expect(summary.tagName).toBe("SUMMARY");
+  expect(details.open).toBe(false);
+  expect(within(details).getByText(TEMPLATE_NOTE).closest("small")).not.toBeNull();
+  await screen.findByRole("button", { name: "ルールR03を削除してを定型文から削除" });
+  expect(screen.queryByRole("button", { name: "再利用に登録" })).toBeNull();
+});
+
+test("Bedrock案のYesで、自動登録された定型文の一覧を取得し直す。登録の要求は画面から送らない", async () => {
+  const templatePath = "/api/admin/proposal-templates/rule";
+  let templateReads = 0;
+  const spy = stubFetch({
+    "GET /api/admin/rules": { body: { ...listBody(), template_reuse: true } },
+    ["GET " + templatePath]: () => {
+      templateReads += 1;
+      return { body: { prompts: templateReads === 1 ? [] : [PROMPT] } };
+    },
+    "POST /api/admin/rule-proposals": { status: 201, body: { ...addBody, source: { kind: "bedrock", model_id: "m", region: "r" } } },
+    "POST /api/admin/rule-proposals/p1/decision": { body: { ...listBody(afterRules, 2), applied: true, template_reuse: true } },
+  });
+  render(<RuleAdmin />);
+  await createProposal();
+  await screen.findByTestId("proposal");
+  await waitFor(() => expect(templateReads).toBe(1));
+  fireEvent.click(screen.getByRole("button", { name: "Yes", exact: true }));
+  await screen.findByRole("button", { name: PROMPT + "を定型文から削除" });
+  expect(templateReads).toBe(2);
+  expect(spy.mock.calls.some(([url, init]) => url === templatePath && init?.method === "POST")).toBe(false);
+});
+
+test("Noを選んだBedrock案では、定型文の一覧を取得し直さず、「AIで再提案」も出ない", async () => {
+  const spy = stubFetch({
+    "GET /api/admin/rules": { body: { ...listBody(), template_reuse: true } },
+    "GET /api/admin/proposal-templates/rule": { body: { prompts: [] } },
+    "POST /api/admin/rule-proposals": { status: 201, body: { ...addBody, source: { kind: "bedrock", model_id: "m", region: "r" } } },
+    "POST /api/admin/rule-proposals/p1/decision": { body: { ...listBody(), applied: false, template_reuse: true } },
+  });
+  render(<RuleAdmin />);
+  await createProposal();
+  await screen.findByTestId("proposal");
+  fireEvent.click(screen.getByRole("button", { name: "No", exact: true }));
+  await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
+  expect(spy.mock.calls.filter(([url]) => url === "/api/admin/proposal-templates/rule")).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: "AIで再提案" })).toBeNull();
+});
