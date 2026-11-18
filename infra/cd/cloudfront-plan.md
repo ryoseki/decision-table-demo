@@ -1,6 +1,6 @@
 # 公開経路の計画: CloudFront + WAF + Lambda関数URL（AWS_IAM）+ OAC
 
-この文書は**計画と手順案**です。利用者の報告（2026-11-09）では、CloudFront（無効化・`Deployed`・Web ACL紐付け済み）、WAFのWeb ACL、OAC（`lambda`・`sigv4`・`always`）は**作成済み**です。これらは**再作成・削除せず、再利用して設定を確認**します。以降の「作成」の手順は、初回構築の履歴、または該当のリソースが無いと人が確認できた場合だけの手順で、作成済みなら飛ばして読み取りで確認します。利用者の確認（2026-11-10）では、Web ACLの規則は4件（接続元IPごとのレート制限のBlock 1件＋既知の観測グループ3種の`Count`）で、全体のレート制限の規則はありません。同日、利用者の承認により、全体1,500件/5分の規則を要件から外しました（必須はIPごとの1件だけ）。有効化・Lambdaの許可・公開HTTPの確認・CD・ロールバックは未実施です。このファイルのコマンド自体の実行結果は受け取っていません。AWSの作成・変更は、利用者本人が内容を確認し、判断してから実行します。コード・設定はこの文書の外にあります（検証は `scripts/deploy-lambda.py`、WAFの規則は `infra/cd/waf-rules.json`）。実在のアカウントID・ディストリビューションID・URLの実値は書きません（引用符つきの `REPLACE_*` の目印を使う）。
+この文書は**計画と手順案**です。利用者の報告（2026-11-09）では、CloudFront（無効化・`Deployed`・Web ACL紐付け済み）、WAFのWeb ACL、OAC（`lambda`・`sigv4`・`always`）は**作成済み**です。これらは**再作成・削除せず、再利用して設定を確認**します。以降の「作成」の手順は、初回構築の履歴、または該当のリソースが無いと人が確認できた場合だけの手順で、作成済みなら飛ばして読み取りで確認します。利用者の確認（2026-11-10）では、Web ACLの規則は4件（接続元IPごとのレート制限のBlock 1件＋既知の観測グループ3種の`Count`）で、全体のレート制限の規則はありません。同日、利用者の承認により、全体1,500件/5分の規則を要件から外しました（必須はIPごとの1件だけ）。有効化・Lambdaの許可・公開HTTPの確認・CD・ロールバックは未実施です。このファイルのコマンド自体の実行結果は受け取っていません。AWSの作成・変更は、利用者本人が内容を確認し、判断してから実行します。コード・設定はこの文書の外にあります（検証は `scripts/cd_public_path.py`、WAFの規則は `infra/cd/waf-rules.json`）。実在のアカウントID・ディストリビューションID・URLの実値は書きません（引用符つきの `REPLACE_*` の目印を使う）。
 
 ## 区分
 
@@ -64,7 +64,7 @@ AWSの公式資料（Lambda関数URLのスロットリング。Codexが2026-11-1
 - 月額の上限でもありません。CloudFront・Lambda・ログなどの料金は、届いたリクエストの量に応じて発生し得ます。
 - IPごとの規則（300件/300秒、平均1RPS相当）は、多数のIPから分散したアクセスでは効きません。30件以上のIPから分散すれば、IPごとの上限内のまま同時実行数3の上限に達し得ます。そのとき正規の利用者にも429が返り得ます。
 - このため、分散したアクセスや、継続的なアクセスによるオリジン（Lambda）側の料金は残ります。異常時は、これまでどおり人が予約済み同時実行数を0にして止めます。429の応答に料金がかかるかは、この文書では確認していません。
-- CDは予約済み同時実行数を自動で設定・変更しません。読み取りで1でなければ、変更の前に止まります（未設定・0・2以上など。結果JSONの `reservedConcurrency` に種類を記録）。
+- CDは予約済み同時実行数を自動で設定・変更しません。読み取りでちょうど3でなければ、変更の前に止まります（未設定・0・3以外・取得失敗。`error` に記録）。
 
 #### 任意の観測グループ（Count）
 
@@ -79,7 +79,7 @@ AWSの公式資料（Lambda関数URLのスロットリング。Codexが2026-11-1
 - 規則グループの上書きは、ちょうど `OverrideAction` が `{"Count": {}}`。`Action`、別の上書き（`None` など）、`Count` の追加設定、`ScopeDownStatement`、`Version`、規則ごとの動作の上書き（`RuleActionOverrides`）、除外（`ExcludedRules`）、`RuleLabels` は不可です。APIが空の配列で返す任意の項目（`ExcludedRules`・`RuleActionOverrides`・`ManagedRuleGroupConfigs`）は、空なら許します。
 - 規則は合計4件まで（必須1件＋観測3件）。ほかのベンダー・ほかの規則グループ・ほかの規則（全体の`CONSTANT`の規則を含む）は、件数が4件以内でも拒否します。
 - 公式資料では、規則グループの動作を `Count` に上書きすると、一致しても終端せず評価が続きます（https://docs.aws.amazon.com/waf/latest/developerguide/web-acl-rule-group-override-options.html ）。このため、観測グループの優先順位が必須の1件より前でも、そのBlockを迂回しない、とプロジェクトとして判断しています。実際のWeb ACLでの動作は未確認です。
-- 検証コード（`scripts/deploy-lambda.py`）は、必須の1件をレートベースの内容（しきい値300・期間300秒・集計キー`IP`・`ForwardedIPConfig`と`ScopeDownStatement`なし・`Block`）で判定し、観測グループは別の判定で、上の条件に完全に一致するときだけ受け入れます。
+- 検証コード（`scripts/cd_public_path.py`）は、必須の1件をレートベースの内容（しきい値300・期間300秒・集計キー`IP`・`ForwardedIPConfig`と`ScopeDownStatement`なし・`Block`）で判定し、観測グループは別の判定で、上の条件に完全に一致するときだけ受け入れます。
 
 ## 費用（未確認。合計金額は出さない）
 
@@ -258,7 +258,7 @@ aws cloudfront create-origin-access-control --region us-east-1 --origin-access-c
 - 公開URLはCloudFrontだけ。関数URLのホストは `get-function-url-config`（エイリアス `demo`）の実値から導き、CloudFrontのオリジンと一致することを検証する。
 - リポジトリ変数: `CD_BASE_URL`（CloudFrontのオリジン）、`CLOUDFRONT_DISTRIBUTION_ID`、`CLOUDFRONT_OAC_ID`、`WAF_WEB_ACL_ARN`（us-east-1・globalのWeb ACLのARN）、ほかは従来どおり。**いずれもAWS作成後に人が設定する（未設定）**。
 - 配布用ロールの追加権限は読み取りだけ: `cloudfront:GetDistribution`（対象のディストリビューション）、`cloudfront:GetOriginAccessControl`（OACの読み取りはリソース指定ができないため `Resource: *`）、`cloudfront:GetFunction`（承認したエッジ関数だけ。LIVEのコードの読み取り。別の文 `ReadTheApprovedViewerRequestFunctionOnly`）、`wafv2:GetWebACL`（対象のWeb ACL）、`lambda:GetPolicy`（エイリアス `demo`）、`lambda:GetFunctionConcurrency`（修飾子なしの対象関数だけ。別の文 `ReadTheDemoFunctionReservedConcurrencyOnly`）。CloudFront（`UpdateDistribution`・`UpdateFunction`・`PublishFunction` を含む）・WAF・IAMの書き込み、同時実行数の設定・削除（`PutFunctionConcurrency`・`DeleteFunctionConcurrency`）と `iam:PassRole` は含めない。
-- 検証が失敗した場合は、AWSの変更を1件もせず、スモーク確認もせずに止まる。予約済み同時実行数がちょうど3でない場合（未設定・0・3以外・取得失敗）も同じで、結果JSONの `reservedConcurrency` に `missing`・`zero`・`mismatch`・`read-failed` を記録する。
+- 検証が失敗した場合は、AWSの変更を1件もせず、スモーク確認もせずに止まる。予約済み同時実行数がちょうど3でない場合（未設定・0・3以外・取得失敗）も同じ。
 - 検証コードが拒否する項目（初期構成）: 必須のIPごとの規則の欠落・変更・重複、全体（`CONSTANT`）の規則など未対応の規則、既知の観測グループ（`Count`）3種以外のWAF規則・規則グループ、観測グループの重複・`Count` 以外の動作・絞り込みや上書き、合計5件以上の規則、Firewall Managerの管理・前処理/後処理の規則グループ、CloudFrontの継続的デプロイのポリシー・ステージング、`AuthType` が `AWS_IAM` 以外のLambdaの許可、ワイルドカードの `AWS:SourceArn` など。これらの項目名（`ManagedByFirewallManager`・`PreProcessFirewallManagerRuleGroups`・`PostProcessFirewallManagerRuleGroups`・`ContinuousDeploymentPolicyId`・`Staging`）について、Codexが2026-11-09に公式API本文で項目名（`Staging`・`ContinuousDeploymentPolicyId`・`ManagedByFirewallManager`・`PreProcessFirewallManagerRuleGroups`・`PostProcessFirewallManagerRuleGroups`）の存在を確認済みです。実際のAWS応答の値との突合は未実施です。
 
 ## 出典（2026-11-09にCodexが本文を確認した記録を引き継ぐ。この作業では再読していない）

@@ -20,6 +20,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +28,7 @@ _spec = importlib.util.spec_from_file_location("deploy_lambda", ROOT / "scripts"
 dl = importlib.util.module_from_spec(_spec)
 sys.modules["deploy_lambda"] = dl
 _spec.loader.exec_module(dl)
+cp = sys.modules["cd_public_path"]  # deploy-lambda.py が読み込んだ、公開経路の検証（読み取り専用）
 
 NEW_SHA = "a" * 40
 OLD_SHA = "b" * 40
@@ -105,8 +107,8 @@ def make_distribution() -> dict:
                         "Items": ["GET", "HEAD", "OPTIONS"],
                         "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]},
                     },
-                    "CachePolicyId": dl.CACHING_DISABLED_POLICY_ID,
-                    "OriginRequestPolicyId": dl.ALL_VIEWER_EXCEPT_HOST_POLICY_ID,
+                    "CachePolicyId": cp.CACHING_DISABLED_POLICY_ID,
+                    "OriginRequestPolicyId": cp.ALL_VIEWER_EXCEPT_HOST_POLICY_ID,
                     "LambdaFunctionAssociations": {"Quantity": 0},
                     "FunctionAssociations": {"Quantity": 0},
                     "Compress": True,
@@ -293,12 +295,11 @@ def enable_write(aws, *, methods=None, associations=None, live="source") -> None
 
     live: "source"=レビュー済みと同じコード / bytes=別のコード / None=取得に失敗する / "nofile"=ファイルを出さない
     """
-    items = sorted(methods if methods is not None else dl.WRITE_ENABLED_METHODS)
+    items = sorted(methods if methods is not None else cp.WRITE_ENABLED_METHODS)
     aws.behavior["AllowedMethods"].update(Quantity=len(items), Items=items)
     found = [APPROVED_ASSOCIATION] if associations is None else associations
     aws.behavior["FunctionAssociations"] = {"Quantity": len(found), "Items": found}
     aws.live_edge = EDGE_SOURCE if live == "source" else live
-
 
 class FakeAws:
     """`aws lambda ...` の最小の偽物。RevisionIdの条件付き更新を再現する。"""
@@ -342,6 +343,12 @@ class FakeAws:
         # （AWSの通常の遷移か、同時期の手動変更かは未確定）。wait function-updated-v2 で別の値になる
         self.in_progress_revision = None
         self.final_revision = None
+        self.on_updated = None  # 更新の完了（wait function-updated-v2）の直後に呼ぶ
+        self.upload_sha = None  # update-function-code の応答のCodeSha256を差し替える
+        self.publish_override = None  # publish-version の応答を差し替える
+        self.alias_tamper = None  # update-alias の応答を差し替える関数
+        self.fail_after = {}  # 操作名 -> 変更を反映した後に投げる例外
+        self.update_revision = None  # update-function-code の応答のRevisionId
         self.dedupe_publish = False  # True: コード・設定が同じなら既存の版を返す（AWSの仕様どおり）
         self.versions = {"1": self._snapshot("1", dl.make_description(OLD_SHA, OLD_ZIP, "100"))}
         self.alias = {"FunctionVersion": "1", "RevisionId": "a-1", "RoutingConfig": {}}
@@ -414,6 +421,8 @@ class FakeAws:
                     CodeSize=200,
                 )
                 self.in_progress_revision = None
+                if self.on_updated:
+                    self.on_updated()
             return {}
         op = args[1]
         opts = dict(zip(args[2::2], args[3::2]))
@@ -468,15 +477,17 @@ class FakeAws:
                 raise conflict
             data = Path(opts["--zip-file"].removeprefix("fileb://")).read_bytes()
             self.function["CodeSha256"] = base64.b64encode(hashlib.sha256(data).digest()).decode()
-            self.in_progress_revision = self._rev("fprogress")
+            self.in_progress_revision = self.update_revision = self._rev("fprogress")
             self.function.update(RevisionId=self.in_progress_revision, LastUpdateStatus="InProgress")
-            return {"CodeSha256": self.function["CodeSha256"], "RevisionId": self.in_progress_revision}
+            return {"CodeSha256": self.upload_sha or self.function["CodeSha256"], "RevisionId": self.in_progress_revision}
         if op == "publish-version":
             if (
                 opts["--revision-id"] != self.function["RevisionId"]
                 or opts["--code-sha256"] != self.function["CodeSha256"]
             ):
                 raise conflict
+            if self.publish_override is not None:
+                return self.publish_override
             if self.dedupe_publish:
                 for existing in self.versions.values():
                     if existing["CodeSha256"] == self.function["CodeSha256"]:
@@ -496,7 +507,10 @@ class FakeAws:
                 "RoutingConfig": {},
             }
             self.alias_revisions.append(self.alias["RevisionId"])
-            return json.loads(json.dumps(self.alias))
+            if op in self.fail_after:
+                raise self.fail_after[op]
+            result = json.loads(json.dumps(self.alias))
+            return self.alias_tamper(result) if self.alias_tamper else result
         raise AssertionError(f"想定外の操作: {op}")
 
 
@@ -519,17 +533,26 @@ class DeployTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
-        self.artifact = self.dir / "artifact"
-        self.zip_hex = make_artifact(self.artifact)
+        self.result_file = self.dir / "out" / "result.json"
+        self.use_artifact("artifact")
+        self.reset()
+
+    def reset(self):
+        """偽のAWS・スモーク・結果を作り直す（subTestの間で使う）。"""
         self.aws = FakeAws()
         self.smoke = FakeSmoke()
-        self.result_file = self.dir / "out" / "result.json"
+        self.result_file.unlink(missing_ok=True)
+
+    def use_artifact(self, name, **kwargs):
+        self.artifact = self.dir / name
+        shutil.rmtree(self.artifact, ignore_errors=True)
+        self.zip_hex = make_artifact(self.artifact, **kwargs)
 
     def deploy(self, **overrides):
-        params = dict(
+        args = dict(
             artifact_dir=self.artifact,
             source_sha=NEW_SHA,
-            zip_hex=self.zip_hex,
+            zip_sha256=self.zip_hex,
             ci_run_url="https://github.com/example/repo/actions/runs/1",
             run_id="200",
             run_attempt="1",
@@ -541,758 +564,400 @@ class DeployTestCase(unittest.TestCase):
             layer_code_sha256=LAYER_SHA,
             edge_function_arn=EDGE_ARN,
             result_file=self.result_file,
-            aws=self.aws,
-            smoke=self.smoke,
+            verify_artifact_only=False,
         )
-        params.update(overrides)
-        return dl.Deployer(**params).run()
+        args.update(overrides)
+        return dl.Deployer(SimpleNamespace(**args), self.aws, self.smoke).run()
 
     def result(self):
         return json.loads(self.result_file.read_text(encoding="utf-8"))
 
-    def assert_no_leak(self):
+    def blocked(self, expect=None, **overrides):
+        """AWSの変更もスモーク確認もせず、検証で失敗して止まる。"""
+        self.assertEqual(self.deploy(**overrides), 1)
+        result = self.result()
+        self.assertEqual(self.aws.mutating(), [])
+        self.assertEqual(result["overall"], "failed")
+        self.assertFalse(result["mutationStarted"])
+        self.assertEqual(result["alias"], "untouched")
+        self.assertEqual(self.smoke.calls, [])
+        if expect is not None:
+            self.assertIn(expect, result["error"])
         text = self.result_file.read_text(encoding="utf-8")
-        self.assertNotIn(SECRET, text)
-        self.assertNotIn(self.tmp.name, text)
-        self.assertNotIn(ACCOUNT, text)  # アカウントを含むARNの全文・IDは結果に残さない
+        for secret in (SECRET, self.tmp.name, ACCOUNT):  # 値・パス・アカウントを含むARNの全文は残さない
+            self.assertNotIn(secret, text)
+        return result
+
+    def smoke_labels(self):
+        return [(sha, label) for _, sha, label in self.smoke.calls]
 
 
-class NormalUpdate(DeployTestCase):
-    def test_updates_alias_and_records_success(self):
+def opt(call, name):
+    return call[call.index(name) + 1]
+
+
+class Lifecycle(DeployTestCase):
+    """配布の順序・条件付き更新・成功の記録（通常の更新）。"""
+
+    def test_new_version_is_published_then_the_alias_switched_in_order(self):
+        seen = {}
+        self.smoke.hook = lambda label: seen.update({label: self.aws.mutating()})
         self.assertEqual(self.deploy(), 0)
         result = self.result()
-        self.assertEqual(result["overall"], "success")
-        self.assertEqual(result["deployment"], "completed")
-        self.assertEqual(result["previousSmoke"], "passed")
-        self.assertEqual(result["smoke"], "passed")
-        self.assertEqual(result["rollback"], "not-needed")
-        self.assertEqual(result["versions"], {"previous": "1", "new": "2", "reused": False})
+        self.assertEqual(
+            (result["overall"], result["stage"], result["rollback"], result["alias"]),
+            ("success", "done", "not-needed", "switched"),
+        )
+        self.assertEqual(result["versions"], {"previous": "1", "new": "2"})
+        self.assertEqual(result["smoke"], {"previous": "passed", "new": "passed", "rollback": "not-run"})
         self.assertTrue(result["mutationStarted"])
+        self.assertIsNone(result["recoveryNote"])
         self.assertEqual(self.aws.alias["FunctionVersion"], "2")
-        self.assertEqual(result["lastGood"]["version"], "2")
         self.assertEqual(
             dl.parse_description(self.aws.versions["2"]["Description"]),
             {"source": NEW_SHA, "zip": self.zip_hex, "run": "200"},
         )
+        steps = [c[1] if c[1] != "wait" else "wait:" + c[2] for c in self.aws.calls if c[1] in MUTATING | {"wait"}]
         self.assertEqual(
-            self.aws.mutating(),
-            ["update-function-code", "publish-version", "update-alias"],
+            steps,
+            ["update-function-code", "wait:function-updated-v2", "publish-version", "wait:function-active-v2", "update-alias"],
         )
-        # 現在版 → 新しい版の順にスモーク確認し、期待SHAを取り違えない
-        self.assertEqual(
-            [(sha, label) for _, sha, label in self.smoke.calls],
-            [(OLD_SHA, "previous"), (NEW_SHA, "new")],
-        )
-        # スモーク確認は公開URL（CloudFront）だけで行う。関数URLへのフォールバックはない
+        ops = self.aws.ops()
+        for read in ("get-function-concurrency", "get-layer-version-by-arn", "get-policy", "get-distribution"):
+            self.assertLess(ops.index(read), ops.index("update-function-code"))
+        # 現行版は変更の前、新しい版は切り替えの後。公開URL（CloudFront）だけで、期待SHAを取り違えない
+        self.assertEqual(seen, {"previous": [], "new": ["update-function-code", "publish-version", "update-alias"]})
+        self.assertEqual(self.smoke_labels(), [(OLD_SHA, "previous"), (NEW_SHA, "new")])
         self.assertEqual({url for url, _, _ in self.smoke.calls}, {BASE_URL})
-        self.assertEqual(result["publicPath"], "passed")
-        self.assert_no_leak()
 
-
-class FailedSmokeRollsBack(DeployTestCase):
-    def test_failed_new_smoke_restores_previous_and_stays_failed(self):
-        self.smoke.outcomes["new"] = False
-        self.assertEqual(self.deploy(), 1)
-        result = self.result()
-        self.assertEqual(result["overall"], "failed")
-        self.assertEqual(result["deployment"], "completed")  # 配布処理とスモークは別に記録
-        self.assertEqual(result["smoke"], "failed")
-        self.assertEqual(result["rollback"], "succeeded")
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-        self.assertEqual(result["alias"]["state"], "rolled-back")
-        self.assertEqual(result["lastGood"]["version"], "1")
-        self.assertIn("2", self.aws.versions)  # 失敗した版も残す
-        self.assertEqual(
-            [(sha, label) for _, sha, label in self.smoke.calls][-1], (OLD_SHA, "rollback")
+    def test_every_write_is_conditional_on_the_revision_it_was_validated_against(self):
+        self.assertEqual(self.deploy(), 0)
+        update, publish, alias = (
+            next(c for c in self.aws.calls if c[1] == op) for op in ("update-function-code", "publish-version", "update-alias")
         )
-        self.assert_no_leak()
+        self.assertEqual(opt(update, "--revision-id"), "f-1")  # 検証時のRevisionId
+        # 発行は、更新の応答ではなく、完了後に読み直したRevisionIdとコードのハッシュが条件
+        self.assertNotEqual(self.aws.update_revision, self.aws.final_revision)
+        self.assertEqual(opt(publish, "--revision-id"), self.aws.final_revision)
+        self.assertEqual(opt(publish, "--code-sha256"), code_sha(self.zip_hex))
+        self.assertEqual(opt(alias, "--revision-id"), "a-1")  # 検証時のエイリアスのRevisionId
+        self.assertEqual(opt(alias, "--function-version"), "2")
+        self.assertEqual(json.loads(opt(alias, "--routing-config")), {"AdditionalVersionWeights": {}})
 
-    def test_rollback_uses_revision_returned_by_our_update(self):
-        self.smoke.outcomes["new"] = False
-        self.deploy()
-        updates = [call for call in self.aws.calls if call[1] == "update-alias"]
-        self.assertEqual(len(updates), 2)
-        # 戻しには、こちらの最初の更新が返したRevisionIdを使う（読み直した値や固定値ではない）
-        self.assertEqual(updates[0][updates[0].index("--revision-id") + 1], "a-1")
-        self.assertEqual(
-            updates[1][updates[1].index("--revision-id") + 1], self.aws.alias_revisions[0]
-        )
-
-    def test_rollback_failure_is_recorded_when_alias_changed_externally(self):
-        self.smoke.outcomes["new"] = False
-
-        def external_change(label):
-            if label == "new":
-                self.aws.alias["RevisionId"] = "a-external"
-
-        self.smoke.hook = external_change
-        self.assertEqual(self.deploy(), 1)
+    def test_already_current_is_a_no_change_success_only_when_the_current_version_is_healthy(self):
+        self.aws.versions["1"] = self.aws._snapshot("1", dl.make_description(NEW_SHA, self.zip_hex, "100"))
+        self.aws.versions["1"]["CodeSha256"] = code_sha(self.zip_hex)
+        self.assertEqual(self.deploy(), 0)
         result = self.result()
-        self.assertEqual(result["rollback"], "failed")
-        self.assertIn("手動復旧", result["recoveryNote"])
-        self.assertEqual(result["overall"], "failed")
-        self.assertEqual(self.aws.alias["RevisionId"], "a-external")  # 上書きしない
-        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
-        self.assertEqual(set(self.aws.versions), {"1", "2"})
-
-    def test_rollback_smoke_failure_is_distinct(self):
-        self.smoke.outcomes.update({"new": False, "rollback": False})
-        self.assertEqual(self.deploy(), 1)
-        result = self.result()
-        self.assertEqual(result["rollback"], "alias-restored-smoke-failed")
-        self.assertIsNone(result["lastGood"])
-
-
-class FailClosedBeforeMutation(DeployTestCase):
-    def assert_untouched(self, code):
-        self.assertEqual(code, 1)
-        self.assertEqual(self.aws.mutating(), [])
-        self.assertEqual(self.result()["overall"], "failed")
-        self.assertEqual(self.result()["deployment"], "not-started")
-        self.assert_no_leak()
-
-    def test_zip_tamper_blocks_all_aws_calls(self):
-        (self.artifact / f"lambda-{NEW_SHA}.zip").write_bytes(b"tampered")
-        self.assert_untouched(self.deploy())
-        self.assertEqual(self.aws.calls, [])
-
-    def test_manifest_tamper_blocks(self):
-        path = self.artifact / "manifest.json"
-        manifest = json.loads(path.read_text())
-        manifest["releaseEligible"] = False
-        path.write_text(json.dumps(manifest))
-        self.assert_untouched(self.deploy())
-        self.assertEqual(self.aws.calls, [])
-
-    def test_manifest_with_other_layer_blocks(self):
-        path = self.artifact / "manifest.json"
-        manifest = json.loads(path.read_text())
-        manifest["adapter"]["layerArn"] = "arn:aws:lambda:ap-northeast-1:111111111111:layer:Evil:1"
-        path.write_text(json.dumps(manifest))
-        self.assert_untouched(self.deploy())
-
-    def test_zip_hash_must_match_build_output(self):
-        self.assert_untouched(self.deploy(zip_hex="0" * 64))
-        self.assertEqual(self.aws.calls, [])
-
-    def test_extra_file_in_artifact_blocks(self):
-        (self.artifact / "extra.txt").write_text("x")
-        self.assert_untouched(self.deploy())
-
-    def test_prior_bad_health_blocks_mutation(self):
+        self.assertEqual((result["overall"], result["stage"]), ("no-change-success", "done"))
+        self.assertIn("新しい配布の成功ではない", result["note"])
+        self.assertEqual((self.aws.mutating(), self.smoke_labels()), ([], [(NEW_SHA, "previous")]))
+        self.assertFalse(result["mutationStarted"])
+        # 同じSHA・ZIPでも、現行版のスモーク確認が失敗すれば、成功にせず止まる
+        self.reset()
+        self.aws.versions["1"] = self.aws._snapshot("1", dl.make_description(NEW_SHA, self.zip_hex, "100"))
+        self.aws.versions["1"]["CodeSha256"] = code_sha(self.zip_hex)
         self.smoke.outcomes["previous"] = False
-        self.assert_untouched(self.deploy())
-        self.assertEqual(self.result()["previousSmoke"], "failed")
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.result()["overall"], "failed")
+        self.assertEqual(self.aws.mutating(), [])
 
-    def test_wrong_runtime_blocks(self):
-        self.aws.function["Runtime"] = "python3.13"
-        self.assert_untouched(self.deploy())
+    def test_same_source_with_a_different_zip_is_a_normal_update(self):
+        self.aws.versions["1"] = self.aws._snapshot("1", dl.make_description(NEW_SHA, OLD_ZIP, "100"))
+        self.assertEqual(self.deploy(), 0)
+        self.assertEqual(self.result()["overall"], "success")
+        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
 
-    def test_wrong_layer_blocks(self):
-        self.aws.function["Layers"] = [{"Arn": "arn:aws:lambda:ap-northeast-1:1:layer:X:1"}]
-        self.assert_untouched(self.deploy())
+    def test_unhealthy_current_version_blocks_any_change(self):
+        self.smoke.outcomes["previous"] = False
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.aws.mutating(), [])
+        self.assertEqual(self.result()["smoke"]["previous"], "failed")
 
-    def test_missing_exec_wrapper_blocks(self):
-        del self.aws.function["Environment"]["Variables"]["AWS_LAMBDA_EXEC_WRAPPER"]
-        self.assert_untouched(self.deploy())
-
-    def test_layer_hash_mismatch_blocks(self):
-        self.aws.layer = {"Content": {"CodeSha256": "B" * 43 + "="}}
-        self.assert_untouched(self.deploy())
-
-    def test_function_url_not_matching_the_cloudfront_origin_blocks(self):
-        # 実際の関数URLが、CloudFrontのオリジンのホストと違う
-        self.aws.url["FunctionUrl"] = "https://zzzzzzzz12345678.lambda-url.ap-northeast-1.on.aws/"
-        self.assert_untouched(self.deploy())
-
-    def test_function_url_auth_must_be_aws_iam(self):
-        self.aws.url["AuthType"] = "NONE"  # 直接公開（旧方式）は許さない
-        self.assert_untouched(self.deploy())
-        self.assertNotIn("get-distribution", self.aws.ops())
-
-    def test_weighted_alias_rejected(self):
-        self.aws.alias["RoutingConfig"] = {"AdditionalVersionWeights": {"1": 0.1}}
-        self.assert_untouched(self.deploy())
-
-    def test_previous_version_without_metadata_rejected(self):
-        self.aws.versions["1"]["Description"] = "manual upload"
-        self.assert_untouched(self.deploy())
-
-    def test_previous_description_must_match_code_hash(self):
-        self.aws.versions["1"]["CodeSha256"] = code_sha(hashlib.sha256(b"other").hexdigest())
-        self.assert_untouched(self.deploy())
-
-    def test_latest_alias_target_rejected(self):
-        self.aws.alias["FunctionVersion"] = "$LATEST"
-        self.assert_untouched(self.deploy())
+    def test_reserved_concurrency_must_be_exactly_three_and_is_never_changed(self):
+        bad = {"missing": {}, "null": {"ReservedConcurrentExecutions": None}, "zero": {"ReservedConcurrentExecutions": 0}}
+        bad.update({str(v): {"ReservedConcurrentExecutions": v} for v in (1, 2, 4, -1, True, "3", 3.0)})
+        for name, response in bad.items():
+            with self.subTest(name):
+                self.reset()
+                self.aws.concurrency = response
+                self.blocked("3ではありません")
+                self.assertEqual([c for c in self.aws.calls if c[1].endswith("function-concurrency")],
+                                 [["lambda", "get-function-concurrency", "--function-name", FUNCTION]])
+        self.reset()
+        self.aws.fail["get-function-concurrency"] = dl.AwsError("lambda get-function-concurrency", 254)
+        self.blocked("AWS操作に失敗")
 
 
-class RacesAndErrors(DeployTestCase):
-    def test_alias_race_does_not_clobber_or_roll_back(self):
-        def external_change():
-            self.aws.alias = {"FunctionVersion": "1", "RevisionId": "a-external", "RoutingConfig": {}}
+# (名前, 変更前の検証で拒否されるべき偽AWSの状態を作る関数, エラーに含まれる文字列)
+VALIDATION_CASES = [
+    ("runtime", lambda t: t.aws.function.update(Runtime="python3.13"), "runtime"),
+    ("architecture", lambda t: t.aws.function.update(Architectures=["arm64"]), "architecture"),
+    ("handler", lambda t: t.aws.function.update(Handler="other"), "handler"),
+    ("layer", lambda t: t.aws.function.update(Layers=[{"Arn": dl.PINNED_LAYER_ARN + "9"}]), "layers"),
+    ("exec-wrapper", lambda t: t.aws.function["Environment"]["Variables"].pop("AWS_LAMBDA_EXEC_WRAPPER"), "execWrapper"),
+    ("port", lambda t: t.aws.function["Environment"]["Variables"].update(PORT="1"), "port"),
+    ("state", lambda t: t.aws.function.update(State="Failed"), "state"),
+    ("function-revision-missing", lambda t: t.aws.function.update(RevisionId=""), "revisionId"),
+    ("layer-hash", lambda t: t.aws.layer["Content"].update(CodeSha256="x"), "レイヤー"),
+    ("alias-weighted", lambda t: t.aws.alias.update(RoutingConfig={"AdditionalVersionWeights": {"2": 0.1}}), "加重"),
+    ("alias-latest", lambda t: t.aws.alias.update(FunctionVersion="$LATEST"), "数値の版"),
+    ("alias-revision-missing", lambda t: t.aws.alias.pop("RevisionId"), "RevisionId"),
+    ("previous-without-provenance", lambda t: t.aws.versions["1"].update(Description="manual"), "出所情報"),
+    ("previous-code-differs", lambda t: t.aws.versions["1"].update(CodeSha256="x"), "ハッシュ"),
+]
 
-        self.aws.before["update-alias"] = external_change
+
+class RejectedBeforeMutation(DeployTestCase):
+    def test_each_unsafe_state_is_rejected_before_any_change(self):
+        for name, mutate, expect in VALIDATION_CASES:
+            with self.subTest(name):
+                self.reset()
+                mutate(self)
+                self.blocked(expect)
+
+    def test_tampered_artifacts_are_rejected_before_any_aws_call(self):
+        def zip_bytes(t):
+            (t.artifact / f"lambda-{NEW_SHA}.zip").write_bytes(b"tampered")
+
+        def manifest(**changes):
+            def edit(t):
+                path = t.artifact / "manifest.json"
+                data = json.loads(path.read_text())
+                data.update(changes)
+                path.write_text(json.dumps(data))
+
+            return edit
+
+        def other_layer(t):
+            path = t.artifact / "manifest.json"
+            data = json.loads(path.read_text())
+            data["adapter"]["layerArn"] = dl.PINNED_LAYER_ARN + "9"
+            path.write_text(json.dumps(data))
+
+        cases = {
+            "zip": zip_bytes,
+            "dirty": manifest(dirty=True),
+            "not-release-eligible": manifest(releaseEligible=False),
+            "other-source": manifest(sourceSHA=OTHER_SHA),
+            "other-layer": other_layer,
+            "extra-file": lambda t: (t.artifact / "extra.txt").write_text("x"),
+        }
+        for name, tamper in cases.items():
+            with self.subTest(name):
+                self.reset()
+                self.use_artifact(f"tampered-{name}")  # 検査ごとに新しい成果物
+                tamper(self)
+                self.assertEqual(self.deploy(), 1)
+                self.assertEqual(self.aws.calls, [])
+                self.assertEqual(self.result()["overall"], "failed")
+        self.reset()
+        self.use_artifact("hash-mismatch")  # ビルドの出力したハッシュと違うZIPは受け付けない
+        self.assertEqual(self.deploy(zip_sha256="0" * 64), 1)
+        self.assertEqual(self.aws.calls, [])
+
+    def test_failed_function_update_is_recorded_as_started(self):
+        self.aws.fail["update-function-code"] = dl.AwsError("lambda update-function-code", 255)
         self.assertEqual(self.deploy(), 1)
         result = self.result()
-        self.assertEqual(self.aws.ops().count("update-alias"), 1)  # 戻し処理もしない
-        self.assertEqual(self.aws.alias["RevisionId"], "a-external")
-        self.assertEqual(result["alias"]["state"], "conflict-not-switched")
-        self.assertEqual(result["rollback"], "not-needed")
-        self.assertEqual(result["smoke"], "not-run")
-        self.assertEqual(result["deployment"], "failed")
-        self.assertIn("2", self.aws.versions)
-        self.assertEqual(self.smoke.calls[-1][2], "previous")  # 新しい版のスモークはしない
+        self.assertTrue(result["mutationStarted"])
+        self.assertEqual((result["overall"], result["alias"]), ("failed", "untouched"))
+        self.assertIn("終了コード 255", result["error"])
+        self.assertEqual(self.aws.mutating(), ["update-function-code"])
 
-    def test_function_revision_race_stops_before_alias(self):
-        self.aws.before["update-function-code"] = lambda: self.aws.function.update(RevisionId="f-ext")
+    def test_unexpected_exceptions_and_aws_errors_do_not_leak_values(self):
+        self.aws.fail["get-alias"] = RuntimeError(SECRET)
+        self.assertEqual(self.deploy(), 1)
+        self.assertEqual(self.result()["error"], "想定外のエラー: RuntimeError")
+        self.assertNotIn(SECRET, self.result_file.read_text())
+        self.assertEqual(str(dl.AwsError("lambda get-alias", 254)), "AWS操作に失敗: lambda get-alias (終了コード 254)")
+
+
+class RevisionRaces(DeployTestCase):
+    """検証後に関数・エイリアスが変わったら、条件付き更新が拒否され、先へ進まない。"""
+
+    def test_function_changed_after_validation_stops_the_code_update(self):
+        self.aws.before["update-function-code"] = lambda: self.aws.function.update(RevisionId="f-external")
         self.assertEqual(self.deploy(), 1)
         self.assertEqual(self.aws.mutating(), ["update-function-code"])
         self.assertEqual(self.aws.alias["FunctionVersion"], "1")
 
-    def test_code_sha_mismatch_after_upload_stops_before_publish(self):
-        original = self.aws.__call__
-
-        def tampered(args):
-            response = original(args)
-            if args[1] == "update-function-code":
-                response["CodeSha256"] = code_sha(hashlib.sha256(b"x").hexdigest())
-            return response
-
-        self.assertEqual(self.deploy(aws=tampered), 1)
-        self.assertNotIn("publish-version", self.aws.ops())
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-
-    def test_ambiguous_alias_error_that_did_switch_needs_manual_recovery(self):
-        """応答が失われた更新は、実際に切り替わっていても自動では戻さない（読み直した値は根拠にしない）。"""
-        original = self.aws.__call__
-
-        def flaky(args):
-            response = original(args)
-            if args[1] == "update-alias":
-                raise dl.AwsError("update-alias", 255)  # 応答が失われた想定
-            return response
-
-        self.assertEqual(self.deploy(aws=flaky), 1)
-        result = self.result()
-        self.assertEqual(self.aws.ops().count("update-alias"), 1)  # 戻しの更新をしない
-        self.assertEqual(self.aws.alias["FunctionVersion"], "2")  # 上書きしない
-        self.assertEqual(result["rollback"], "not-needed")
-        self.assertEqual(result["overall"], "failed")
-        self.assertEqual(result["deployment"], "alias-outcome-unknown")
-        self.assertEqual(result["alias"]["state"], "unknown-outcome")
-        self.assertEqual(result["alias"]["version"], "2")  # 観測値（こちらの結果とは限らない）
-        self.assertIn("人が", result["recoveryNote"])
-        self.assertEqual(result["smoke"], "not-run")
-        self.assertEqual(self.smoke.calls[-1][2], "previous")
-
-    def test_unknown_alias_outcome_never_rolls_back_an_external_change(self):
-        """読み直したRevisionIdが外部のものでも、それを使った戻しをしない。"""
-
-        def external_change():
-            self.aws.alias = {"FunctionVersion": "2", "RevisionId": "a-external", "RoutingConfig": {}}
-
-        self.aws.before["update-alias"] = external_change
-        self.aws.fail["update-alias"] = dl.AwsError("update-alias", 255)
+    def test_function_changed_after_the_completed_read_stops_publishing(self):
+        self.aws.before["publish-version"] = lambda: self.aws.function.update(RevisionId="f-external")
         self.assertEqual(self.deploy(), 1)
-        result = self.result()
-        self.assertEqual(self.aws.ops().count("update-alias"), 1)
-        self.assertEqual(self.aws.alias["RevisionId"], "a-external")
-        self.assertEqual(result["alias"]["state"], "unknown-outcome")
-        self.assertEqual(result["rollback"], "not-needed")
+        self.assertEqual(self.aws.mutating(), ["update-function-code", "publish-version"])
+        self.assertEqual((set(self.aws.versions), self.aws.alias["FunctionVersion"]), ({"1"}, "1"))
 
-    def test_unreadable_alias_after_unknown_outcome_is_recorded_without_values(self):
-        self.aws.fail["update-alias"] = dl.AwsError("update-alias", 255)
-        original = self.aws.__call__
+    def test_state_after_the_update_is_checked_before_publishing(self):
+        cases = {
+            "update-failed": (lambda f: f.update(LastUpdateStatus="Failed"), "lastUpdateStatus"),
+            "status-key-missing": (lambda f: f.pop("LastUpdateStatus"), "lastUpdateStatus"),
+            "state-key-missing": (lambda f: f.pop("State"), "state"),
+            "revision-empty": (lambda f: f.update(RevisionId=""), "revisionId"),
+            "code-changed": (lambda f: f.update(CodeSha256=code_sha(OLD_ZIP)), "codeSha256"),
+            "runtime-changed": (lambda f: f.update(Runtime="python3.13"), "runtime"),
+            "layer-changed": (lambda f: f.update(Layers=[]), "layers"),
+        }
+        for name, (change, expect) in cases.items():
+            with self.subTest(name):
+                self.reset()
+                self.aws.on_updated = lambda change=change: change(self.aws.function)
+                self.assertEqual(self.deploy(), 1)
+                self.assertIn(expect, self.result()["error"])
+                self.assertIn("発行しません", self.result()["error"])
+                self.assertEqual(self.aws.mutating(), ["update-function-code"])
 
-        def no_alias_read_after(args):
-            if args[1] == "get-alias" and self.aws.ops().count("update-alias") >= 1:
-                raise dl.AwsError("get-alias", 255)
-            return original(args)
-
-        self.assertEqual(self.deploy(aws=no_alias_read_after), 1)
-        alias = self.result()["alias"]
-        self.assertEqual((alias["state"], alias["version"], alias["revisionId"]), ("unknown-outcome", None, None))
-
-    def test_malformed_alias_update_response_is_unknown_outcome(self):
-        original = self.aws.__call__
-
-        def malformed(args):
-            response = original(args)
-            if args[1] == "update-alias":
-                response["FunctionVersion"] = "1"  # 期待と異なる応答
-            return response
-
-        self.assertEqual(self.deploy(aws=malformed), 1)
-        result = self.result()
-        self.assertEqual(self.aws.ops().count("update-alias"), 1)
-        self.assertEqual(result["alias"]["state"], "unknown-outcome")
-        self.assertEqual(result["smoke"], "not-run")
-
-    def test_alias_conflict_does_not_claim_previous_version_as_actual(self):
-        def external_change():
-            self.aws.alias = {"FunctionVersion": "1", "RevisionId": "a-external", "RoutingConfig": {}}
-
-        self.aws.before["update-alias"] = external_change
-        self.deploy()
-        alias = self.result()["alias"]
-        self.assertIsNone(alias["version"])
-        self.assertIn("不明", self.result()["recoveryNote"])
-
-    def test_unexpected_exception_is_sanitized(self):
-        self.aws.fail["publish-version"] = RuntimeError(SECRET)
+    def test_upload_hash_mismatch_stops_before_publishing(self):
+        self.aws.upload_sha = code_sha(OLD_ZIP)
         self.assertEqual(self.deploy(), 1)
-        result = self.result()
-        self.assertEqual(result["error"], "想定外のエラー: RuntimeError")
-        self.assert_no_leak()
-
-    def test_aws_error_message_has_operation_and_code_only(self):
-        error = dl.AwsError("lambda publish-version", 254)
-        self.assertEqual(str(error), "AWS操作に失敗: lambda publish-version (終了コード 254)")
-
-    def test_result_written_at_each_stage_for_kill_recovery(self):
-        seen = []
-        original = self.aws.__call__
-
-        def spy(args):
-            if args[1] == "update-alias" and self.result_file.exists():
-                seen.append(self.result())
-            return original(args)
-
-        self.deploy(aws=spy)
-        self.assertEqual(seen[0]["overall"], "in-progress")
-        self.assertEqual(seen[0]["stage"], "switch-alias")
-        self.assertIn("版 1", seen[0]["recoveryNote"])
+        self.assertEqual(self.aws.mutating(), ["update-function-code"])
+        self.assertIn("CodeSha256", self.result()["error"])
 
 
-class RollbackResponseValidation(DeployTestCase):
-    def deploy_with_bad_rollback_response(self, tamper):
-        self.smoke.outcomes["new"] = False
-        original = self.aws.__call__
-        count = {"n": 0}
+class PublishedVersion(DeployTestCase):
+    """発行された版（前回の試行が残した同一内容の版を含む）を確認してから、エイリアスを動かす。"""
 
-        def wrapped(args):
-            response = original(args)
-            if args[1] == "update-alias":
-                count["n"] += 1
-                if count["n"] == 2:  # 戻しの更新の応答だけを壊す
-                    tamper(response)
-            return response
-
-        return self.deploy(aws=wrapped)
-
-    def assert_manual_recovery(self):
-        result = self.result()
-        self.assertEqual(result["rollback"], "failed")
-        self.assertEqual(result["alias"]["state"], "unknown-outcome")
-        self.assertEqual(result["overall"], "failed")
-        self.assertIn("手動復旧", result["recoveryNote"])
-        # 戻しのスモーク確認は、応答を検証できないので行わない
-        self.assertNotIn("rollback", [label for _, _, label in self.smoke.calls])
-
-    def test_rollback_response_without_revision_is_failed(self):
-        self.assertEqual(self.deploy_with_bad_rollback_response(lambda r: r.pop("RevisionId")), 1)
-        self.assert_manual_recovery()
-
-    def test_rollback_response_with_wrong_version_is_failed(self):
-        self.assertEqual(
-            self.deploy_with_bad_rollback_response(lambda r: r.update(FunctionVersion="2")), 1
-        )
-        self.assert_manual_recovery()
-
-
-class AlreadyCurrent(DeployTestCase):
-    def make_current(self):
-        """エイリアスの版が、今回と同じソースSHA・ZIPで発行済みの状態にする。"""
-        sha = code_sha(self.zip_hex)
-        self.aws.function["CodeSha256"] = sha
-        self.aws.versions["1"] = self.aws._snapshot(
-            "1", dl.make_description(NEW_SHA, self.zip_hex, "100")
-        )
-
-    def test_same_source_and_zip_is_explicit_no_change_success(self):
-        self.make_current()
-        self.assertEqual(self.deploy(), 0)
-        result = self.result()
-        self.assertEqual(result["overall"], "no-change-success")
-        self.assertEqual(result["deployment"], "already-current")
-        self.assertEqual(result["smoke"], "not-run")  # 新しい配布のスモーク確認はしていない
-        self.assertEqual(result["previousSmoke"], "passed")
-        self.assertIsNone(result["versions"]["new"])
-        self.assertFalse(result["mutationStarted"])
-        self.assertIn("新しい配布の成功ではない", result["note"])
-        self.assertEqual(self.aws.mutating(), [])
-        self.assertEqual(set(self.aws.versions), {"1"})
-        self.assertEqual([(sha, label) for _, sha, label in self.smoke.calls], [(NEW_SHA, "previous")])
-
-    def test_failed_previous_smoke_is_not_a_no_change_success(self):
-        self.make_current()
-        self.smoke.outcomes["previous"] = False
-        self.assertEqual(self.deploy(), 1)
-        self.assertEqual(self.result()["overall"], "failed")
-        self.assertEqual(self.aws.mutating(), [])
-
-    def test_same_source_with_different_zip_is_a_normal_update(self):
-        self.aws.versions["1"] = self.aws._snapshot(
-            "1", dl.make_description(NEW_SHA, OLD_ZIP, "100")
-        )
-        self.assertEqual(self.deploy(), 0)
-        self.assertEqual(self.result()["overall"], "success")
-        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
-
-
-class ExistingPublishedVersion(DeployTestCase):
-    """前回の試行が版を発行した後に止まった場合。AWSは同一内容なら既存の版を返す。"""
-
-    def prepare(self, description=None):
+    def stage_existing(self, description=None, **changes):
+        """前回の試行が発行して止まった版2。AWSは、同じコード・設定なら新しい版を作らず、これを返す。"""
         self.aws.dedupe_publish = True
-        self.aws.function["CodeSha256"] = code_sha(self.zip_hex)
         self.aws.versions["2"] = self.aws._snapshot(
             "2", description or dl.make_description(NEW_SHA, self.zip_hex, "150")
         )
+        self.aws.versions["2"]["CodeSha256"] = code_sha(self.zip_hex)
+        self.aws.versions["2"].update(changes)
 
-    def test_provable_existing_version_is_reused(self):
-        self.prepare()
+    def test_provable_version_from_an_earlier_attempt_is_used_without_creating_another(self):
+        self.stage_existing()  # run番号だけが今回と違う
         self.assertEqual(self.deploy(), 0)
-        result = self.result()
-        self.assertEqual(result["overall"], "success")
-        self.assertEqual(result["versions"], {"previous": "1", "new": "2", "reused": True})
-        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
-        self.assertEqual(set(self.aws.versions), {"1", "2"})  # 新しい版は作っていない
+        self.assertEqual(set(self.aws.versions), {"1", "2"})
+        self.assertEqual((self.result()["versions"]["new"], self.aws.alias["FunctionVersion"]), ("2", "2"))
 
-    def test_existing_version_from_another_source_fails_closed(self):
-        self.prepare(dl.make_description(OTHER_SHA, self.zip_hex, "150"))
+    def test_unprovable_or_current_version_is_never_switched_to(self):
+        other = dl.make_description(OTHER_SHA, self.zip_hex, "150")
+        cases = {
+            "other-source": dict(description=other),
+            "no-provenance": dict(description="manual"),
+            "different-checked-config": dict(Runtime="python3.13"),
+            "is-the-current-version": dict(),
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name):
+                self.reset()
+                self.stage_existing(**kwargs)
+                if name == "is-the-current-version":  # 現在のエイリアスの版と同一内容として返る
+                    self.aws.versions["1"] = self.aws._snapshot(
+                        "1", dl.make_description(OLD_SHA, self.zip_hex, "100")
+                    )
+                    self.aws.versions["1"]["CodeSha256"] = code_sha(self.zip_hex)
+                    del self.aws.versions["2"]
+                self.assertEqual(self.deploy(), 1)
+                self.assertIn("手動で確認", self.result()["error"])
+                self.assertEqual(self.aws.mutating(), ["update-function-code", "publish-version"])
+                self.assertEqual(self.aws.alias["FunctionVersion"], "1")
+                self.assertEqual(self.result()["alias"], "untouched")
+
+    def test_a_pending_version_is_waited_for_and_a_failed_wait_leaves_the_alias(self):
+        self.aws.pending_publish = True
+        self.assertEqual(self.deploy(), 0)
+        self.reset()
+        self.aws.pending_publish = True
+        self.aws.wait_fail["function-active-v2"] = dl.AwsError("lambda wait", 255)
         self.assertEqual(self.deploy(), 1)
-        result = self.result()
-        self.assertIn("手動", result["error"])
+        self.assertEqual(self.aws.mutating(), ["update-function-code", "publish-version"])
         self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-        self.assertNotIn("update-alias", self.aws.ops())
 
-    def test_existing_version_without_provenance_fails_closed(self):
-        self.prepare("manual upload")
+    def test_malformed_publish_response_stops_before_the_alias(self):
+        self.aws.publish_override = {"Version": "$LATEST"}
         self.assertEqual(self.deploy(), 1)
         self.assertNotIn("update-alias", self.aws.ops())
 
-    def test_existing_version_with_different_checked_config_fails_closed(self):
-        self.prepare()
-        self.aws.versions["2"]["Layers"] = [{"Arn": "arn:aws:lambda:ap-northeast-1:1:layer:X:1"}]
-        self.assertEqual(self.deploy(), 1)
-        self.assertIn("layers", self.result()["error"])
-        self.assertNotIn("update-alias", self.aws.ops())
 
-    def test_never_changes_configuration_to_force_a_version(self):
-        self.prepare(dl.make_description(OTHER_SHA, self.zip_hex, "150"))
+class AliasSwitchAndRollback(DeployTestCase):
+    def test_failed_new_smoke_restores_the_previous_version_with_our_own_revision(self):
+        self.smoke.outcomes["new"] = False
+        self.assertEqual(self.deploy(), 1)
+        result = self.result()
+        self.assertEqual((result["overall"], result["rollback"], result["alias"]), ("failed", "succeeded", "rolled-back"))
+        self.assertEqual(result["smoke"], {"previous": "passed", "new": "failed", "rollback": "passed"})
+        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
+        self.assertIn("2", self.aws.versions)  # 失敗した版も消さない
+        self.assertIsNone(result["recoveryNote"])
+        self.assertEqual(self.smoke_labels()[-1], (OLD_SHA, "rollback"))
+        first, second = [c for c in self.aws.calls if c[1] == "update-alias"]
+        self.assertEqual(opt(first, "--revision-id"), "a-1")
+        self.assertEqual(opt(second, "--revision-id"), self.aws.alias_revisions[0])  # 読み直した値ではない
+        self.assertEqual(opt(second, "--function-version"), "1")
+
+    def test_restored_alias_that_fails_its_smoke_is_reported_distinctly(self):
+        self.smoke.outcomes.update({"new": False, "rollback": False})
+        self.assertEqual(self.deploy(), 1)
+        result = self.result()
+        self.assertEqual((result["rollback"], result["alias"]), ("alias-restored-smoke-failed", "rolled-back"))
+        self.assertIsNotNone(result["recoveryNote"])
+
+    def test_alias_changed_by_someone_else_is_never_overwritten_by_the_rollback(self):
+        self.smoke.outcomes["new"] = False
+        self.smoke.hook = lambda label: self.aws.alias.update(RevisionId="a-external") if label == "new" else None
+        self.assertEqual(self.deploy(), 1)
+        result = self.result()
+        self.assertEqual((result["rollback"], result["alias"]), ("failed", "unknown"))
+        self.assertIn("get-alias", result["recoveryNote"])
+        self.assertEqual((self.aws.alias["RevisionId"], self.aws.alias["FunctionVersion"]), ("a-external", "2"))
+        self.assertEqual(self.smoke_labels(), [(OLD_SHA, "previous"), (NEW_SHA, "new")])  # 戻した版のスモークはしない
+
+    def test_rollback_response_that_cannot_be_trusted_is_a_failed_rollback(self):
+        for name, tamper in (
+            ("wrong-version", lambda r: {**r, "FunctionVersion": "2"}),
+            ("no-revision", lambda r: {k: v for k, v in r.items() if k != "RevisionId"}),
+        ):
+            with self.subTest(name):
+                self.reset()
+                self.smoke.outcomes["new"] = False
+                self.aws.alias_tamper = lambda r, tamper=tamper: tamper(r) if r["FunctionVersion"] == "1" else r
+                self.assertEqual(self.deploy(), 1)
+                self.assertEqual(self.result()["rollback"], "failed")
+                self.assertNotIn("rollback", [label for _, _, label in self.smoke.calls])
+
+    def test_uncertain_switch_is_never_rolled_back_or_called_a_success(self):
+        def conflict():
+            self.aws.alias.update(RevisionId="a-external")
+
+        cases = {
+            "conflict": (lambda: setattr(self.aws, "before", {"update-alias": conflict}), "外部で変更"),
+            "error-after-switching": (lambda: setattr(self.aws, "fail_after", {"update-alias": dl.AwsError("x", 255)}), "結果が不明"),
+            "wrong-version-in-response": (lambda: setattr(self.aws, "alias_tamper", lambda r: {**r, "FunctionVersion": "9"}), "応答が期待と一致せず"),
+            "weighted-response": (lambda: setattr(self.aws, "alias_tamper", lambda r: {**r, "RoutingConfig": {"AdditionalVersionWeights": {"1": 0.5}}}), "応答が期待と一致せず"),
+            "no-revision-in-response": (lambda: setattr(self.aws, "alias_tamper", lambda r: {k: v for k, v in r.items() if k != "RevisionId"}), "応答が期待と一致せず"),
+        }
+        for name, (arrange, expect) in cases.items():
+            with self.subTest(name):
+                self.reset()
+                arrange()
+                self.assertEqual(self.deploy(), 1)
+                result = self.result()
+                self.assertEqual((result["overall"], result["alias"], result["rollback"]), ("failed", "unknown", "not-needed"))
+                self.assertIn(expect, result["error"])
+                self.assertIn("get-alias", result["recoveryNote"])
+                self.assertEqual(len([c for c in self.aws.calls if c[1] == "update-alias"]), 1)  # 戻しの更新をしない
+                self.assertEqual(result["smoke"]["new"], "not-run")
+                self.assertEqual(set(self.aws.versions), {"1", "2"})
+        # 外部の変更は上書きしない
+        self.reset()
+        self.aws.before["update-alias"] = conflict
         self.deploy()
-        self.assertEqual(
-            [op for op in self.aws.ops() if op.startswith("update-") or op.startswith("put-")],
-            ["update-function-code"],
-        )
+        self.assertEqual(self.aws.alias["RevisionId"], "a-external")
 
-
-class RevisionCapture(DeployTestCase):
-    def test_update_uses_revision_captured_at_validation(self):
+    def test_progress_is_written_before_each_risky_step_for_killed_runs(self):
+        seen = {}
+        self.aws.before["update-alias"] = lambda: seen.update(alias=self.result())
+        self.smoke.hook = lambda label: seen.update({label: self.result()})
         self.assertEqual(self.deploy(), 0)
-        update = next(call for call in self.aws.calls if call[1] == "update-function-code")
-        self.assertEqual(update[update.index("--revision-id") + 1], "f-1")
-        # 設定の読み直しは、検証（1回）と更新後（1回）と版の確認（修飾子つき）だけ
-        reads = [c for c in self.aws.calls if c[1] == "get-function-configuration" and "--qualifier" not in c]
-        self.assertEqual(len(reads), 2)
-        # 更新の直前に、設定を読み直して最新のRevisionIdを取り直してはいない
-        index = next(i for i, call in enumerate(self.aws.calls) if call[1] == "update-function-code")
-        before = self.aws.calls[index - 1]
-        self.assertTrue(before[1] != "get-function-configuration" or "--qualifier" in before)
-
-    def test_config_change_between_validation_and_update_stops_before_publish(self):
-        # 現行版のスモーク確認の間に、別の者が設定を変えた
-        self.smoke.hook = lambda label: self.aws.function.update(Runtime="python3.13", RevisionId="f-ext")
-        self.assertEqual(self.deploy(), 1)
-        self.assertEqual(self.aws.mutating(), ["update-function-code"])  # 条件付きで拒否される
-        self.assertEqual(self.aws.function["Runtime"], "python3.13")
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-        self.assertEqual(self.result()["alias"]["state"], "untouched")
-
-    def tamper_after_update(self, **changes):
-        original = self.aws.__call__
-
-        def wrapped(args):
-            response = original(args)
-            if args[1] == "wait" and args[2] == "function-updated-v2":
-                # 更新の完了の直後（完了後の読み直しの前）に、別の者が変更した
-                self.aws.function.update(changes)
-            return response
-
-        return wrapped
-
-    def test_runtime_change_between_update_and_publish_stops_before_publish(self):
-        wrapped = self.tamper_after_update(Runtime="python3.13", RevisionId="f-ext")
-        self.assertEqual(self.deploy(aws=wrapped), 1)
-        self.assertNotIn("publish-version", self.aws.ops())
-        self.assertNotIn("update-alias", self.aws.ops())
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-
-    def test_revision_only_change_before_the_completed_read_is_indistinguishable(self):
-        """完了後に読んだRevisionIdが何であれ、設定・コードが検証時と同一なら、それを条件に発行する。
-
-        読む前に別の操作があっても、版に固定される設定・コードが同一（元に戻された変更を含む）なら
-        区別できず、他者の操作が無かったとは証明できない。異なる設定・コードは比較して発行しない
-        （EveryVersionableSettingIsCompared などのテスト）。
-        """
-        wrapped = self.tamper_after_update(RevisionId="f-ext")
-        self.assertEqual(self.deploy(aws=wrapped), 0)
-        publish = next(call for call in self.aws.calls if call[1] == "publish-version")
-        self.assertEqual(publish[publish.index("--revision-id") + 1], "f-ext")
-
-    def test_change_after_the_completed_read_is_rejected_by_publish(self):
-        # 完了後の読み直しの後・発行の前に関数が変わると、発行のRevisionIdの条件が拒否する
-        self.aws.before["publish-version"] = lambda: self.aws.function.update(RevisionId="f-late")
-        self.assertEqual(self.deploy(), 1)
-        self.assertEqual(self.aws.mutating(), ["update-function-code", "publish-version"])
-        self.assertEqual(self.aws.versions.keys(), {"1"})
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-        self.assertEqual(self.result()["alias"]["state"], "untouched")
-
-
-class InProgressAndCompletedRevisions(DeployTestCase):
-    """更新の応答のRevisionIdと完了後の値が不一致でも、完了後に読み直した値で発行する。
-
-    実際のCDで不一致を観測した（原因が通常の遷移か同時期の手動変更かは未確定）。ここは偽のAWSでの
-    再現で、AWSの通常の遷移の証明ではない。
-    """
-
-    def test_publishes_with_the_completed_revision_not_the_update_response(self):
-        self.assertEqual(self.deploy(), 0)
-        self.assertIsNotNone(self.aws.final_revision)
-        update = next(call for call in self.aws.calls if call[1] == "update-function-code")
-        publish = next(call for call in self.aws.calls if call[1] == "publish-version")
-        # 更新は検証時に捕捉したRevisionId、発行は完了後に読み直したRevisionId（更新の応答の値ではない）
-        self.assertEqual(update[update.index("--revision-id") + 1], "f-1")
-        revision = publish[publish.index("--revision-id") + 1]
-        self.assertEqual(revision, self.aws.final_revision)
-        self.assertTrue(self.aws.final_revision.startswith("ffinal-"))
-        self.assertEqual(publish[publish.index("--code-sha256") + 1], code_sha(self.zip_hex))
-        result = self.result()
-        self.assertEqual((result["overall"], result["deployment"]), ("success", "completed"))
-        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
-        self.assert_no_leak()
-
-    def test_metadata_may_change_but_content_must_not(self):
-        self.assertEqual(self.deploy(), 0)
-        # 揮発性のメタデータ（更新日時・コードサイズ）は完了で変わった
-        self.assertEqual(self.aws.function["CodeSize"], 200)
-        self.assertEqual(self.aws.function["LastModified"], "2026-01-02T00:00:00.000+0000")
-
-    def changed_case(self, name, change, expect):
-        self.setUp()
-        original = self.aws.__call__
-
-        def wrapped(args):
-            response = original(args)
-            if args[1] == "wait" and args[2] == "function-updated-v2":
-                change(self.aws.function)
-            return response
-
-        self.assertEqual(self.deploy(aws=wrapped), 1, name)
-        self.assertNotIn("publish-version", self.aws.ops(), name)
-        self.assertNotIn("update-alias", self.aws.ops(), name)
-        self.assertEqual(self.aws.mutating(), ["update-function-code"], name)
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1", name)
-        result = self.result()
-        self.assertEqual(result["alias"]["state"], "untouched", name)
-        self.assertEqual(result["rollback"], "not-needed", name)
-        self.assertTrue(result["mutationStarted"], name)
-        self.assertIn(expect, result["error"], name)
-        self.assertNotIn("SECRET-2", self.result_file.read_text(encoding="utf-8"), name)
-        self.assertNotIn(SECRET, self.result_file.read_text(encoding="utf-8"), name)
-        self.assert_no_leak()
-
-    def test_changed_code_hash_fails_before_publish(self):
-        self.changed_case(
-            "code",
-            lambda f: f.update(CodeSha256=code_sha(hashlib.sha256(b"other").hexdigest())),
-            "codeSha256",
-        )
-
-    def test_empty_or_missing_completed_revision_fails_before_publish(self):
-        self.changed_case("empty", lambda f: f.update(RevisionId=""), "revisionId")
-        self.changed_case("missing", lambda f: f.pop("RevisionId"), "revisionId")
-
-    def test_failed_update_status_fails_before_publish(self):
-        self.changed_case("status", lambda f: f.update(LastUpdateStatus="Failed"), "lastUpdateStatus")
-
-    def test_final_check_requires_explicit_active_and_successful(self):
-        """完了後の最終確認は、State・LastUpdateStatus の欠落・null・別の値を許さない（発行しない）。"""
-        cases = {
-            "state-missing": (lambda f: f.pop("State"), "state"),
-            "state-null": (lambda f: f.update(State=None), "state"),
-            "state-pending": (lambda f: f.update(State="Pending"), "state"),
-            "state-failed": (lambda f: f.update(State="Failed"), "state"),
-            "status-missing": (lambda f: f.pop("LastUpdateStatus"), "lastUpdateStatus"),
-            "status-null": (lambda f: f.update(LastUpdateStatus=None), "lastUpdateStatus"),
-            "status-in-progress": (lambda f: f.update(LastUpdateStatus="InProgress"), "lastUpdateStatus"),
-        }
-        for name, (change, expect) in cases.items():
-            with self.subTest(name):
-                self.changed_case(name, change, expect)
-
-    def test_status_keys_are_tolerated_only_before_the_update(self):
-        """検証時（更新の前）は従来どおり、キーがなければ許す。最終確認だけが厳密。"""
-        config = dict(FakeAws().function)
-        del config["State"], config["LastUpdateStatus"]
-        self.assertEqual(dl.config_problems(config), [])
-        self.assertEqual(sorted(dl.config_problems(config, require_status=True)), ["lastUpdateStatus", "state"])
-        self.assertEqual(dl.config_problems(FakeAws().function, require_status=True), [])
-
-    def test_every_versionable_setting_is_compared(self):
-        """検査対象外の設定（追加の環境変数・ロール・メモリなど）の変更も、発行の前に止める。"""
-
-        def env(f):
-            f["Environment"]["Variables"]["EXTRA"] = "x"
-
-        def secret_value(f):
-            f["Environment"]["Variables"]["API_TOKEN"] = "SECRET-2"
-
-        def drop_env(f):
-            del f["Environment"]["Variables"]["API_TOKEN"]
-
-        cases = {
-            "extra-env": (env, "setting:Environment"),
-            "secret-env-value": (secret_value, "setting:Environment"),
-            "removed-env": (drop_env, "setting:Environment"),
-            "role": (lambda f: f.update(Role="arn:aws:iam::1:role/other"), "setting:Role"),
-            "memory": (lambda f: f.update(MemorySize=1024), "setting:MemorySize"),
-            "timeout": (lambda f: f.update(Timeout=900), "setting:Timeout"),
-            "description": (lambda f: f.update(Description="changed"), "setting:Description"),
-            "vpc": (lambda f: f.update(VpcConfig={"SubnetIds": ["s-1"]}), "setting:VpcConfig"),
-            "kms": (lambda f: f.update(KMSKeyArn="arn:aws:kms:ap-northeast-1:1:key/k"), "setting:KMSKeyArn"),
-            "tracing": (lambda f: f.update(TracingConfig={"Mode": "Active"}), "setting:TracingConfig"),
-            "storage": (lambda f: f.update(EphemeralStorage={"Size": 1024}), "setting:EphemeralStorage"),
-            "filesystem": (
-                lambda f: f.update(FileSystemConfigs=[{"Arn": "arn:aws:elasticfilesystem:x", "LocalMountPath": "/mnt/x"}]),
-                "setting:FileSystemConfigs",
-            ),
-            "layer-order": (
-                lambda f: f.update(Layers=[{"Arn": dl.PINNED_LAYER_ARN}, {"Arn": "arn:aws:lambda:ap-northeast-1:1:layer:X:1"}]),
-                "layers",
-            ),
-            "package-type": (lambda f: f.update(PackageType="Image"), "setting:PackageType"),
-            "unknown-new-setting": (lambda f: f.update(FutureSetting={"On": True}), "setting:FutureSetting"),
-        }
-        for name, (change, expect) in cases.items():
-            with self.subTest(name):
-                self.changed_case(name, change, expect)
-
-    def test_runtime_architecture_handler_changes_are_still_named(self):
-        self.changed_case("runtime", lambda f: f.update(Runtime="python3.13"), "runtime")
-        self.changed_case("arch", lambda f: f.update(Architectures=["arm64"]), "architecture")
-        self.changed_case("handler", lambda f: f.update(Handler="other.sh"), "handler")
-
-    def test_only_setting_names_are_reported(self):
-        self.changed_case(
-            "secret", lambda f: f["Environment"]["Variables"].update(API_TOKEN="SECRET-2"), "setting:Environment"
-        )
-        self.assertNotIn("EXTRA", self.result()["error"])
-
-    def test_fingerprint_helpers_hold_no_raw_values(self):
-        key = b"k" * 32
-        config = dict(FakeAws().function)
-        digests = dl.settings_fingerprint(config, key)
-        self.assertNotIn("RevisionId", digests)
-        self.assertNotIn("CodeSha256", digests)
-        self.assertNotIn(SECRET, json.dumps(digests))
-        # 鍵が違えば指紋も違う（値の推測の手掛かりにしない）
-        self.assertNotEqual(digests, dl.settings_fingerprint(config, b"j" * 32))
-        # 揮発性のメタデータだけの違いは同じ指紋
-        other = dict(config, RevisionId="x", LastModified="y", CodeSize=1, LastUpdateStatus="InProgress")
-        self.assertEqual(dl.setting_differences(digests, dl.settings_fingerprint(other, key)), [])
-        self.assertEqual(
-            dl.setting_differences(digests, dl.settings_fingerprint(dict(config, MemorySize=1), key)),
-            ["setting:MemorySize"],
-        )
-
-    def test_every_excluded_metadata_key_is_ignored_and_nothing_else(self):
-        key = b"k" * 32
-        config = dict(FakeAws().function, SnapStart={"ApplyOn": "None", "OptimizationStatus": "Off"})
-        base = dl.settings_fingerprint(config, key)
-        for name in sorted(dl.VOLATILE_CONFIG_KEYS):
-            with self.subTest(name):
-                changed = dict(config, **{name: "changed-value"})
-                self.assertEqual(dl.setting_differences(base, dl.settings_fingerprint(changed, key)), [])
-        snap = dict(config, SnapStart={"ApplyOn": "None", "OptimizationStatus": "On"})
-        self.assertEqual(dl.setting_differences(base, dl.settings_fingerprint(snap, key)), [])
-        snap_apply = dict(config, SnapStart={"ApplyOn": "PublishedVersions", "OptimizationStatus": "Off"})
-        self.assertEqual(dl.setting_differences(base, dl.settings_fingerprint(snap_apply, key)), ["setting:SnapStart"])
-        # 値がnullの項目は、キーがないのと同じ。除外一覧にない未知の項目は比較する
-        self.assertEqual(dl.setting_differences(base, dl.settings_fingerprint(dict(config, Extra=None), key)), [])
-        self.assertEqual(
-            dl.setting_differences(base, dl.settings_fingerprint(dict(config, RuntimeVersionConfig={"A": 1}), key)),
-            ["setting:RuntimeVersionConfig"],
-        )
-
-    def test_unusual_setting_names_are_reported_without_the_name(self):
-        self.assertEqual(dl.setting_differences({"Bad Name!": "a"}, {}), ["setting:unknown"])
-        self.assertEqual(dl.setting_differences({}, {"x" * 65: "a"}), ["setting:unknown"])
-
-
-class PublishedVersionActivation(DeployTestCase):
-    """発行直後の版が Pending でも、Active を待ってから確認・切り替える。"""
-
-    def test_pending_published_version_succeeds_after_waiting(self):
-        self.aws.pending_publish = True
-        self.assertEqual(self.deploy(), 0)
-        ops = self.aws.ops()
-        waits = [c for c in self.aws.calls if c[1] == "wait" and c[2] == "function-active-v2"]
-        self.assertEqual(len(waits), 1)
-        self.assertEqual(waits[0][3:], ["--function-name", FUNCTION, "--qualifier", "2"])
-        # 待機は、発行の後・版の確認の前・エイリアス切り替えの前
-        publish = ops.index("publish-version")
-        wait = ops.index("wait", publish)
-        verify = ops.index("get-function-configuration", wait)
-        self.assertLess(wait, verify)
-        self.assertLess(verify, ops.index("update-alias"))
-        self.assertEqual(self.aws.versions["2"]["State"], "Active")
-        self.assertEqual(self.result()["overall"], "success")
-        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
-
-    def test_pending_without_waiter_would_fail_closed(self):
-        # 待機が効かない（Pendingのまま）場合、検査は従来どおり閉じて止まる（緩めていない）
-        self.aws.pending_publish = True
-        original = self.aws.__call__
-
-        def no_activation(args):
-            if args[1] == "wait" and args[2] == "function-active-v2":
-                return {}
-            return original(args)
-
-        self.assertEqual(self.deploy(aws=no_activation), 1)
-        self.assertIn("state", self.result()["error"])
-        self.assertNotIn("update-alias", self.aws.ops())
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-
-    def test_waiter_failure_leaves_alias_untouched(self):
-        self.aws.pending_publish = True
-        self.aws.wait_fail["function-active-v2"] = dl.AwsError("wait function-active-v2", 255)
-        self.assertEqual(self.deploy(), 1)
-        result = self.result()
-        self.assertEqual(result["overall"], "failed")
-        self.assertEqual(result["stage"], "wait-published")
-        self.assertNotIn("update-alias", self.aws.ops())
-        self.assertEqual(self.aws.alias, {"FunctionVersion": "1", "RevisionId": "a-1", "RoutingConfig": {}})
-        self.assertEqual(result["alias"]["state"], "untouched")
-        self.assertEqual(result["rollback"], "not-needed")
-        self.assertEqual(self.aws.mutating(), ["update-function-code", "publish-version"])
-
-    def test_waits_before_verifying_reused_version(self):
-        self.aws.dedupe_publish = True
-        self.aws.function["CodeSha256"] = code_sha(self.zip_hex)
-        self.aws.versions["2"] = self.aws._snapshot(
-            "2", dl.make_description(NEW_SHA, self.zip_hex, "150")
-        )
-        self.aws.versions["2"]["State"] = "Pending"
-        self.assertEqual(self.deploy(), 0)
-        self.assertTrue(self.result()["versions"]["reused"])
-        self.assertEqual(self.aws.versions["2"]["State"], "Active")
-        self.assertIn("wait", self.aws.ops())
+        # エイリアスの更新を呼ぶ前に、結果不明の印と復旧メモを書く（強制終了・タイムアウトでも人が確認できる）
+        self.assertEqual((seen["alias"]["overall"], seen["alias"]["stage"], seen["alias"]["alias"]), ("in-progress", "switch-alias", "unknown"))
+        self.assertIn("get-alias", seen["alias"]["recoveryNote"])
+        self.assertEqual((seen["new"]["alias"], seen["new"]["stage"], seen["new"]["overall"]), ("switched", "smoke-new", "in-progress"))
+        self.assertTrue(seen["new"]["mutationStarted"])
+        self.assertIsNotNone(seen["new"]["recoveryNote"])
 
 
 def rate(aws, index=0):
@@ -1489,6 +1154,7 @@ BOUNDARY_CASES = [
     ("waf-ip-limit-missing", lambda a: rate(a).pop("Limit"), "webAclRules"),
     ("waf-window", lambda a: rate(a).update(EvaluationWindowSec=600), "webAclRules"),
     ("waf-window-60", lambda a: rate(a).update(EvaluationWindowSec=60), "webAclRules"),
+    ("waf-window-float", lambda a: rate(a).update(EvaluationWindowSec=300.0), "webAclRules"),
     ("waf-window-missing", lambda a: rate(a).pop("EvaluationWindowSec"), "webAclRules"),
     ("waf-ip-key-constant", lambda a: rate(a).update(AggregateKeyType="CONSTANT"), "webAclRules"),
     ("waf-ip-key-custom", lambda a: rate(a).update(AggregateKeyType="CUSTOM_KEYS", CustomKeys=[{"IP": {}}]), "webAclRules"),
@@ -1535,6 +1201,7 @@ BOUNDARY_CASES = [
     ("waf-observer-name-list", with_observers(lambda r: observer_group(r).update(Name=["AWSManagedRulesCommonRuleSet"])), "webAclRules"),
     ("waf-observer-name-dict", with_observers(lambda r: observer_group(r).update(Name={"x": 1})), "webAclRules"),
     ("waf-observer-name-null", with_observers(lambda r: observer_group(r).update(Name=None)), "webAclRules"),
+    ("waf-observer-name-bool", with_observers(lambda r: observer_group(r).update(Name=True)), "webAclRules"),
     ("waf-observer-name-number", with_observers(lambda r: observer_group(r).update(Name=1)), "webAclRules"),
     ("waf-observer-vendor-list", with_observers(lambda r: observer_group(r).update(VendorName=["AWS"])), "webAclRules"),
     ("waf-observer-duplicate", lambda a: add_observers(a, (OBSERVER_GROUPS[1], OBSERVER_GROUPS[1])), "webAclRules"),
@@ -1644,447 +1311,84 @@ BOUNDARY_CASES = [
     ("policy-empty", lambda a: a.policy_doc.update(Statement=[]), "policyStatements"),
 ]
 
-
-class WriteEdgeGate(DeployTestCase):
-    """書き込みを許可した公開経路（7メソッド）の条件。AWSの変更の前に、すべて満たさなければ止める。
-
-    条件: 管理ポリシー・承認したエッジ関数の関連付けがちょうど1件・LIVEのコードがレビュー済みのソースと
-    一致・今回の版と戻し先の版が、ガード（guard=1）と接続元IPの契約（viewerip=1）の両方を持つ。
-    """
-
-    def setUp(self):
-        super().setUp()
-        self.zip_hex = make_artifact(self.dir / "g", guard=True, viewer_ip=True)
-        self.artifact = self.dir / "g"
-
-    def mark_previous(self, guard=True, viewer_ip=True):
-        description = dl.make_description(OLD_SHA, OLD_ZIP, "100", guard=guard, viewer_ip=viewer_ip)
-        self.aws.versions["1"] = self.aws._snapshot("1", description)
-
-    def fresh(self):
-        self.aws = FakeAws()
-        self.smoke = FakeSmoke()
-        self.result_file.unlink(missing_ok=True)
-        self.mark_previous()
-
-    def assert_blocked_before_mutation(self, expect, absent=()):
-        self.assertEqual(self.deploy(), 1)
-        self.assertEqual(self.aws.mutating(), [])
-        result = self.result()
-        self.assertEqual(result["validation"], "failed")
-        self.assertFalse(result["mutationStarted"])
-        self.assertEqual(self.smoke.calls, [])
-        self.assertIn(expect, result["error"])
-        for name in absent:
-            self.assertNotIn(name, result["error"])
-
-    def test_fully_prepared_write_stage_deploys_and_marks_both_capabilities(self):
-        enable_write(self.aws)
-        self.mark_previous()
-        self.assertEqual(self.deploy(), 0)
-        ops = self.aws.ops()
-        self.assertNotIn("get-origin-request-policy", ops)  # 専用ポリシーは使わない（管理ポリシーのまま）
-        cloudfront = {call[1] for call in self.aws.calls if call[0] == "cloudfront"}
-        self.assertEqual(cloudfront, {"get-distribution", "get-origin-access-control", "get-function"})  # 読み取りだけ
-        self.assertLess(ops.index("get-function"), ops.index("update-function-code"))
-        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1;viewerip=1"))
-
-    def test_live_code_is_fetched_with_the_cli_file_output_and_the_temp_file_is_removed(self):
-        enable_write(self.aws)
-        self.mark_previous()
-        self.assertEqual(self.deploy(), 0)
-        self.assertEqual(len(self.aws.edge_outfiles), 1)
-        self.assertFalse(self.aws.edge_outfiles[0].exists())
-        self.assertFalse(self.aws.edge_outfiles[0].parent.exists())
-
-    def test_temp_file_is_removed_even_when_the_code_differs(self):
-        enable_write(self.aws, live=b"function handler(e){return e.request;}")
-        self.mark_previous()
-        self.assertEqual(self.deploy(), 1)
-        self.assertFalse(self.aws.edge_outfiles[0].parent.exists())
-
-    def test_candidate_without_guard_is_blocked_on_a_write_stage(self):
-        for name, kwargs in (("plain", dict(guard=None)), ("zero", dict(guard=False))):
-            with self.subTest(name):
-                self.fresh()
-                enable_write(self.aws)
-                self.zip_hex = make_artifact(self.dir / name, **kwargs)
-                self.artifact = self.dir / name
-                self.assert_blocked_before_mutation("candidateWithoutWriteGuard")
-
-    def test_candidate_without_the_viewer_ip_contract_is_blocked(self):
-        for name, kwargs in (
-            ("guard-only", dict(guard=True)),  # 宣言なし
-            ("zero", dict(guard=True, viewer_ip=False)),
-        ):
-            with self.subTest(name):
-                self.fresh()
-                enable_write(self.aws)
-                self.zip_hex = make_artifact(self.dir / name, **kwargs)
-                self.artifact = self.dir / name
-                self.assert_blocked_before_mutation(
-                    "candidateWithoutViewerIpContract", absent=("rollbackTarget",)
-                )
-                self.assertNotIn("get-function", self.aws.ops())  # 契約のないZIPでは、LIVEも読まない
-
-    def test_rollback_target_needs_both_markers(self):
-        for name, kwargs, expect in (
-            ("no markers", dict(guard=False, viewer_ip=False), "rollbackTargetWithoutWriteGuard"),
-            ("guard only", dict(guard=True, viewer_ip=False), "rollbackTargetWithoutViewerIpContract"),
-            ("viewer ip only", dict(guard=False, viewer_ip=True), "rollbackTargetWithoutWriteGuard"),
-        ):
-            with self.subTest(name):
-                self.fresh()
-                enable_write(self.aws)
-                self.mark_previous(**kwargs)
-                self.assert_blocked_before_mutation(expect, absent=("candidateWith",))
-
-    def test_unmarked_old_rollback_target_is_blocked(self):
-        enable_write(self.aws)  # 版1は印なし（ガード導入前）
-        self.assert_blocked_before_mutation("rollbackTargetWithoutWriteGuard")
-
-    def test_read_only_stage_bootstraps_from_an_old_version_and_adds_both_markers(self):
-        self.assertEqual(self.deploy(), 0)  # 印のない版1から、3メソッドのまま進める
-        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1;viewerip=1"))
-        self.assertNotIn("get-function", self.aws.ops())  # 読み取り構成では、エッジ関数を読まない
-
-    def test_read_only_stage_accepts_a_guard_only_previous_version(self):
-        self.mark_previous(guard=True, viewer_ip=False)
-        self.assertEqual(self.deploy(), 0)
-
-    def test_read_only_stage_without_markers_in_candidate_deploys_without_markers(self):
-        self.zip_hex = make_artifact(self.dir / "plain", guard=None)
-        self.artifact = self.dir / "plain"
-        self.assertEqual(self.deploy(), 0)
-        self.assertNotIn("guard", self.aws.versions["2"]["Description"])
-        self.assertNotIn("viewerip", self.aws.versions["2"]["Description"])
-
-    def test_read_only_stage_rejects_any_edge_association(self):
-        for associations in (
-            [APPROVED_ASSOCIATION],
-            [{"FunctionARN": EDGE_ARN, "EventType": "viewer-response"}],
-        ):
-            with self.subTest(associations):
-                self.fresh()
-                self.aws.behavior["FunctionAssociations"] = {
-                    "Quantity": len(associations),
-                    "Items": associations,
-                }
-                self.assertEqual(self.deploy(), 1)
-                self.assertEqual(self.aws.mutating(), [])
-                self.assertIn("edgeFunctions", self.result()["error"])
-                self.assertNotIn("get-function", self.aws.ops())
-
-    def test_write_stage_requires_exactly_one_approved_viewer_request_association(self):
-        other = {"FunctionARN": f"arn:aws:cloudfront::{ACCOUNT}:function/other", "EventType": "viewer-request"}
-        cases = {
-            "none": [],
-            "two associations": [APPROVED_ASSOCIATION, other],
-            "duplicated approved": [APPROVED_ASSOCIATION, dict(APPROVED_ASSOCIATION)],
-            "other function": [other],
-            "other account": [{**APPROVED_ASSOCIATION, "FunctionARN": EDGE_ARN.replace(ACCOUNT, OTHER_ACCOUNT)}],
-            "viewer-response": [{**APPROVED_ASSOCIATION, "EventType": "viewer-response"}],
-            "origin-request": [{**APPROVED_ASSOCIATION, "EventType": "origin-request"}],
-            "origin-response": [{**APPROVED_ASSOCIATION, "EventType": "origin-response"}],
-            "missing event type": [{"FunctionARN": EDGE_ARN}],
-            "extra field": [{**APPROVED_ASSOCIATION, "IncludeBody": True}],
-        }
-        for name, associations in cases.items():
-            with self.subTest(name):
-                self.fresh()
-                enable_write(self.aws, associations=associations)
-                self.assert_blocked_before_mutation("edgeFunctionAssociation")
-                self.assertNotIn("get-function", self.aws.ops())
-
-    def test_malformed_association_blocks_are_rejected(self):
-        for name, block in (
-            ("missing", None),
-            ("quantity mismatch", {"Quantity": 2, "Items": [APPROVED_ASSOCIATION]}),
-            ("not a list", {"Quantity": 1, "Items": APPROVED_ASSOCIATION}),
-        ):
-            with self.subTest(name):
-                self.fresh()
-                enable_write(self.aws)
-                if block is None:
-                    del self.aws.behavior["FunctionAssociations"]
-                else:
-                    self.aws.behavior["FunctionAssociations"] = block
-                self.assertEqual(self.deploy(), 1)
-                self.assertEqual(self.aws.mutating(), [])
-                self.assertEqual(self.result()["publicPath"], "failed")
-
-    def test_write_stage_without_a_configured_approved_function_is_blocked(self):
-        enable_write(self.aws)
-        self.mark_previous()
-        self.assertEqual(self.deploy(edge_function_arn=None), 1)
-        self.assertEqual(self.aws.mutating(), [])
-        self.assertIn("edgeFunctionNotConfigured", self.result()["error"])
-        self.assertNotIn("get-function", self.aws.ops())
-
-    def test_write_stage_keeps_lambda_edge_forbidden_and_the_managed_policy(self):
-        enable_write(self.aws)
-        self.mark_previous()
-        self.aws.behavior["LambdaFunctionAssociations"] = {"Quantity": 1, "Items": [{"LambdaFunctionARN": "x"}]}
-        self.assertEqual(self.deploy(), 1)
-        self.assertIn("lambdaEdge", self.result()["error"])
-        for name, policy_id in (
-            ("custom policy", "11111111-2222-3333-4444-555555555555"),
-            ("other managed policy", "216adef6-5c7f-47e4-b989-5492eafa07d3"),
-            ("viewer-address policy", "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"),
-        ):
-            with self.subTest(name):
-                self.fresh()
-                enable_write(self.aws)
-                self.aws.behavior["OriginRequestPolicyId"] = policy_id
-                self.assertEqual(self.deploy(), 1)
-                self.assertEqual(self.aws.mutating(), [])
-                self.assertIn("originRequestPolicy", self.result()["error"])
-
-    def test_live_code_retrieval_failures_and_mismatches_stop_before_any_mutation(self):
-        cases = {
-            "get-function fails": (None, "edgeFunctionRetrieval"),
-            "no output file": ("nofile", "edgeFunctionRetrieval"),
-            "empty output file": (b"", "edgeFunctionRetrieval"),
-            "different code": (b"function handler(e){return e.request;}", "edgeFunctionCodeMismatch"),
-            "source plus a byte": (EDGE_SOURCE + b"\n", "edgeFunctionCodeMismatch"),
-            "source minus a byte": (EDGE_SOURCE[:-1], "edgeFunctionCodeMismatch"),
-        }
-        for name, (live, expect) in cases.items():
-            with self.subTest(name):
-                self.fresh()
-                enable_write(self.aws, live=live)
-                self.assert_blocked_before_mutation(expect)
-                self.assertEqual(self.result()["publicPath"], "failed")
-                self.assertEqual(self.aws.alias["FunctionVersion"], "1")  # ロールバック・切り替えのどちらにも進まない
-
-    def test_manifest_edge_hash_must_match_the_zip_entry_before_any_aws_call(self):
-        self.zip_hex = make_artifact(self.dir / "bad-hash", guard=True, viewer_ip=True, manifest_edge_hex="0" * 64)
-        self.artifact = self.dir / "bad-hash"
-        enable_write(self.aws)
-        self.mark_previous()
-        self.assertEqual(self.deploy(), 1)
-        self.assertEqual(self.aws.calls, [])
-        self.assertIn("edgeSource", self.result()["error"])
-
-    def test_zip_entry_that_differs_from_the_reviewed_source_cannot_claim_the_contract(self):
-        # ZIPとmanifestが同じ改ざんされたコードを指していても、LIVEと照合するのはZIPの中の写し。
-        tampered = EDGE_SOURCE + b"// extra\n"
-        self.zip_hex = make_artifact(
-            self.dir / "tampered", guard=True, viewer_ip=True, edge_entry=tampered,
-            manifest_edge_hex=hashlib.sha256(tampered).hexdigest(),
-        )
-        self.artifact = self.dir / "tampered"
-        enable_write(self.aws)  # LIVEは、レビュー済みの本物
-        self.mark_previous()
-        self.assert_blocked_before_mutation("edgeFunctionCodeMismatch")
-
-    def test_partial_method_sets_are_rejected(self):
-        for methods in (
-            {"GET", "HEAD", "OPTIONS", "POST"},
-            dl.WRITE_ENABLED_METHODS - {"DELETE"},
-            dl.WRITE_ENABLED_METHODS - {"OPTIONS"},
-        ):
-            with self.subTest(methods=sorted(methods)):
-                self.fresh()
-                enable_write(self.aws, methods=methods)
-                self.assertEqual(self.deploy(), 1)
-                self.assertEqual(self.aws.mutating(), [])
-                self.assertIn("allowedMethods", self.result()["error"])
-
-    def prepare_existing(self, **markers):
-        enable_write(self.aws)
-        self.mark_previous()
-        self.aws.dedupe_publish = True
-        self.aws.function["CodeSha256"] = code_sha(self.zip_hex)
-        self.aws.versions["2"] = self.aws._snapshot(
-            "2", dl.make_description(NEW_SHA, self.zip_hex, "150", **markers)
-        )
-
-    def test_reusing_a_published_version_requires_the_same_markers(self):
-        self.prepare_existing(guard=True, viewer_ip=True)
-        self.assertEqual(self.deploy(), 0)
-        self.assertEqual(self.result()["versions"], {"previous": "1", "new": "2", "reused": True})
-        self.assertEqual(self.aws.alias["FunctionVersion"], "2")
-
-    def test_reusing_a_version_without_the_viewer_ip_marker_fails_closed(self):
-        for markers in (dict(guard=True), dict()):
-            with self.subTest(markers):
-                self.fresh()
-                self.prepare_existing(**markers)
-                self.assertEqual(self.deploy(), 1)
-                self.assertIn("手動", self.result()["error"])
-                self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-                self.assertNotIn("update-alias", self.aws.ops())
-
-    def test_failed_smoke_rolls_back_to_the_marked_previous_version(self):
-        enable_write(self.aws)
-        self.mark_previous()
-        self.smoke = FakeSmoke({"new": False})
-        self.assertEqual(self.deploy(), 1)
-        self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-        self.assertEqual(self.result()["rollback"], "succeeded")
-
-
-class DescriptionMarkers(unittest.TestCase):
-    def test_markers_round_trip_in_a_fixed_order(self):
-        self.assertEqual(dl.make_description(NEW_SHA, OLD_ZIP, "1"), f"source={NEW_SHA};zip={OLD_ZIP};run=1")
-        both = dl.make_description(NEW_SHA, OLD_ZIP, "1", guard=True, viewer_ip=True)
-        self.assertTrue(both.endswith(";guard=1;viewerip=1"))
-        meta = dl.parse_description(both)
-        self.assertTrue(meta["guard"] and meta["viewerip"])
-        only_guard = dl.parse_description(dl.make_description(NEW_SHA, OLD_ZIP, "1", guard=True))
-        self.assertTrue(only_guard["guard"])
-        self.assertNotIn("viewerip", only_guard)
-
-    def test_unknown_or_reordered_markers_are_not_trusted(self):
-        base = f"source={NEW_SHA};zip={OLD_ZIP};run=1"
-        for text in (base + ";viewerip=1;guard=1", base + ";viewerip=2", base + ";viewerip=1;viewerip=1", base + ";edge=1"):
-            with self.subTest(text):
-                self.assertIsNone(dl.parse_description(text))
-
-
 class PublicPathBoundaries(DeployTestCase):
-    """公開経路（CloudFront → OAC → AWS_IAMの関数URL）の検証。
-
-    どれか1つでも期待と違えば、AWSの変更を1件もせず、スモーク確認もせず、失敗で止まる。
-    """
-
-    def fresh(self):
-        self.aws = FakeAws()
-        self.smoke = FakeSmoke()
-        self.result_file.unlink(missing_ok=True)
-
-    def blocked(self, expect=None, **overrides):
-        self.assertEqual(self.deploy(**overrides), 1)
-        self.assertEqual(self.aws.mutating(), [])
-        result = self.result()
-        self.assertEqual(result["overall"], "failed")
-        self.assertEqual(result["validation"], "failed")
-        self.assertEqual(result["publicPath"], "failed")
-        self.assertEqual(result["deployment"], "not-started")
-        self.assertFalse(result["mutationStarted"])
-        self.assertEqual(self.smoke.calls, [])  # 公開経路を確認できない間は、スモーク確認もしない
-        self.assert_no_leak()
-        if expect is not None:
-            self.assertIn(expect, result["error"])
+    """公開経路（CloudFront → OAC → AWS_IAMの関数URL）。1つでも期待と違えば、変更もスモーク確認もせず止まる。"""
 
     def test_each_boundary_blocks_with_zero_mutation(self):
         for name, mutate, expect in BOUNDARY_CASES:
             with self.subTest(name):
-                self.fresh()
+                self.reset()
                 mutate(self.aws)
                 self.blocked(expect)
 
     def test_arguments_that_differ_from_the_real_resources_block(self):
         other_acl_id = "99999999-2222-3333-4444-555555555555"
+        regional = f"arn:aws:wafv2:us-east-1:{ACCOUNT}:regional/webacl/{WAF_NAME}/{WAF_ID}"
         cases = [
             ("base-url-is-the-function-url", {"base_url": f"https://{LAMBDA_HOST}"}, "CloudFront"),
             ("base-url-trailing-slash", {"base_url": BASE_URL + "/"}, "CloudFront"),
             ("base-url-http", {"base_url": "http://" + CF_HOST}, "CloudFront"),
             ("base-url-other-host", {"base_url": "https://dzzzzzzzzzzzz.cloudfront.net"}, "domainName"),
-            ("waf-regional-scope", {"web_acl_arn": f"arn:aws:wafv2:us-east-1:{ACCOUNT}:regional/webacl/{WAF_NAME}/{WAF_ID}"}, "scope"),
-            ("waf-tokyo-region", {"web_acl_arn": f"arn:aws:wafv2:ap-northeast-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"}, "scope"),
-            ("waf-other-account", {"web_acl_arn": f"arn:aws:wafv2:us-east-1:{OTHER_ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"}, "アカウント"),
-            ("waf-other-id", {"web_acl_arn": f"arn:aws:wafv2:us-east-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{other_acl_id}"}, "AWS操作に失敗"),
+            ("waf-regional-scope", {"web_acl_arn": regional}, "scope"),
+            ("waf-tokyo-region", {"web_acl_arn": regional.replace("us-east-1", "ap-northeast-1").replace("regional", "global")}, "scope"),
+            ("waf-other-account", {"web_acl_arn": WAF_ARN.replace(ACCOUNT, OTHER_ACCOUNT)}, "アカウント"),
+            ("waf-other-id", {"web_acl_arn": WAF_ARN.replace(WAF_ID, other_acl_id)}, "AWS操作に失敗"),
             ("distribution-other-id", {"distribution_id": "E9ZZZZZZZZZZZZ"}, "AWS操作に失敗"),
             ("oac-other-id", {"oac_id": "E9ZZZZZZZZZZZZ"}, "AWS操作に失敗"),
         ]
         for name, overrides, expect in cases:
             with self.subTest(name):
-                self.fresh()
+                self.reset()
                 self.blocked(expect, **overrides)
-        # 誤ったscope・リージョンのARNでは、WAFのAPIを呼ばない
-        self.fresh()
-        self.blocked("scope", web_acl_arn=cases[4][1]["web_acl_arn"])
+        self.reset()  # 誤ったscope・リージョンのARNでは、WAFのAPIを呼ばない
+        self.blocked("scope", web_acl_arn=regional)
         self.assertNotIn("get-web-acl", self.aws.ops())
 
-    def test_api_access_denied_blocks_with_zero_mutation(self):
+    def test_api_failures_block_with_zero_mutation(self):
         for op in ("get-distribution", "get-origin-access-control", "get-web-acl", "get-policy"):
             with self.subTest(op):
-                self.fresh()
+                self.reset()
                 self.aws.fail[op] = dl.AwsError(op, 254)  # AccessDenied等
                 self.blocked("AWS操作に失敗")
 
     def test_equivalent_forms_are_accepted(self):
-        def arn_equals(aws):
-            set_conditions(aws, {"ArnEquals": {"AWS:SourceArn": DIST_ARN}})
-
         def deny_statement(aws):
-            aws.policy_doc["Statement"].append(
-                {**other_allow("*"), "Sid": "deny", "Effect": "Deny"}
-            )
+            aws.policy_doc["Statement"].append({**other_allow("*"), "Sid": "deny", "Effect": "Deny"})
 
+        auth = lambda a, value: statement_condition(a, 0)["StringEquals"].update({"lambda:FunctionUrlAuthType": value})  # noqa: E731
         variants = [
-            ("ip-rule-only-is-the-baseline", lambda a: None),
+            ("baseline", lambda a: None),
             ("ip-rule-empty-rule-labels", lambda a: a.rules[0].update(RuleLabels=[])),
             ("ip-rule-other-name-and-priority", lambda a: a.rules[0].update(Name="rate-by-ip", Priority=7)),
             ("https-only-viewer", lambda a: a.behavior.update(ViewerProtocolPolicy="https-only")),
             ("method-order", lambda a: a.behavior["AllowedMethods"].update(Items=["OPTIONS", "HEAD", "GET"])),
-            (
-                "cached-with-options",
-                lambda a: a.behavior["AllowedMethods"].update(
-                    CachedMethods={"Quantity": 3, "Items": ["GET", "HEAD", "OPTIONS"]}
-                ),
-            ),
-            ("arn-equals", arn_equals),
+            ("cached-with-options", lambda a: a.behavior["AllowedMethods"].update(CachedMethods={"Quantity": 3, "Items": ["GET", "HEAD", "OPTIONS"]})),
+            ("arn-equals", lambda a: set_conditions(a, {"ArnEquals": {"AWS:SourceArn": DIST_ARN}})),
             ("string-equals-list", lambda a: set_conditions(a, {"StringEquals": {"AWS:SourceArn": [DIST_ARN]}})),
-            # 実CLIの形（ArnLike + StringEquals の認証方式）。認証方式は AWS_IAM だけ許す
-            ("real-cli-shape-is-the-baseline", lambda a: None),
-            ("auth-type-in-list", lambda a: statement_condition(a, 0)["StringEquals"].update({"lambda:FunctionUrlAuthType": ["AWS_IAM"]})),
-            (
-                "auth-type-and-source-arn-both-in-string-equals",
-                lambda a: statement_condition(a, 0).update(
-                    StringEquals={"AWS:SourceArn": DIST_ARN, "lambda:FunctionUrlAuthType": "AWS_IAM"}
-                ),
-            ),
+            ("auth-type-in-list", lambda a: auth(a, ["AWS_IAM"])),
+            ("source-arn-and-auth-type-in-string-equals", lambda a: statement_condition(a, 0).update(StringEquals={"AWS:SourceArn": DIST_ARN, "lambda:FunctionUrlAuthType": "AWS_IAM"})),
             ("auth-type-condition-absent", lambda a: statement_condition(a, 0).pop("StringEquals")),
-            # 実APIの空・偽の値（キーがない場合と同じ意味）は正常
-            (
-                "firewall-manager-absent-or-empty",
-                lambda a: a.acl["WebACL"].update(
-                    ManagedByFirewallManager=False,
-                    PreProcessFirewallManagerRuleGroups=[],
-                    PostProcessFirewallManagerRuleGroups=[],
-                ),
-            ),
-            (
-                "no-staging-or-continuous-deployment",
-                lambda a: a.dist_config.update(ContinuousDeploymentPolicyId="", Staging=False),
-            ),
+            ("firewall-manager-empty", lambda a: a.acl["WebACL"].update(ManagedByFirewallManager=False, PreProcessFirewallManagerRuleGroups=[], PostProcessFirewallManagerRuleGroups=[])),
+            ("no-staging-or-continuous-deployment", lambda a: a.dist_config.update(ContinuousDeploymentPolicyId="", Staging=False)),
             ("deny-is-ignored", deny_statement),
-            ("rule-order", lambda a: (add_observers(a, first=False), a.rules.reverse())),
-            # 必須のIP規則1件＋既知の観測グループ（Count）0〜3件（合計1〜4件）。
-            # 優先順位は前でも後でもよい（Countは終端しない）
-            ("observers-all-three-before-ip-rule", add_observers),
-            ("observers-all-three-after-ip-rule", lambda a: add_observers(a, first=False)),
-            ("observer-ip-reputation-only", lambda a: add_observers(a, OBSERVER_GROUPS[:1])),
-            ("observer-common-only", lambda a: add_observers(a, OBSERVER_GROUPS[1:2])),
-            ("observer-known-bad-inputs-only", lambda a: add_observers(a, OBSERVER_GROUPS[2:])),
-            ("observers-two", lambda a: add_observers(a, OBSERVER_GROUPS[1:])),
-            (
-                "observers-shuffled-with-ip-rule",
-                lambda a: (add_observers(a), a.rules.insert(1, a.rules.pop(3))),
-            ),
-            (
-                "observer-empty-optional-lists",
-                with_observers(
-                    lambda r: observer_group(r).update(
-                        ExcludedRules=[], RuleActionOverrides=[], ManagedRuleGroupConfigs=[]
-                    )
-                ),
-            ),
-            ("observer-empty-rule-labels", with_observers(lambda r: r.update(RuleLabels=[]))),
             ("url-without-slash", lambda a: a.url.update(FunctionUrl=f"https://{LAMBDA_HOST}")),
             ("unqualified-function-arn", lambda a: a.url.update(FunctionArn=FUNCTION_ARN)),
+            # 必須のIP規則1件＋既知の観測グループ（Count）0〜3件。優先順位は前でも後でもよい（Countは終端しない）
+            ("observers-before-ip-rule", add_observers),
+            ("observers-after-ip-rule-reversed", lambda a: (add_observers(a, first=False), a.rules.reverse())),
+            ("observer-ip-reputation-only", lambda a: add_observers(a, OBSERVER_GROUPS[:1])),
+            ("observers-two", lambda a: add_observers(a, OBSERVER_GROUPS[1:])),
+            ("observer-empty-optional-lists", with_observers(lambda r: observer_group(r).update(ExcludedRules=[], RuleActionOverrides=[], ManagedRuleGroupConfigs=[]))),
         ]
         for name, mutate in variants:
             with self.subTest(name):
-                self.fresh()
+                self.reset()
                 mutate(self.aws)
                 self.assertEqual(self.deploy(), 0)
                 self.assertEqual(self.result()["overall"], "success")
 
-    def test_reads_use_real_api_shapes_and_happen_before_any_mutation(self):
+    def test_only_read_calls_with_real_api_shapes_and_no_region_before_any_mutation(self):
+        add_observers(self.aws, first=False)  # 実際の4規則の形でも、そのまま配布できる
         self.assertEqual(self.deploy(), 0)
         calls = self.aws.calls
         self.assertEqual(
@@ -2099,22 +1403,203 @@ class PublicPathBoundaries(DeployTestCase):
             [c for c in calls if c[1] == "get-policy"],
             [["lambda", "get-policy", "--function-name", FUNCTION, "--qualifier", "demo"]],
         )
-        ops = self.aws.ops()
-        first_mutation = ops.index("update-function-code")
+        first_mutation = self.aws.ops().index("update-function-code")
         for op in ("get-distribution", "get-origin-access-control", "get-web-acl", "get-policy"):
-            self.assertLess(ops.index(op), first_mutation)
-        # CloudFront・WAFには書き込みの呼び出しがない。リージョンの指定はrun_awsだけで行う
-        for call in calls:
-            if call[0] in ("cloudfront", "wafv2"):
-                self.assertTrue(call[1].startswith("get-"))
-            self.assertNotIn("--region", call)
-        self.assertEqual(self.result()["publicPath"], "passed")
+            self.assertLess(self.aws.ops().index(op), first_mutation)
+        self.assertTrue(all("--region" not in call for call in calls))
 
-    def test_failed_previous_smoke_still_checked_through_cloudfront_url(self):
-        self.smoke.outcomes["previous"] = False
+    def test_the_current_disabled_distribution_stops_only_on_enabled(self):
+        add_observers(self.aws, first=False)  # 4規則（IP規則＋観測3種）は受け入れ、無効化だけで止まる
+        self.aws.dist_config.update(Enabled=False)
+        result = self.blocked("distributionEnabled")
+        self.assertNotIn("webAclRules", result["error"])
+
+
+class WriteEdgeGate(DeployTestCase):
+    """書き込みを許可した公開経路（7メソッド）の条件。AWSの変更の前に、すべて満たさなければ止める。
+
+    条件: 管理ポリシー・承認したエッジ関数の関連付けがちょうど1件・LIVEのコードがZIPの中のレビュー済み
+    ソースと一致・今回の版と戻し先の版が、ガード（guard=1）と接続元IPの契約（viewerip=1）の両方を持つ。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.use_artifact("g", guard=True, viewer_ip=True)
+        self.arrange()
+
+    def arrange(self, previous=(True, True), write=True, **write_options):
+        self.aws = FakeAws()
+        self.aws.versions["1"] = self.aws._snapshot(
+            "1", dl.make_description(OLD_SHA, OLD_ZIP, "100", guard=previous[0], viewer_ip=previous[1])
+        )
+        if write:
+            enable_write(self.aws, **write_options)
+
+    def test_fully_prepared_write_stage_deploys_and_marks_both_capabilities(self):
+        self.assertEqual(self.deploy(), 0)
+        self.assertEqual({c[1] for c in self.aws.calls if c[0] == "cloudfront"}, {"get-distribution", "get-origin-access-control", "get-function"})
+        self.assertLess(self.aws.ops().index("get-function"), self.aws.ops().index("update-function-code"))
+        self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1;viewerip=1"))
+        (outfile,) = self.aws.edge_outfiles  # 一時ファイルは削除される
+        self.assertFalse(outfile.parent.exists())
+
+    def test_failed_smoke_rolls_back_to_the_marked_previous_version(self):
+        self.smoke.outcomes["new"] = False
         self.assertEqual(self.deploy(), 1)
-        self.assertEqual({url for url, _, _ in self.smoke.calls}, {BASE_URL})
-        self.assertEqual(self.aws.mutating(), [])
+        self.assertEqual((self.aws.alias["FunctionVersion"], self.result()["rollback"]), ("1", "succeeded"))
+
+    def test_the_write_stage_is_blocked_unless_every_condition_holds(self):
+        approved = APPROVED_ASSOCIATION
+        other = {"FunctionARN": f"arn:aws:cloudfront::{ACCOUNT}:function/other", "EventType": "viewer-request"}
+        live_other = b"function handler(e){return e.request;}"
+
+        def artifact(**kwargs):
+            def apply(t):
+                t.use_artifact("variant", **kwargs)
+
+            return apply
+
+        def drop_associations(t):
+            del t.aws.behavior["FunctionAssociations"]
+
+        def tampered_zip(t):  # ZIPとmanifestが同じ改ざんコードを指していても、LIVEと照合するのはZIPの中の写し
+            edge = EDGE_SOURCE + b"// extra\n"
+            t.use_artifact("tampered", guard=True, viewer_ip=True, edge_entry=edge, manifest_edge_hex=hashlib.sha256(edge).hexdigest())
+
+        def lambda_edge(t):
+            t.aws.behavior["LambdaFunctionAssociations"] = {"Quantity": 1, "Items": [{"LambdaFunctionARN": "x"}]}
+
+        marked = lambda guard, ip: (lambda t: t.arrange(previous=(guard, ip)))  # noqa: E731
+        associations = lambda items: (lambda t: enable_write(t.aws, associations=items))  # noqa: E731
+        live = lambda value: (lambda t: enable_write(t.aws, live=value))  # noqa: E731
+        methods = lambda items: (lambda t: enable_write(t.aws, methods=items))  # noqa: E731
+        policy = lambda value: (lambda t: t.aws.behavior.update(OriginRequestPolicyId=value))  # noqa: E731
+        # (名前, 状態を作る関数, 期待するエラー, LIVEのコードを読まないはずか)
+        cases = [
+            ("candidate-without-guard", artifact(guard=None), "candidateWithoutWriteGuard", True),
+            ("candidate-guard-zero", artifact(guard=False), "candidateWithoutWriteGuard", True),
+            ("candidate-without-viewer-ip", artifact(guard=True), "candidateWithoutViewerIpContract", True),
+            ("candidate-viewer-ip-zero", artifact(guard=True, viewer_ip=False), "candidateWithoutViewerIpContract", True),
+            ("rollback-target-unmarked", marked(False, False), "rollbackTargetWithoutWriteGuard", False),
+            ("rollback-target-guard-only", marked(True, False), "rollbackTargetWithoutViewerIpContract", False),
+            ("rollback-target-viewer-ip-only", marked(False, True), "rollbackTargetWithoutWriteGuard", False),
+            ("no-association", associations([]), "edgeFunctionAssociation", True),
+            ("two-associations", associations([approved, other]), "edgeFunctionAssociation", True),
+            ("duplicated-approved", associations([approved, dict(approved)]), "edgeFunctionAssociation", True),
+            ("other-function", associations([other]), "edgeFunctionAssociation", True),
+            ("other-account", associations([{**approved, "FunctionARN": EDGE_ARN.replace(ACCOUNT, OTHER_ACCOUNT)}]), "edgeFunctionAssociation", True),
+            ("viewer-response", associations([{**approved, "EventType": "viewer-response"}]), "edgeFunctionAssociation", True),
+            ("origin-request", associations([{**approved, "EventType": "origin-request"}]), "edgeFunctionAssociation", True),
+            ("extra-field", associations([{**approved, "IncludeBody": True}]), "edgeFunctionAssociation", True),
+            ("missing-event-type", associations([{"FunctionARN": EDGE_ARN}]), "edgeFunctionAssociation", True),
+            ("associations-missing", drop_associations, "edgeFunctionAssociation", True),
+            ("lambda-edge", lambda_edge, "lambdaEdge", False),
+            ("custom-origin-request-policy", policy(WAF_ID), "originRequestPolicy", False),
+            ("viewer-address-policy", policy("88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"), "originRequestPolicy", False),
+            ("partial-methods-with-post", methods({"GET", "HEAD", "OPTIONS", "POST"}), "allowedMethods", True),
+            ("partial-methods-without-delete", methods(cp.WRITE_ENABLED_METHODS - {"DELETE"}), "allowedMethods", True),
+            ("live-retrieval-fails", live(None), "edgeFunctionRetrieval", False),
+            ("live-no-output-file", live("nofile"), "edgeFunctionRetrieval", False),
+            ("live-empty", live(b""), "edgeFunctionRetrieval", False),
+            ("live-different", live(live_other), "edgeFunctionCodeMismatch", False),
+            ("live-plus-a-byte", live(EDGE_SOURCE + b"\n"), "edgeFunctionCodeMismatch", False),
+            ("zip-entry-differs-from-live", tampered_zip, "edgeFunctionCodeMismatch", False),
+        ]
+        for name, change, expect, no_live_read in cases:
+            with self.subTest(name):
+                self.reset()
+                self.use_artifact("g", guard=True, viewer_ip=True)
+                self.arrange()
+                change(self)
+                self.blocked(expect)
+                if no_live_read:
+                    self.assertNotIn("get-function", self.aws.ops())
+        # 承認したエッジ関数が設定されていなければ、書き込み構成は止まる（LIVEも読まない）
+        self.arrange()
+        self.blocked("edgeFunctionNotConfigured", edge_function_arn=None)
+        self.assertNotIn("get-function", self.aws.ops())
+
+    def test_malformed_edge_manifests_are_rejected_before_any_aws_call(self):
+        def edit(**changes):
+            def apply(t):
+                path = t.artifact / "manifest.json"
+                data = json.loads(path.read_text())
+                for key, value in changes.items():
+                    if key == "capabilities":
+                        data["capabilities"].update(value)
+                    else:
+                        data[key] = value
+                path.write_text(json.dumps(data))
+
+            return apply
+
+        good = {"file": "edge/viewer-ip.js", "sha256Hex": hashlib.sha256(EDGE_SOURCE).hexdigest()}
+        cases = {
+            "hash-differs-from-zip": lambda t: t.use_artifact("c", guard=True, viewer_ip=True, manifest_edge_hex="0" * 64),
+            "edge-missing": edit(edge=None),
+            "edge-not-an-object": edit(edge="edge/viewer-ip.js"),
+            "other-file": edit(edge={**good, "file": "edge/other.js"}),
+            "no-write-guard": edit(capabilities={"publicWriteGuard": 0}),
+        }
+        for name, tamper in cases.items():
+            with self.subTest(name):
+                self.use_artifact(f"edge-{name}", guard=True, viewer_ip=True)
+                tamper(self)
+                self.arrange()
+                self.assertEqual(self.deploy(), 1)
+                self.assertEqual(self.aws.calls, [])
+                self.assertIn("edgeSource", self.result()["error"])
+
+    def test_read_only_stage_keeps_older_guard_versions_deployable(self):
+        for name, previous in (("unmarked", (False, False)), ("guard-only", (True, False))):
+            with self.subTest(name):
+                self.reset()
+                self.arrange(previous=previous, write=False)
+                self.assertEqual(self.deploy(), 0)  # 3メソッドのまま、印を付けて配布する
+                self.assertTrue(self.aws.versions["2"]["Description"].endswith(";guard=1;viewerip=1"))
+                self.assertNotIn("get-function", self.aws.ops())  # 読み取り構成では、エッジ関数を読まない
+        self.reset()
+        self.arrange(write=False)
+        self.use_artifact("plain", guard=None)
+        self.assertEqual(self.deploy(), 0)
+        self.assertEqual(dl.parse_description(self.aws.versions["2"]["Description"]).keys(), {"source", "zip", "run"})
+
+    def test_read_only_stage_rejects_any_edge_association(self):
+        for event in ("viewer-request", "viewer-response"):
+            with self.subTest(event):
+                self.reset()
+                self.arrange(write=False)
+                items = [{**APPROVED_ASSOCIATION, "EventType": event}]
+                self.aws.behavior["FunctionAssociations"] = {"Quantity": 1, "Items": items}
+                self.blocked("edgeFunctions")
+                self.assertNotIn("get-function", self.aws.ops())
+
+    def test_a_published_version_is_reused_only_with_the_same_markers(self):
+        for markers, ok in ((dict(guard=True, viewer_ip=True), True), (dict(guard=True), False), (dict(), False)):
+            with self.subTest(markers):
+                self.reset()
+                self.arrange()
+                self.aws.dedupe_publish = True
+                self.aws.versions["2"] = self.aws._snapshot("2", dl.make_description(NEW_SHA, self.zip_hex, "150", **markers))
+                self.aws.versions["2"]["CodeSha256"] = code_sha(self.zip_hex)
+                self.assertEqual(self.deploy(), 0 if ok else 1)
+                self.assertEqual(self.aws.alias["FunctionVersion"], "2" if ok else "1")
+
+
+class DescriptionMarkers(unittest.TestCase):
+    def test_markers_round_trip_in_a_fixed_order(self):
+        self.assertEqual(dl.make_description(NEW_SHA, OLD_ZIP, "1"), f"source={NEW_SHA};zip={OLD_ZIP};run=1")
+        both = dl.make_description(NEW_SHA, OLD_ZIP, "1", guard=True, viewer_ip=True)
+        self.assertTrue(both.endswith(";guard=1;viewerip=1"))
+        meta = dl.parse_description(both)
+        self.assertTrue(meta["guard"] and meta["viewerip"])
+        self.assertNotIn("viewerip", dl.parse_description(dl.make_description(NEW_SHA, OLD_ZIP, "1", guard=True)))
+
+    def test_unknown_or_reordered_markers_are_not_trusted(self):
+        base = f"source={NEW_SHA};zip={OLD_ZIP};run=1"
+        for text in (base + ";viewerip=1;guard=1", base + ";viewerip=2", base + ";viewerip=1;viewerip=1", base + ";edge=1"):
+            with self.subTest(text):
+                self.assertIsNone(dl.parse_description(text))
 
 
 class RunAwsRegions(unittest.TestCase):
@@ -2163,66 +1648,6 @@ class RunAwsRegions(unittest.TestCase):
                 dl.run_aws(["lambda", "get-alias", "--region", "us-west-2"])
 
 
-class WebAclRuleClassification(unittest.TestCase):
-    """必須のIP規則（ip_rate_rule_ok）と観測グループ（classify_observer）は互いの形を受け入れない。"""
-
-    def setUp(self):
-        (self.ip,) = make_web_acl()["WebACL"]["Rules"]
-        self.global_rule = make_global_rule()
-
-    def test_ip_rule_is_the_only_accepted_rate_rule(self):
-        self.assertTrue(dl.ip_rate_rule_ok(self.ip))
-        self.assertIsNone(dl.classify_observer(self.ip))
-        # 要件から外した全体（CONSTANT）の規則は、どちらの判定でも受け入れない
-        self.assertFalse(dl.ip_rate_rule_ok(self.global_rule))
-        self.assertIsNone(dl.classify_observer(self.global_rule))
-
-    def test_obsolete_global_rule_helpers_are_removed(self):
-        for name in ("GLOBAL_RATE_LIMIT", "scope_down_ok", "classify_rule"):
-            with self.subTest(name):
-                self.assertFalse(hasattr(dl, name))
-
-    def test_bool_is_not_accepted_as_a_number(self):
-        rule = json.loads(json.dumps(self.ip))
-        rule["Statement"]["RateBasedStatement"]["EvaluationWindowSec"] = True
-        self.assertFalse(dl.ip_rate_rule_ok(rule))
-
-    def test_known_observers_are_not_rate_rules(self):
-        for group in OBSERVER_GROUPS:
-            with self.subTest(group):
-                rule = observer(group, 2)
-                self.assertEqual(dl.classify_observer(rule), group)
-                self.assertFalse(dl.ip_rate_rule_ok(rule))
-
-    def test_allowed_observers_are_exactly_the_three_known_groups(self):
-        self.assertEqual(dl.OBSERVER_GROUPS, frozenset(OBSERVER_GROUPS))
-        self.assertEqual(dl.WEB_ACL_MAX_RULES, 1 + len(OBSERVER_GROUPS))
-        self.assertEqual(dl.WEB_ACL_MAX_RULES, 4)
-
-    def test_malformed_group_names_are_rejected_without_raising(self):
-        for bad in (["AWSManagedRulesCommonRuleSet"], {"a": 1}, None, 1, True):
-            with self.subTest(repr(bad)):
-                rule = observer(OBSERVER_GROUPS[1], 2)
-                rule["Statement"]["ManagedRuleGroupStatement"]["Name"] = bad
-                self.assertIsNone(dl.classify_observer(rule))
-                self.assertFalse(dl.web_acl_rules_ok([self.ip, rule]))
-
-    def test_rule_list_bounds(self):
-        observers = [observer(g, 1 + i) for i, g in enumerate(OBSERVER_GROUPS)]
-        self.assertTrue(dl.web_acl_rules_ok([self.ip]))
-        self.assertTrue(dl.web_acl_rules_ok([self.ip, *observers]))  # 合計4件（実際の構成と同じ形）
-        self.assertTrue(dl.web_acl_rules_ok([*observers, self.ip]))
-        self.assertFalse(dl.web_acl_rules_ok([self.ip, *observers, observers[0]]))
-        self.assertFalse(dl.web_acl_rules_ok([self.ip, *observers, self.global_rule]))
-        self.assertFalse(dl.web_acl_rules_ok([self.ip, self.global_rule]))
-        self.assertFalse(dl.web_acl_rules_ok([self.ip, *observers[:2], self.global_rule]))
-        self.assertFalse(dl.web_acl_rules_ok([self.global_rule]))
-        self.assertFalse(dl.web_acl_rules_ok(observers))
-        self.assertFalse(dl.web_acl_rules_ok([self.ip, self.ip]))
-        self.assertFalse(dl.web_acl_rules_ok([self.ip, unknown_count_rule()]))
-        self.assertFalse(dl.web_acl_rules_ok([]))
-        self.assertFalse(dl.web_acl_rules_ok(None))
-
 
 class TemplatesMatchTheCode(unittest.TestCase):
     def load(self, name):
@@ -2231,22 +1656,22 @@ class TemplatesMatchTheCode(unittest.TestCase):
     def test_waf_template_satisfies_the_validator(self):
         response = make_web_acl()
         response["WebACL"]["Rules"] = self.load("waf-rules.json")["Rules"]
-        self.assertEqual(dl.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
+        self.assertEqual(cp.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
         # テンプレートの1件に既知の観測グループ3種（Count）を足した4件も受け入れる
         response["WebACL"]["Rules"] += [observer(g, 1 + i) for i, g in enumerate(OBSERVER_GROUPS)]
-        self.assertEqual(dl.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
+        self.assertEqual(cp.web_acl_problems(response, WAF_ARN, WAF_NAME, WAF_ID), [])
 
     def test_waf_template_has_only_the_ip_rule(self):
         text = (ROOT / "infra" / "cd" / "waf-rules.json").read_text(encoding="utf-8")
         rules = json.loads(text)["Rules"]
         self.assertEqual(len(rules), 1)
-        self.assertTrue(dl.ip_rate_rule_ok(rules[0]))
+        self.assertTrue(cp.ip_rate_rule_ok(rules[0]))
         rate_statement = rules[0]["Statement"]["RateBasedStatement"]
         self.assertEqual(
             rate_statement,
-            {"Limit": dl.IP_RATE_LIMIT, "EvaluationWindowSec": dl.RATE_WINDOW_SEC, "AggregateKeyType": "IP"},
+            {"Limit": cp.IP_RATE_LIMIT, "EvaluationWindowSec": cp.RATE_WINDOW_SEC, "AggregateKeyType": "IP"},
         )
-        self.assertEqual((dl.IP_RATE_LIMIT, dl.RATE_WINDOW_SEC), (300, 300))
+        self.assertEqual((cp.IP_RATE_LIMIT, cp.RATE_WINDOW_SEC), (300, 300))
         for removed in ("CONSTANT", "1500", "ScopeDownStatement"):
             self.assertNotIn(removed, text)
 
@@ -2307,17 +1732,11 @@ class OidcTrustPolicyTemplate(unittest.TestCase):
 
     PREFIX = "repo:example-owner@1000001/example-repo@2000002"  # 架空
     LEGACY = "repo:example-owner/example-repo"
-    SLUG = "example-owner/example-repo"
 
     @classmethod
     def setUpClass(cls):
         cls.template = (ROOT / "infra" / "cd" / "oidc-trust-policy.json").read_text(encoding="utf-8")
         cls.bootstrap = (ROOT / "infra" / "cd" / "bootstrap.md").read_text(encoding="utf-8")
-
-    def pattern(self, name):
-        match = re.search(rf"^{name}='(.+)'$", self.bootstrap, re.MULTILINE)
-        self.assertIsNotNone(match, f"{name} が手順書にない")
-        return re.compile(match.group(1))
 
     def test_template_uses_exactly_the_selected_prefix_and_demo_environment(self):
         document = json.loads(self.template)
@@ -2339,120 +1758,6 @@ class OidcTrustPolicyTemplate(unittest.TestCase):
             sub = substituted["Statement"][0]["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"]
             self.assertEqual(sub, f"{prefix}:environment:demo")
 
-    def test_runbook_validation_accepts_only_the_two_exact_forms(self):
-        immutable = self.pattern("OIDC_IMMUTABLE_RE")
-        legacy = self.pattern("OIDC_LEGACY_RE")
-        self.assertIsNotNone(immutable.fullmatch(self.PREFIX))
-        self.assertIsNone(immutable.fullmatch(self.LEGACY))
-        self.assertIsNotNone(legacy.fullmatch(self.LEGACY))
-        self.assertIsNone(legacy.fullmatch(self.PREFIX))
-        for bad in (
-            "repo:*",
-            "repo:example-owner/*",
-            "repo:example-owner@1000001/*",
-            "repo:example-owner@1000001/example-repo",  # リポジトリのIDなし
-            "repo:example-owner/example-repo@2000002",  # 所有者のIDなし
-            "repo:example-owner@x/example-repo@2000002",
-            self.PREFIX + ":environment:demo",  # 接尾辞は含めない
-            self.PREFIX + ":*",
-            "REPLACE_OIDC_SUB_PREFIX",
-            "",
-            self.PREFIX + "\n",
-        ):
-            with self.subTest(bad):
-                self.assertIsNone(immutable.fullmatch(bad))
-                self.assertIsNone(legacy.fullmatch(bad))
-        # 手順書の検証は、接頭辞の所有者・リポジトリ名が REPO_SLUG と一致することも要求する
-        groups = immutable.fullmatch(self.PREFIX).groups()
-        self.assertEqual(f"{groups[0]}/{groups[2]}", self.SLUG)
-
-    def test_runbook_documents_the_authenticated_local_lookup_and_forbids_fallbacks(self):
-        text = self.bootstrap
-        self.assertIn("repos/${REPO_SLUG}/actions/oidc/customization/sub", text)
-        self.assertIn("OIDC_SUB_PREFIX", text)
-        self.assertIn("<OIDC_SUB_PREFIX>", text)
-        self.assertNotIn("<OWNER>/<REPO>", text)
-        self.assertNotIn("repo:<リポジトリ>:environment:demo", text)
-        self.assertNotIn("repo:${REPO_SLUG}:environment:demo", text)  # 旧前提の組み立て
-        self.assertIn("ワイルドカード", text)
-        self.assertIn("CloudShell", text)
-        # 実際のGitHubの応答（Codexの実測）で確認した項目名。未確認という古い記述に戻らない
-        for key in ("use_immutable_subject", "sub_claim_prefix"):
-            self.assertIn(key, text)
-        self.assertNotIn("接頭辞の項目名は未確認", text)
-
-    def runbook_block(self, marker):
-        blocks = [b for b in re.findall(r"```bash\n(.*?)```", self.bootstrap, re.DOTALL) if marker in b]
-        self.assertEqual(len(blocks), 1, marker)
-        return blocks[0]
-
-    def run_prefix_check(self, prefix, slug):
-        """手順書の検証ブロックを、実際のbashで実行する（AWS・ネットワークは使わない）。"""
-        if shutil.which("bash") is None:
-            self.skipTest("bash がない")
-        block = re.sub(r"^OIDC_SUB_PREFIX=.*\n", "", self.runbook_block("OIDC_IMMUTABLE_RE="), count=1, flags=re.M)
-        script = 'set -euo pipefail\ndie() { echo "停止: $*" >&2; exit 1; }\n' + block
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "OIDC_SUB_PREFIX": prefix, "REPO_SLUG": slug}
-        done = subprocess.run(
-            ["bash", "-c", script], env=env, capture_output=True, encoding="utf-8", errors="replace", check=False
-        )
-        return done.returncode
-
-    def test_runbook_bash_check_accepts_only_exact_forms_matching_the_repo_slug(self):
-        self.assertEqual(self.run_prefix_check(self.PREFIX, self.SLUG), 0)
-        self.assertEqual(self.run_prefix_check(self.LEGACY, self.SLUG), 0)
-        bad = {
-            "other-repo-immutable": ("repo:example-owner@1000001/other-repo@2000002", self.SLUG),
-            "other-owner-immutable": ("repo:other-owner@1000001/example-repo@2000002", self.SLUG),
-            "other-repo-legacy": ("repo:example-owner/other-repo", self.SLUG),
-            "other-owner-legacy": ("repo:other-owner/example-repo", self.SLUG),
-            "wildcard": ("repo:example-owner/*", self.SLUG),
-            "wildcard-all": ("repo:*", self.SLUG),
-            "suffix": (self.PREFIX + ":environment:demo", self.SLUG),
-            "no-owner-id": ("repo:example-owner/example-repo@2000002", self.SLUG),
-            "placeholder": ("REPLACE_OIDC_SUB_PREFIX", self.SLUG),
-            "empty": ("", self.SLUG),
-        }
-        for name, (prefix, slug) in bad.items():
-            with self.subTest(name):
-                self.assertNotEqual(self.run_prefix_check(prefix, slug), 0)
-
-    def run_jq_check(self, document, sub):
-        """手順書のjqの検査を、実際のjqで実行する。終了コード0だけが合格（jq -e）。"""
-        jq = shutil.which("jq")
-        if jq is None:
-            self.skipTest("jq がない")
-        match = re.search(
-            r"jq -e --arg sub \"\$\{OIDC_SUB_PREFIX\}:environment:demo\" \\\n  '([^']+)'", self.bootstrap
-        )
-        self.assertIsNotNone(match, "手順書のjqの検査が見つからない")
-        done = subprocess.run(
-            [jq, "-e", "--arg", "sub", sub, match.group(1)],
-            input=json.dumps(document), capture_output=True, encoding="utf-8", check=False,
-        )
-        return done.returncode
-
-    def test_runbook_jq_check_requires_one_statement_with_the_exact_sub(self):
-        sub = f"{self.PREFIX}:environment:demo"
-        good = json.loads(self.template.replace("<OIDC_SUB_PREFIX>", self.PREFIX))
-        self.assertEqual(self.run_jq_check(good, sub), 0)
-        # 確認した接頭辞と違う・接尾辞が違う場合は不合格
-        self.assertNotEqual(self.run_jq_check(good, f"{self.LEGACY}:environment:demo"), 0)
-        self.assertNotEqual(self.run_jq_check(good, f"{self.PREFIX}:environment:demo2"), 0)
-        self.assertNotEqual(self.run_jq_check(good, f"{self.PREFIX}:*"), 0)
-        # 文が2件（広い許可の追加）は不合格。lengthとsubの照合が別々に効く
-        two = json.loads(json.dumps(good))
-        two["Statement"].append(json.loads(json.dumps(good["Statement"][0])))
-        self.assertNotEqual(self.run_jq_check(two, sub), 0)
-        # StringEquals以外の条件演算子の追加（StringLikeなど）は不合格
-        like = json.loads(json.dumps(good))
-        like["Statement"][0]["Condition"]["StringLike"] = {"token.actions.githubusercontent.com:sub": "repo:*"}
-        self.assertNotEqual(self.run_jq_check(like, sub), 0)
-        # subが違う文書は不合格
-        wrong = json.loads(json.dumps(good))
-        wrong["Statement"][0]["Condition"]["StringEquals"]["token.actions.githubusercontent.com:sub"] = "repo:x:environment:demo"
-        self.assertNotEqual(self.run_jq_check(wrong, sub), 0)
-
     def test_public_docs_hold_no_real_account_ids(self):
         # 12桁の数字は、公開されているアダプタのレイヤーの所有アカウントだけ許す（実在の利用者のアカウントIDは書かない）
         allowed = {"753240598075"}
@@ -2469,170 +1774,79 @@ class OidcTrustPolicyTemplate(unittest.TestCase):
                 self.assertEqual(match.group(0), self.PREFIX)
 
 
-class ReservedConcurrency(DeployTestCase):
-    """予約済み同時実行数は、変更の前に読み取りでちょうど3を確認する。自動では設定しない。"""
 
-    def concurrency_calls(self):
-        return [c for c in self.aws.calls if c[1].endswith("function-concurrency")]
+@unittest.skipUnless(shutil.which("jq"), "jq が必要")
+class WorkflowSummary(DeployTestCase):
+    """ワークフローの「結果のサマリー」のjqを、実際の結果JSONに当てる（キー名のずれと欠けた値の表示）。"""
 
-    def test_exactly_one_passes_and_is_read_before_any_mutation_or_smoke(self):
-        self.assertEqual(self.deploy(), 0)
-        result = self.result()
-        self.assertEqual(result["reservedConcurrency"], "passed")
-        self.assertEqual(
-            self.concurrency_calls(),
-            [["lambda", "get-function-concurrency", "--function-name", FUNCTION]],
+    def summary(self):
+        text = (ROOT / ".github" / "workflows" / "cd.yml").read_text(encoding="utf-8")
+        program = re.search(r"jq -r '(.*?)' cd-result/result.json", text, re.S).group(1)
+        done = subprocess.run(
+            ["jq", "-r", program, str(self.result_file)], capture_output=True, text=True, check=False
         )
-        ops = self.aws.ops()
-        self.assertLess(ops.index("get-function-concurrency"), ops.index("update-function-code"))
-        self.assertEqual(self.smoke.calls[0][2], "previous")
-        self.assertNotIn("put-function-concurrency", ops)
-        self.assertNotIn("delete-function-concurrency", ops)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout
 
-    def test_wrong_concurrency_blocks_with_zero_mutation_and_no_smoke(self):
-        cases = [
-            ("missing", {}, "missing", "設定されていません"),
-            ("null", {"ReservedConcurrentExecutions": None}, "missing", "設定されていません"),
-            ("zero", {"ReservedConcurrentExecutions": 0}, "zero", "0です"),
-            ("one", {"ReservedConcurrentExecutions": 1}, "mismatch", "3ではありません"),
-            ("two", {"ReservedConcurrentExecutions": 2}, "mismatch", "3ではありません"),
-            ("large", {"ReservedConcurrentExecutions": 1000}, "mismatch", "3ではありません"),
-            ("negative", {"ReservedConcurrentExecutions": -1}, "mismatch", "3ではありません"),
-            ("bool-true", {"ReservedConcurrentExecutions": True}, "mismatch", "3ではありません"),
-            ("string", {"ReservedConcurrentExecutions": "3"}, "mismatch", "3ではありません"),
-            ("float", {"ReservedConcurrentExecutions": 3.0}, "mismatch", "3ではありません"),
-        ]
-        for name, response, state, message in cases:
-            with self.subTest(name):
-                self.aws = FakeAws()
-                self.smoke = FakeSmoke()
-                self.result_file.unlink(missing_ok=True)
-                self.aws.concurrency = response
-                self.assertEqual(self.deploy(), 1)
-                result = self.result()
-                self.assertEqual(result["reservedConcurrency"], state)
-                self.assertEqual(result["overall"], "failed")
-                self.assertEqual(result["validation"], "failed")
-                self.assertEqual(result["stage"], "validate-concurrency")
-                self.assertEqual(result["deployment"], "not-started")
-                self.assertFalse(result["mutationStarted"])
-                self.assertIn(message, result["error"])
-                self.assertIn("変更しません", result["error"])
-                self.assertEqual(self.aws.mutating(), [])
-                self.assertEqual(self.smoke.calls, [])
-                # 自動で直さない（読み取り1回だけ）
-                self.assertEqual(
-                    self.concurrency_calls(),
-                    [["lambda", "get-function-concurrency", "--function-name", FUNCTION]],
-                )
-                self.assertEqual(self.aws.alias["FunctionVersion"], "1")
-                self.assert_no_leak()
-
-    def test_read_failure_blocks_with_zero_mutation(self):
-        self.aws.fail["get-function-concurrency"] = dl.AwsError("lambda get-function-concurrency", 254)
-        self.assertEqual(self.deploy(), 1)
-        result = self.result()
-        self.assertEqual(result["reservedConcurrency"], "read-failed")
-        self.assertIn("AWS操作に失敗", result["error"])
-        self.assertEqual(self.aws.mutating(), [])
-        self.assertEqual(self.smoke.calls, [])
-
-    def test_public_path_failure_stops_before_reading_concurrency(self):
-        rate(self.aws).update(Limit=3000)
-        self.assertEqual(self.deploy(), 1)
-        self.assertEqual(self.result()["reservedConcurrency"], "not-run")
-        self.assertEqual(self.concurrency_calls(), [])
-
-    def test_problem_classifier(self):
-        self.assertIsNone(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 3}))
-        self.assertEqual(dl.reserved_concurrency_problem({}), "missing")
-        self.assertEqual(dl.reserved_concurrency_problem(None), "missing")
-        self.assertEqual(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 0}), "zero")
-        self.assertEqual(dl.reserved_concurrency_problem({"ReservedConcurrentExecutions": 2}), "mismatch")
-        self.assertEqual(dl.REQUIRED_RESERVED_CONCURRENCY, 3)
-
-
-class ActualFourRuleWebAcl(DeployTestCase):
-    """利用者が確認した実際の形（2026-11-10）: IP規則のBlock 1件＋既知の観測グループ3種（Count）、全体の規則なし。
-
-    偽のAWSでの形の再現で、実際のWeb ACLの応答そのものではない。
-    """
-
-    def setUp(self):
-        super().setUp()
-        add_observers(self.aws, first=False)  # 優先順位: IP規則 0、観測グループ 1〜3
-
-    def test_four_rule_acl_is_reused_and_deploys(self):
-        self.assertEqual(len(self.aws.rules), 4)
+    def test_summary_renders_success_and_a_run_stopped_before_any_version(self):
         self.assertEqual(self.deploy(), 0)
-        result = self.result()
-        self.assertEqual(result["overall"], "success")
-        self.assertEqual(result["publicPath"], "passed")
-        self.assertEqual(result["reservedConcurrency"], "passed")
-        self.assertEqual(self.aws.mutating(), ["update-function-code", "publish-version", "update-alias"])
-        # Web ACL・CloudFrontは読み取りだけ（作り直し・更新をしない）
-        for call in self.aws.calls:
-            if call[0] in ("cloudfront", "wafv2"):
-                self.assertTrue(call[1].startswith("get-"))
-        self.assertEqual(len(self.aws.rules), 4)
-
-    def test_four_rules_with_observers_first_also_deploy(self):
-        self.aws = FakeAws()
-        add_observers(self.aws, first=True)
-        self.assertEqual(self.deploy(), 0)
-
-    def test_current_disabled_distribution_fails_closed_only_on_enabled(self):
-        # 現在はディストリビューションが無効のまま。WAFの4件は受け入れ、無効化だけで止まる
-        self.aws.dist_config.update(Enabled=False)
+        self.assertIn("直前 1 → 今回 2、エイリアス: switched", self.summary())
+        self.reset()
+        self.aws.versions["1"]["Description"] = "not-ours"
         self.assertEqual(self.deploy(), 1)
-        result = self.result()
-        self.assertIn("distributionEnabled", result["error"])
-        self.assertNotIn("webAclRules", result["error"])
-        self.assertEqual(self.aws.mutating(), [])
-        self.assertEqual(self.smoke.calls, [])
-
-    def test_four_rules_with_wrong_concurrency_still_block(self):
-        self.aws.concurrency = {"ReservedConcurrentExecutions": 0}
-        self.assertEqual(self.deploy(), 1)
-        self.assertEqual(self.result()["reservedConcurrency"], "zero")
-        self.assertEqual(self.aws.mutating(), [])
-
-    def test_four_rules_with_bad_ip_setting_still_block(self):
-        rate(self.aws).update(EvaluationWindowSec=600)
-        self.assertEqual(self.deploy(), 1)
-        self.assertIn("webAclRules", self.result()["error"])
-        self.assertEqual(self.aws.mutating(), [])
-
-    def test_adding_the_removed_global_rule_makes_five_and_blocks(self):
-        self.aws.rules.append(make_global_rule(4))
-        self.assertEqual(self.deploy(), 1)
-        self.assertIn("webAclRules", self.result()["error"])
-        self.assertEqual(self.aws.mutating(), [])
+        text = self.summary()
+        self.assertIn("直前 なし → 今回 なし、エイリアス: untouched", text)
+        self.assertNotIn("null", text)
 
 
-class SummaryFlags(DeployTestCase):
-    def test_mutation_not_started_when_validation_fails(self):
-        self.aws.function["Runtime"] = "python3.13"
-        self.deploy()
-        self.assertFalse(self.result()["mutationStarted"])
+class IsolatedEntryPoint(unittest.TestCase):
+    """実際の `python3 -B -I` の起動（別のcwd）。同じディレクトリの cd_public_path.py を読む。"""
 
-    def test_mutation_started_is_recorded_even_when_update_fails(self):
-        self.aws.fail["update-function-code"] = dl.AwsError("update-function-code", 255)
-        self.deploy()
-        result = self.result()
-        self.assertTrue(result["mutationStarted"])
-        self.assertEqual(result["overall"], "failed")
+    def run_help(self, script: Path, cwd: str):
+        return subprocess.run(
+            [sys.executable, "-B", "-I", str(script), "--help"], cwd=cwd, capture_output=True, text=True, check=False
+        )
+
+    def test_help_runs_isolated_and_a_copy_without_the_sibling_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            done = self.run_help(ROOT / "scripts" / "deploy-lambda.py", cwd)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("--artifact-dir", done.stdout)
+            with self.subTest("copy without cd_public_path.py"), tempfile.TemporaryDirectory() as copy:
+                lone = Path(copy) / "deploy-lambda.py"
+                shutil.copy(ROOT / "scripts" / "deploy-lambda.py", lone)
+                done = self.run_help(lone, cwd)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("cd_public_path.py", done.stderr)
+                self.assertNotIn("Traceback", done.stderr)
 
 
-class VerifyArtifactOnly(DeployTestCase):
-    def run_cli(self, *extra):
-        argv = [
-            "--artifact-dir", str(self.artifact),
-            "--source-sha", NEW_SHA,
-            "--zip-sha256", self.zip_hex,
-            "--verify-artifact-only",
-            *extra,
-        ]
+class Cli(DeployTestCase):
+    """入力の検証と --verify-artifact-only。検証だけのモードは、AWS・subprocessを呼ばない。"""
+
+    FULL = dict(
+        ci_run_url="https://github.com/example/repo/actions/runs/1",
+        run_id="1",
+        run_attempt="1",
+        function_name=FUNCTION,
+        base_url=BASE_URL,
+        distribution_id=DIST_ID,
+        oac_id=OAC_ID,
+        web_acl_arn=WAF_ARN,
+        layer_code_sha256=LAYER_SHA,
+        edge_function_arn=None,
+        result_file=Path("result.json"),
+    )
+
+    def args(self, **overrides):
+        values = dict(verify_artifact_only=False, source_sha=NEW_SHA, zip_sha256="0" * 64, **self.FULL)
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def verify_only(self, **overrides):
+        argv = ["--artifact-dir", str(self.artifact), "--source-sha", NEW_SHA, "--zip-sha256", self.zip_hex, "--verify-artifact-only"]
+        for name, value in overrides.items():
+            argv[argv.index(name) + 1] = value
         out = io.StringIO()
         with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}), \
                 mock.patch.object(dl, "run_aws", side_effect=AssertionError("AWS呼び出し")), \
@@ -2640,184 +1854,77 @@ class VerifyArtifactOnly(DeployTestCase):
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             return dl.main(argv), out.getvalue()
 
-    def test_valid_artifact_passes_without_aws_or_other_arguments(self):
-        code, output = self.run_cli()
+    def test_verify_only_accepts_a_valid_artifact_without_deploy_arguments(self):
+        code, output = self.verify_only()
         self.assertEqual(code, 0)
         self.assertNotIn(self.tmp.name, output)
 
-    def test_tampered_zip_is_rejected_before_any_aws_call(self):
+    def test_verify_only_rejects_tampering(self):
+        def manifest(**changes):
+            path = self.artifact / "manifest.json"
+            data = json.loads(path.read_text())
+            data.update(changes)
+            path.write_text(json.dumps(data))
+
+        self.assertEqual(self.verify_only(**{"--source-sha": OTHER_SHA})[0], 1)
+        manifest(releaseEligible=False)
+        self.assertEqual(self.verify_only()[0], 1)
+        manifest(releaseEligible=True, dirty=True)
+        self.assertEqual(self.verify_only()[0], 1)
+        manifest(dirty=False)
+        self.assertEqual(self.verify_only()[0], 0)
         (self.artifact / f"lambda-{NEW_SHA}.zip").write_bytes(b"tampered")
-        code, _ = self.run_cli()
-        self.assertEqual(code, 1)
+        self.assertEqual(self.verify_only()[0], 1)
 
-    def test_tampered_manifest_is_rejected(self):
-        path = self.artifact / "manifest.json"
-        manifest = json.loads(path.read_text())
-        manifest["dirty"] = True
-        path.write_text(json.dumps(manifest))
-        self.assertEqual(self.run_cli()[0], 1)
-
-    def test_not_release_eligible_is_rejected(self):
-        path = self.artifact / "manifest.json"
-        manifest = json.loads(path.read_text())
-        manifest["releaseEligible"] = False
-        path.write_text(json.dumps(manifest))
-        self.assertEqual(self.run_cli()[0], 1)
-
-    def test_other_source_sha_is_rejected(self):
-        with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}), \
-                contextlib.redirect_stderr(io.StringIO()):
-            code = dl.main([
-                "--artifact-dir", str(self.artifact), "--source-sha", OTHER_SHA,
-                "--zip-sha256", self.zip_hex, "--verify-artifact-only",
-            ])
-        self.assertEqual(code, 1)
-
-    def test_deploy_mode_requires_the_deploy_arguments(self):
-        with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}):
-            with self.assertRaises(SystemExit):
-                dl.main(["--artifact-dir", str(self.artifact), "--source-sha", NEW_SHA,
-                         "--zip-sha256", self.zip_hex])
-
-    def test_deploy_mode_requires_each_cloudfront_argument(self):
-        full = {
-            "--ci-run-url": "https://github.com/example/repo/actions/runs/1",
-            "--run-id": "1",
-            "--run-attempt": "1",
-            "--function-name": FUNCTION,
-            "--base-url": BASE_URL,
-            "--distribution-id": DIST_ID,
-            "--oac-id": OAC_ID,
-            "--web-acl-arn": WAF_ARN,
-            "--layer-code-sha256": LAYER_SHA,
-            "--result-file": str(self.dir / "r.json"),
-        }
-        for missing in ("--distribution-id", "--oac-id", "--web-acl-arn"):
+    def test_deploy_mode_requires_every_argument(self):
+        base = ["--artifact-dir", str(self.artifact), "--source-sha", NEW_SHA, "--zip-sha256", self.zip_hex]
+        flags = {name: "--" + name.replace("_", "-") for name in self.FULL if name != "edge_function_arn"}
+        values = {**self.FULL, "result_file": str(self.dir / "r.json")}
+        for missing in flags:
             with self.subTest(missing):
-                argv = ["--artifact-dir", str(self.artifact), "--source-sha", NEW_SHA,
-                        "--zip-sha256", self.zip_hex]
-                for name, value in full.items():
-                    if name != missing:
-                        argv += [name, value]
+                argv = base + [arg for name, flag in flags.items() if name != missing for arg in (flag, str(values[name]))]
                 with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}), \
                         mock.patch.object(dl, "run_aws", side_effect=AssertionError("AWS呼び出し")):
                     with self.assertRaises(SystemExit) as raised:
                         dl.main(argv)
-                self.assertIn(missing.removeprefix("--").replace("-", "_"), str(raised.exception))
+                self.assertIn(missing.replace("_", "-"), str(raised.exception))
 
-    def test_verify_only_ignores_cloudfront_arguments_and_never_calls_aws(self):
-        code, _ = self.run_cli()  # 新しい引数なし
-        self.assertEqual(code, 0)
-
-
-class InputValidation(unittest.TestCase):
-    def args(self, **overrides):
-        values = dict(
-            verify_artifact_only=False,
-            source_sha=NEW_SHA,
-            zip_sha256="0" * 64,
-            run_id="1",
-            run_attempt="1",
-            function_name=FUNCTION,
-            base_url=BASE_URL,
-            distribution_id=DIST_ID,
-            oac_id=OAC_ID,
-            web_acl_arn=WAF_ARN,
-            layer_code_sha256=LAYER_SHA,
-            edge_function_arn=None,
-            ci_run_url="https://github.com/example/repo/actions/runs/1",
-        )
-        values.update(overrides)
-        return mock.Mock(**values)
-
-    def test_valid_inputs_pass(self):
+    def test_valid_inputs_pass_and_bad_ones_are_rejected(self):
+        regional = WAF_ARN.replace("global", "regional")
+        bad = {
+            "source_sha": ["abc", NEW_SHA.upper()],
+            "zip_sha256": ["0" * 63],
+            "function_name": ["", "bad name"],
+            "layer_code_sha256": ["", "short"],
+            # 公開URLは、CloudFrontのオリジンだけ（関数URL・パス・クエリ・ポート・ユーザー情報は不可）
+            "base_url": [f"https://{LAMBDA_HOST}", BASE_URL + "/", BASE_URL + "/path", BASE_URL + "?x=1", BASE_URL + ":443", "https://user@" + CF_HOST, "http://" + CF_HOST, "https://short.cloudfront.net", CF_HOST + ".example.com", BASE_URL + "\n"],
+            "distribution_id": ["e2abcdefghijkl", "E2/ABC"],
+            "oac_id": [""],
+            "web_acl_arn": [regional, WAF_ARN.replace("us-east-1", "ap-northeast-1"), WAF_ARN + "/extra"],
+            "edge_function_arn": [EDGE_ARN + "/extra", EDGE_ARN + "\n", EDGE_ARN.replace("function/", "distribution/"), f"arn:aws:cloudfront::{ACCOUNT}:function/bad name", "arn:aws:cloudfront::123:function/x", 123],
+            "result_file": [None],
+        }
         with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}):
             dl.validate_inputs(self.args())
-
-    def test_rejects_anything_but_a_bare_cloudfront_origin(self):
-        urls = (
-            "https://example.com",
-            f"https://{LAMBDA_HOST}",  # 関数URLは公開URLにできない（フォールバック禁止）
-            BASE_URL + "/",
-            BASE_URL + "/path",
-            BASE_URL + "?x=1",
-            BASE_URL + ":443",
-            "https://user@" + CF_HOST,
-            "http://" + CF_HOST,
-            "https://D1234ABCD5678.cloudfront.net",
-            "https://d1234abcd5678.cloudfront.net.example.com",
-            "https://short.cloudfront.net",
-            BASE_URL + "\n",
-        )
-        for url in urls:
-            with self.subTest(url), self.assertRaises(SystemExit):
-                dl.validate_inputs(self.args(base_url=url))
-
-    def test_rejects_bad_distribution_oac_and_web_acl(self):
-        bad = (
-            {"distribution_id": "e2abcdefghijkl"},
-            {"distribution_id": "E2/ABC"},
-            {"oac_id": ""},
-            {"web_acl_arn": f"arn:aws:wafv2:us-east-1:{ACCOUNT}:regional/webacl/{WAF_NAME}/{WAF_ID}"},
-            {"web_acl_arn": f"arn:aws:wafv2:ap-northeast-1:{ACCOUNT}:global/webacl/{WAF_NAME}/{WAF_ID}"},
-            {"web_acl_arn": WAF_ARN + "/extra"},
-        )
-        for overrides in bad:
-            with self.subTest(overrides), self.assertRaises(SystemExit):
-                dl.validate_inputs(self.args(**overrides))
-
-    def test_edge_function_arn_is_optional_but_must_be_exact_when_given(self):
-        with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "false"}):
             dl.validate_inputs(self.args(edge_function_arn=EDGE_ARN))
             dl.validate_inputs(self.args(edge_function_arn=""))
-        bad = (
-            EDGE_ARN + "/extra",
-            EDGE_ARN + "\n",
-            EDGE_ARN.replace("function/", "distribution/"),
-            EDGE_ARN.replace("cloudfront::", "cloudfront:us-east-1:"),
-            f"arn:aws:cloudfront::{ACCOUNT}:function/",
-            f"arn:aws:cloudfront::{ACCOUNT}:function/bad name",
-            "arn:aws:cloudfront::123:function/x",
-            123,
-        )
-        for value in bad:
-            with self.subTest(value), self.assertRaises(SystemExit):
-                dl.validate_inputs(self.args(edge_function_arn=value))
+            for name, values in bad.items():
+                for value in values:
+                    with self.subTest(name, value=value), self.assertRaises(SystemExit):
+                        dl.validate_inputs(self.args(**{name: value}))
+            for name in ("distribution_id", "oac_id", "web_acl_arn", "base_url"):  # 文字列でない値でもTypeErrorにしない
+                with self.subTest(name), self.assertRaises(SystemExit):
+                    dl.validate_inputs(self.args(**{name: 123}))
+        with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "true"}), self.assertRaises(SystemExit):
+            dl.validate_inputs(self.args())
 
-    def test_edge_function_in_another_account_is_rejected_at_validation(self):
-        aws = FakeAws()
-        with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
-            zip_hex = make_artifact(directory / "a", guard=True, viewer_ip=True)
-            enable_write(aws)
-            deployer = dl.Deployer(
-                artifact_dir=directory / "a", source_sha=NEW_SHA, zip_hex=zip_hex,
-                ci_run_url="https://github.com/example/repo/actions/runs/1", run_id="1", run_attempt="1",
-                function_name=FUNCTION, base_url=BASE_URL, distribution_id=DIST_ID, oac_id=OAC_ID,
-                web_acl_arn=WAF_ARN, layer_code_sha256=LAYER_SHA,
-                edge_function_arn=EDGE_ARN.replace(ACCOUNT, OTHER_ACCOUNT),
-                result_file=directory / "r.json", aws=aws, smoke=FakeSmoke(),
-            )
-            self.assertEqual(deployer.run(), 1)
-        self.assertEqual(aws.mutating(), [])
-        self.assertNotIn("get-function", aws.ops())
+    def test_edge_function_in_another_account_is_rejected_before_any_change(self):
+        self.use_artifact("g", guard=True, viewer_ip=True)
+        enable_write(self.aws)
+        self.blocked("アカウント", edge_function_arn=EDGE_ARN.replace(ACCOUNT, OTHER_ACCOUNT))
+        self.assertNotIn("get-function", self.aws.ops())
 
-    def test_rejects_short_sha_and_blank_values(self):
-        for overrides in ({"source_sha": "abc"}, {"layer_code_sha256": ""}, {"function_name": ""}):
-            with self.assertRaises(SystemExit):
-                dl.validate_inputs(self.args(**overrides))
-
-    def test_non_string_values_exit_safely_instead_of_type_error(self):
-        for name in ("distribution_id", "oac_id", "web_acl_arn", "base_url"):
-            with self.subTest(name), self.assertRaises(SystemExit):
-                dl.validate_inputs(self.args(**{name: 123}))
-
-    def test_cd_allow_local_is_never_accepted(self):
-        with mock.patch.dict(os.environ, {"CD_ALLOW_LOCAL": "true"}):
-            with self.assertRaises(SystemExit):
-                dl.validate_inputs(self.args())
-
-    def test_smoke_environment_forces_allow_local_false_and_drops_credentials(self):
+    def test_smoke_runs_with_allow_local_false_and_without_credentials(self):
         captured = {}
 
         def fake_run(command, **kwargs):
