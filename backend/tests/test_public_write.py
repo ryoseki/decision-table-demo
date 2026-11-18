@@ -216,7 +216,8 @@ class TestViewerKey(unittest.TestCase):
             ("::ffff:192.0.2.1", "v4:192.0.2.1"),
             ("2001:db8:1:2::1", "v6:2001:db8:1:2::/64"),
             ("2001:DB8:1:2:ffff:ffff:ffff:ffff", "v6:2001:db8:1:2::/64"),
-            # エッジ（infra/edge/viewer-ip.test.js）が通す形と同じ値。両方のテストに同じ値を置く
+            # エッジ（infra/edge/viewer-ip.test.js）が通す形と同じ値。
+            # 両方のテストに同じ値を置く
             ("::ffff:c000:201", "v4:192.0.2.1"),
             ("::FFFF:C000:201", "v4:192.0.2.1"),
             ("2001:0db8:0001:0002:0000:0000:0000:0001", "v6:2001:db8:1:2::/64"),
@@ -229,7 +230,13 @@ class TestViewerKey(unittest.TestCase):
     def test_values_the_edge_prefilter_passes_but_are_not_ips_are_still_rejected(self):
         # エッジは粗い形の確認だけ（IPの文法は解釈しない）。実際のIPなら来ない値だが、
         # 形だけ通る値が来ても、アプリが拒否して枠の予約・推論をしない
-        for value in ("999.1.1.1", ":::", "1:2:3:4:5:6:7:8:9", "12345::1", "::ffff:999.1.1.1"):
+        for value in (
+            "999.1.1.1",
+            ":::",
+            "1:2:3:4:5:6:7:8:9",
+            "12345::1",
+            "::ffff:999.1.1.1",
+        ):
             with self.subTest(value), self.assertRaises(ViewerAddressUnavailable):
                 viewer_key(value)
 
