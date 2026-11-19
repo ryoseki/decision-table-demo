@@ -183,7 +183,7 @@ class DsqlConnection(unittest.TestCase):
                 "AWS_REGION": "r",
                 "DB_USER": "u",
                 "DB_HOST": "db",
-                "DB_PASSWORD": "local",
+                "DB_PASSWORD": "p",
             }
         )
         self.assertEqual(

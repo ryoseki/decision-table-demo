@@ -197,6 +197,10 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
 .source-detail { color: var(--muted); }
 .row-added { background: #e3f3e9; box-shadow: inset 4px 0 0 var(--accent); }
 .added-label { margin-left: 8px; background: var(--accent); color: #fff; }
+.row-updated { background: #e8eef8; box-shadow: inset 4px 0 0 var(--accent); }
+.updated-label { margin-left: 8px; background: var(--accent); color: #fff; }
+.condition-added { background: #e3f3e9; font-weight: 600; }
+.update-summary { margin: 0.5rem 0; }
 .row-retired { background: #f1eaea; box-shadow: inset 4px 0 0 var(--pending); }
 .row-retired td { color: var(--muted, #555); }
 .retired-label { margin-left: 8px; background: var(--pending); color: #fff; }

@@ -1,5 +1,5 @@
-import { proposalRequestId } from "./api";
-// 判定ルールの追加案・削除案（管理者AIの試作。モック・DBなし）のAPI呼び出し。Reactに依存しない。
+import { ApiError, proposalRequestId } from "./api";
+// 判定ルールの追加案・削除案・更新案（管理者AIの試作。モック・DBなし）のAPI呼び出し。Reactに依存しない。
 // 失敗は ApiError にそろえる（設問の追加案と同じ。文言の対象だけ「判定ルールの一覧」にする）。
 import { call } from "./questionsApi";
 import { resultNameOf } from "./resultCodes";
@@ -11,13 +11,15 @@ export type RuleCondition = { questionId: string; answer: "yes" | "no" };
 export type DemoRuleRow = { ruleId: string; revision: number; result: ResultName; conditions: RuleCondition[] };
 export type DemoRuleList = { revision: number; rules: DemoRuleRow[]; source: GenerationSource; persistence?: "database"; templateReuse?: boolean };
 export type RuleProposal = {
-  /** add は追加案、remove は削除案。 */
-  kind: "add" | "remove";
+  /** add は追加案、remove は削除案、update は既存ルールへの条件の追加（同じIDのまま更新）。 */
+  kind: "add" | "remove" | "update";
   proposalId: string;
   before: DemoRuleRow[];
   after: DemoRuleRow[];
-  /** 追加する、または削除するルールのID。 */
+  /** 追加する、削除する、または更新するルールのID。 */
   targetId: string;
+  /** 更新案で、対象のルールに足す条件（設問IDとYes／No）。更新案以外は空。 */
+  addedConditions: RuleCondition[];
   /** この提案を作った生成元（モックか、実接続か）。 */
   source: GenerationSource;
 };
@@ -25,7 +27,7 @@ export type RuleDecision = "yes" | "no";
 export type RuleDecisionResult = DemoRuleList & { applied: boolean };
 
 const SUBJECT = "判定ルールの一覧";
-// 提案は追加案と削除案の両方がある。404の案内で「追加案」と決め打ちしない。
+// 提案は追加案・削除案・更新案がある。404の案内で「追加案」と決め打ちしない。
 const PROPOSAL_NAME = "案";
 const NETWORK_UNCHANGED = `サーバーに接続できませんでした。${SUBJECT}は変わっていません。`;
 const NETWORK_UNKNOWN =
@@ -58,19 +60,30 @@ export async function createRuleProposal(prompt: string, requestId = proposalReq
     PROPOSAL_NAME,
   )) as {
     proposal_id: string;
-    kind: "add" | "remove";
+    kind: "add" | "remove" | "update";
     before: ApiRule[];
     after: ApiRule[];
     added?: ApiRule;
     removed?: ApiRule;
+    target?: ApiRule;
+    added_conditions?: Record<string, "yes" | "no">;
     source?: unknown;
   };
+  const targetRule = b.kind === "add" ? b.added : b.kind === "remove" ? b.removed : b.target;
+  // 更新案は、対象と追加する条件がそろわないものを、空のIDや空の差分で表示しない（反映の判断を誤らせない）。
+  if (b.kind === "update") {
+    const additions = Object.entries(b.added_conditions ?? {});
+    if (!targetRule?.rule_id || additions.length === 0 || additions.some(([, answer]) => answer !== "yes" && answer !== "no")) {
+      throw new ApiError(502, `更新案の対象のルールまたは追加する条件を読み取れませんでした。案は表示せず、${SUBJECT}は変わっていません。`);
+    }
+  }
   return {
     kind: b.kind,
     proposalId: b.proposal_id,
     before: b.before.map(toRow),
     after: b.after.map(toRow),
-    targetId: (b.kind === "add" ? b.added : b.removed)?.rule_id ?? "",
+    targetId: targetRule?.rule_id ?? "",
+    addedConditions: Object.entries(b.added_conditions ?? {}).map(([questionId, answer]) => ({ questionId, answer })),
     source: toSource(b.source),
   };
 }

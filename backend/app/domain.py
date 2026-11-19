@@ -122,6 +122,12 @@ def operation_from_receipt(target: str, payload: dict) -> dict:
         return {"operation": "add_question", "question": {"text": payload["text"]}}
     if payload["op"] == "remove":
         return {"operation": "remove_rule", "rule_id": payload["rule_id"]}
+    if payload["op"] == "update":
+        return {
+            "operation": "update_rule",
+            "rule_id": payload["rule_id"],
+            "add_conditions": payload["add_conditions"],
+        }
     rule = payload["rule"]
     return {
         "operation": "add_rule",

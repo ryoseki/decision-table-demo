@@ -52,6 +52,7 @@ from app.question_validation import DemoQuestion
 from app.quota_store import InMemoryAiQuota
 from app.rule_proposer import MockRuleProposer
 from app.rule_store import InMemoryRuleStore
+from app.rule_validation import DemoRule
 from tests.test_intake import _Server, send
 from tests.test_question_retirement import RetirementStore, rule_row
 
@@ -650,7 +651,7 @@ class TestRuleApiWithBedrock(BedrockApiTestCase):
             (add_rule_json({"A09": "yes"}, id_="R09"), "R04"),  # 追加できるID
             (add_rule_json({}), "条件"),
             ('{"operation": "remove_rule", "rule_id": "R77"}', "存在しません"),
-            ('{"operation": "none", "rule": {}}', "追加と削除だけ"),
+            ('{"operation": "none", "rule": {}}', "追加・削除・条件の更新だけ"),
         ):
             with self.subTest(output=output):
                 self.make(FakeClient(reply(output)))
@@ -708,6 +709,45 @@ class TestRuleApiWithBedrock(BedrockApiTestCase):
         user_text = call["messages"][0]["content"][0]["text"]
         self.assertIn("R01", user_text)
         self.assertIn("A12", user_text)
+
+    def add_r04(self) -> None:
+        # 初期のルールはR01〜R03だけ。更新の対象にする架空のR04（A10=No）を用意する。
+        self.rule_store._rules = (
+            *self.rule_store.snapshot()[1],
+            DemoRule("R04", 1, "caution", (("A10", "no"),)),
+        )
+
+    def test_update_request_asks_for_an_update_and_a_real_update_is_proposed(
+        self,
+    ) -> None:
+        update = (
+            '{"operation": "update_rule", "rule_id": "R04",'
+            ' "add_conditions": {"A09": "yes"}}'
+        )
+        client = FakeClient(reply(update))
+        self.make(client)
+        self.add_r04()
+        status, body = self.post("rule-proposals", "R04にA09がYesを追加して")
+        self.assertEqual(status, 201, body)
+        self.assertEqual(body["kind"], "update")
+        self.assertEqual(body["target"]["rule_id"], "R04")
+        self.assertEqual(body["updated"]["conditions"], {"A09": "yes", "A10": "no"})
+        self.assertEqual(len(body["after"]), len(body["before"]))  # R05は作らない
+        self.assertEqual(body["source"], EXPECTED_SOURCE)
+        # モデルへの指示に、更新の操作がある（新設との取り違えを防ぐ）。
+        self.assertIn("update_rule", client.calls[0]["system"][0]["text"])
+        self.assertEqual(len(self.get("rules")["rules"]), 4)  # 承認前は変わらない
+
+    def test_a_new_rule_returned_for_an_update_request_is_not_proposed(self) -> None:
+        # 実接続の出力が、更新の依頼を新規の追加で返しても、反映可能な提案にしない。
+        self.make(FakeClient(reply(add_rule_json({"A09": "yes"}, id_="R05"))))
+        self.add_r04()
+        before = self.get("rules")
+        status, body = self.post("rule-proposals", "R04にA09がYesを追加して")
+        self.assertEqual(status, 422)
+        self.assertIn("更新ではない案", body["detail"])
+        self.assertNotIn("proposal_id", body)
+        self.assertEqual(self.get("rules"), before)
 
 
 class _Records(logging.Handler):
