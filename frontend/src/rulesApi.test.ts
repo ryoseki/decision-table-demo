@@ -44,6 +44,42 @@ test("追加案・削除案: kind と、対象のルールIDを取り出す", as
   expect(removed.after).toHaveLength(0);
 });
 
+test("更新案: kind・対象のルールID・追加する条件（設問IDと回答）を取り出す。追加案・削除案では条件は空", async () => {
+  const updated = { ...apiRule, revision: 2 };
+  const target = { ...apiRule, conditions: { A10: "no" } };
+  stubFetch({
+    "POST /api/admin/rule-proposals": {
+      status: 201,
+      body: { proposal_id: "u1", kind: "update", before: [target], after: [updated], target, updated, added_conditions: { A09: "yes" } },
+    },
+  });
+  const proposal = await createRuleProposal("R04にA09がYesを追加して");
+  expect(proposal).toMatchObject({ kind: "update", proposalId: "u1", targetId: "R04" });
+  expect(proposal.addedConditions).toEqual([{ questionId: "A09", answer: "yes" }]);
+  expect(proposal.before).toHaveLength(1);
+  expect(proposal.after).toHaveLength(1); // 新設せず、同じIDの行を置き換える
+  expect(proposal.after[0].revision).toBe(2);
+
+  stubFetch({ "POST /api/admin/rule-proposals": { status: 201, body: { proposal_id: "p1", kind: "add", before: [], after: [apiRule], added: apiRule } } });
+  expect((await createRuleProposal("追加")).addedConditions).toEqual([]);
+});
+
+test.each([
+  ["対象(target)がない", { added_conditions: { A09: "yes" } }],
+  ["対象のIDが空", { target: { ...apiRule, rule_id: "" }, added_conditions: { A09: "yes" } }],
+  ["追加する条件(added_conditions)がない", { target: apiRule }],
+  ["追加する条件が空", { target: apiRule, added_conditions: {} }],
+  ["追加する条件の回答がyes/noでない", { target: apiRule, added_conditions: { A09: "maybe" } }],
+])("更新案の応答が不完全（%s）: 空のIDや空の差分のプレビューにせず、理由つきの例外にする", async (_name, partial) => {
+  stubFetch({
+    "POST /api/admin/rule-proposals": { status: 201, body: { proposal_id: "u1", kind: "update", before: [apiRule], after: [apiRule], ...partial } },
+  });
+  const error = await createRuleProposal("R04にA09がYesを追加して").catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(ApiError);
+  expect((error as ApiError).message).toContain("対象のルールまたは追加する条件を読み取れませんでした");
+  expect((error as ApiError).message).toContain("判定ルールの一覧は変わっていません");
+});
+
 test("定義にない結果コードは、別の結果に見せず、例外にする", async () => {
   stubFetch({ "GET /api/admin/rules": { body: { revision: 1, rules: [{ ...apiRule, result_code: "unknown" }] } } });
   await expect(getDemoRules()).rejects.toThrow("定義にない結果コード");

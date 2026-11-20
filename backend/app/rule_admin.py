@@ -4,6 +4,8 @@
 提案の生成（AIのモック）、検証（純粋な関数）、承認と保存（メモリ上の保存先）を境界で分け、
 ここは、HTTPの入力と出力、ステータスへの対応だけを持つ。
 
+- 既存ルールへの条件の追加（更新）は、同じIDのまま、条件を足した版を提案する。
+  依頼の文面と出力が食い違うとき（更新の依頼を新規追加で返したなど）は422で拒否する。
 - 生成は、現行の一覧を変えない。AIの出力は、現行の設問とルールの一覧と照らして検証し、
   不正（存在しない設問・結果コード、重複など）なら422で拒否する。
 - 承認はYes／Noの2つで、Yesだけが反映する。承認できるのは、検証済みの提案だけ。
@@ -43,6 +45,7 @@ from app.rule_validation import (
     DemoRule,
     ValidatedRuleAdd,
     ValidatedRuleRemoval,
+    ValidatedRuleUpdate,
     next_rule_id,
     validate_rule_output,
 )
@@ -74,9 +77,13 @@ class RuleStore(Protocol):
 
     def removed_ids(self) -> frozenset[str]: ...
 
-    def register(self, proposal: ValidatedRuleAdd | ValidatedRuleRemoval) -> str: ...
+    def register(
+        self, proposal: ValidatedRuleAdd | ValidatedRuleRemoval | ValidatedRuleUpdate
+    ) -> str: ...
 
-    def pending(self, proposal_id: str) -> ValidatedRuleAdd | ValidatedRuleRemoval: ...
+    def pending(
+        self, proposal_id: str
+    ) -> ValidatedRuleAdd | ValidatedRuleRemoval | ValidatedRuleUpdate: ...
 
     def approve(self, proposal_id: str) -> tuple[int, tuple[DemoRule, ...]]: ...
 
@@ -155,12 +162,20 @@ def create_proposal(body: ProposalRequest, request: Request) -> dict[str, Any]:
             revision,
             removed,
             question_revision=question_revision,
+            prompt=body.prompt,
         )
     except InvalidProposal as error:
         raise HTTPException(status_code=422, detail=str(error)) from None
     detail: dict[str, Any]
     if isinstance(proposal, ValidatedRuleRemoval):
         detail = {"kind": "remove", "removed": _row(proposal.target)}
+    elif isinstance(proposal, ValidatedRuleUpdate):
+        detail = {
+            "kind": "update",
+            "target": _row(proposal.target),
+            "updated": _row(proposal.updated),
+            "added_conditions": dict(proposal.added_conditions),
+        }
     else:
         detail = {"kind": "add", "added": _row(proposal.added)}
     return {

@@ -12,9 +12,14 @@ from collections import OrderedDict
 from typing import Any
 
 from app.domain import ProposalConflict, ProposalNotFound, operation_from_receipt
-from app.rule_validation import DemoRule, ValidatedRuleAdd, ValidatedRuleRemoval
+from app.rule_validation import (
+    DemoRule,
+    ValidatedRuleAdd,
+    ValidatedRuleRemoval,
+    ValidatedRuleUpdate,
+)
 
-Proposal = ValidatedRuleAdd | ValidatedRuleRemoval
+Proposal = ValidatedRuleAdd | ValidatedRuleRemoval | ValidatedRuleUpdate
 
 MAX_PENDING_PROPOSALS = 50
 
@@ -119,6 +124,12 @@ class InMemoryRuleStore:
                     receipt: dict[str, Any] = {
                         "op": "remove",
                         "rule_id": proposal.target.rule_id,
+                    }
+                elif isinstance(proposal, ValidatedRuleUpdate):
+                    receipt = {
+                        "op": "update",
+                        "rule_id": proposal.target.rule_id,
+                        "add_conditions": dict(proposal.added_conditions),
                     }
                 else:
                     receipt = {

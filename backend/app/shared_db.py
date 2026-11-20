@@ -47,6 +47,8 @@ from app.rule_validation import (
     DemoRule,
     ValidatedRuleAdd,
     ValidatedRuleRemoval,
+    ValidatedRuleUpdate,
+    with_added_conditions,
 )
 from app.template_store import save_template
 from app.usage_quota import (
@@ -323,23 +325,30 @@ class SharedConfigDb:
                     return ProposalConflict(proposal_id)
                 rules = tuple(r for r in current.rules if r.rule_id != target_id)
                 removed = removed | {target_id}
+            elif payload["op"] == "update":
+                target_id = payload["rule_id"]
+                target = next(
+                    (r for r in current.rules if r.rule_id == target_id), None
+                )
+                if target is None:
+                    return ProposalConflict(proposal_id)
+                additions = payload["add_conditions"]
+                # 対象の条件が提案後に変わっていたら足さない（版の比較への追加の防御）。
+                if any(question in dict(target.conditions) for question in additions):
+                    return ProposalConflict(proposal_id)
+                new_rule = with_added_conditions(target, additions)
+                rules = tuple(
+                    new_rule if r.rule_id == target_id else r for r in current.rules
+                )
+                # 旧い版の行は残す（登録済みの判定は、当時の版を参照し続ける）。
+                self._insert_rule_row(conn, new_rule)
             else:
                 added = _rule_of(payload["rule"])
                 if any(r.rule_id == added.rule_id for r in current.rules):
                     return ProposalConflict(proposal_id)
                 rules = (*current.rules, added)
                 # 登録済みの判定が採用ルールとして参照できるよう、不変の行として残す。
-                conn.execute(
-                    "INSERT INTO decision_rules (rule_id, revision, result_code,"
-                    " conditions, created_at) VALUES (%s, %s, %s, %s, now())"
-                    " ON CONFLICT DO NOTHING",
-                    (
-                        added.rule_id,
-                        added.revision,
-                        added.result_code,
-                        Jsonb(dict(added.conditions)),
-                    ),
-                )
+                self._insert_rule_row(conn, added)
             updated = SharedConfig(
                 current.config_revision + 1,
                 current.question_revision,
@@ -351,6 +360,20 @@ class SharedConfigDb:
             _insert_config(conn, updated, "approval")
             self._mark_applied(conn, "rule", proposal_id, payload)
             return updated
+
+    @staticmethod
+    def _insert_rule_row(conn: psycopg.Connection, rule: DemoRule) -> None:
+        conn.execute(
+            "INSERT INTO decision_rules (rule_id, revision, result_code,"
+            " conditions, created_at) VALUES (%s, %s, %s, %s, now())"
+            " ON CONFLICT DO NOTHING",
+            (
+                rule.rule_id,
+                rule.revision,
+                rule.result_code,
+                Jsonb(dict(rule.conditions)),
+            ),
+        )
 
     def _take(
         self, conn: psycopg.Connection, kind: str, proposal_id: str
@@ -521,13 +544,19 @@ class DbRuleStore:
 
     def register(
         self,
-        proposal: ValidatedRuleAdd | ValidatedRuleRemoval,
+        proposal: ValidatedRuleAdd | ValidatedRuleRemoval | ValidatedRuleUpdate,
         *,
         prompt: str | None = None,
     ) -> str:
         payload: dict[str, Any]
         if isinstance(proposal, ValidatedRuleRemoval):
             payload = {"op": "remove", "rule_id": proposal.target.rule_id}
+        elif isinstance(proposal, ValidatedRuleUpdate):
+            payload = {
+                "op": "update",
+                "rule_id": proposal.target.rule_id,
+                "add_conditions": dict(proposal.added_conditions),
+            }
         else:
             payload = {"op": "add", "rule": _rule_json(proposal.added)}
         payload["base_revision"] = proposal.base_revision
@@ -537,11 +566,15 @@ class DbRuleStore:
         return self._db.register("rule", payload)
 
     def register_for_reuse(
-        self, proposal: ValidatedRuleAdd | ValidatedRuleRemoval, prompt: str
+        self,
+        proposal: ValidatedRuleAdd | ValidatedRuleRemoval | ValidatedRuleUpdate,
+        prompt: str,
     ) -> str:
         return self.register(proposal, prompt=prompt)
 
-    def pending(self, proposal_id: str) -> ValidatedRuleAdd | ValidatedRuleRemoval:
+    def pending(
+        self, proposal_id: str
+    ) -> ValidatedRuleAdd | ValidatedRuleRemoval | ValidatedRuleUpdate:
         payload, config = self._db.pending("rule", proposal_id)
         base = (
             payload["base_revision"],
@@ -555,6 +588,14 @@ class DbRuleStore:
             if target is None:  # 基準が変わっている（承認は拒否される）
                 raise ProposalConflict(proposal_id)
             return ValidatedRuleRemoval(base[0], base[1], target, base[2])
+        if payload["op"] == "update":
+            target = next(
+                (r for r in config.rules if r.rule_id == payload["rule_id"]), None
+            )
+            if target is None:  # 基準が変わっている（承認は拒否される）
+                raise ProposalConflict(proposal_id)
+            additions = tuple(sorted(payload["add_conditions"].items()))
+            return ValidatedRuleUpdate(base[0], base[1], target, additions, base[2])
         return ValidatedRuleAdd(base[0], base[1], _rule_of(payload["rule"]), base[2])
 
     def approve(self, proposal_id: str) -> tuple[int, tuple[DemoRule, ...]]:

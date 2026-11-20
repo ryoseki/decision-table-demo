@@ -10,15 +10,24 @@ type ListState = { status: "loading" } | { status: "ok"; data: DemoRuleList } | 
 
 const ANSWER_LABEL = { yes: "Yes", no: "No" } as const;
 
-function ConditionText({ rule }: { rule: DemoRuleRow }) {
+function ConditionText({ rule, addedQuestions = [] }: { rule: DemoRuleRow; addedQuestions?: string[] }) {
   return (
     <>
-      {rule.conditions.map((c) => (
-        <span key={c.questionId} className="condition">{c.questionId}={ANSWER_LABEL[c.answer]} </span>
-      ))}
+      {rule.conditions.map((c) => {
+        const isAdded = addedQuestions.includes(c.questionId);
+        return (
+          <span key={c.questionId} className={isAdded ? "condition condition-added" : "condition"} data-added={isAdded ? "true" : undefined}>
+            {c.questionId}={ANSWER_LABEL[c.answer]}
+            {isAdded && "（追加）"}{" "}
+          </span>
+        );
+      })}
     </>
   );
 }
+
+/** 提案の種類ごとの呼び名。 */
+const KIND_NAME = { add: "追加案", remove: "削除案", update: "更新案" } as const;
 
 const naturalOrder = (a: string, b: string) => a.localeCompare(b, "en", { numeric: true });
 
@@ -35,6 +44,8 @@ function RuleTable({
   rules,
   addedId,
   removedId,
+  updatedId,
+  addedQuestions,
   grid = false,
 }: {
   title: string;
@@ -45,6 +56,10 @@ function RuleTable({
   addedId?: string;
   /** 削除案で、これから削除するルール（Before に「削除」ラベル。After には出ない）。 */
   removedId?: string;
+  /** 更新案で、条件を足す対象のルール（Before・After の両方に「更新」ラベル）。 */
+  updatedId?: string;
+  /** 更新案で、対象のルールに足す条件の設問ID（After で「（追加）」と背景で示す）。 */
+  addedQuestions?: string[];
 }) {
   const columns = grid ? questionColumns(rules) : [];
   const table = (
@@ -59,12 +74,18 @@ function RuleTable({
           {rules.map((r) => {
             const adding = r.ruleId === addedId;
             const removing = r.ruleId === removedId;
+            const updating = r.ruleId === updatedId;
             return (
-              <tr key={r.ruleId} className={adding ? "row-added" : removing ? "row-retired" : undefined} data-testid={`${title}-${r.ruleId}`}>
+              <tr
+                key={r.ruleId}
+                className={adding ? "row-added" : removing ? "row-retired" : updating ? "row-updated" : undefined}
+                data-testid={`${title}-${r.ruleId}`}
+              >
                 <th scope="row" className="case-id">
                   {r.ruleId}
                   {adding && <span className="badge added-label">追加</span>}
                   {removing && <span className="badge retired-label">削除</span>}
+                  {updating && <span className="badge updated-label">更新</span>}
                 </th>
                 <td>{r.revision}</td>
                 <td>{r.result}</td>
@@ -77,7 +98,7 @@ function RuleTable({
                         </td>
                       );
                     })
-                  : <td><ConditionText rule={r} /></td>}
+                  : <td><ConditionText rule={r} addedQuestions={updating ? addedQuestions : undefined} /></td>}
               </tr>
             );
           })}
@@ -158,13 +179,11 @@ export default function RuleAdmin() {
       if (result.applied) setTemplateVersion((v) => v + 1);
       setAiPrompt(decision === "no" && proposal.source.kind === "template" ? proposedPrompt : null);
       setProposal(null);
-      const removing = proposal.kind === "remove";
+      const applied = { add: "を追加", remove: "を削除", update: "の条件を更新" }[proposal.kind];
       setNotice(
         result.applied
-          ? removing
-            ? `デモの判定ルール一覧に反映しました（ルール${proposal.targetId}を削除）`
-            : `デモの判定ルール一覧に反映しました（ルール${proposal.targetId}を追加）`
-          : `この${removing ? "削除案" : "追加案"}は反映していません。下の一覧は、サーバーの最新の状態です。`,
+          ? `デモの判定ルール一覧に反映しました（ルール${proposal.targetId}${applied}）`
+          : `この${KIND_NAME[proposal.kind]}は反映していません。下の一覧は、サーバーの最新の状態です。`,
       );
     } catch (e) {
       setError(describeError(e));
@@ -183,7 +202,7 @@ export default function RuleAdmin() {
     <section aria-labelledby="rules-title">
       <div className="page-head">
         <h2 id="rules-title" tabIndex={-1}>判定ルール管理（デモ）</h2>
-        <p className="lead">自然文で、判定ルールの追加案・削除案を作り、変更前と変更後の差分を確認して、反映するかを決めます。</p>
+        <p className="lead">自然文で、判定ルールの追加案・削除案・更新案（既存ルールへの条件の追加）を作り、変更前と変更後の差分を確認して、反映するかを決めます。</p>
       </div>
       <p className="target-badge" data-testid="target">操作の対象: 判定ルール</p>
 
@@ -222,6 +241,7 @@ export default function RuleAdmin() {
           placeholder="例: 設問A09がYes、設問A10がNoのとき注意とするルールを追加して"
         />
         <p className="hint">削除の依頼の例: ルールR03を削除して</p>
+        <p className="hint">既存のルールへの条件の追加（更新）の依頼の例: R04にA09がYesを追加して</p>
         <div>
           <button type="submit" className="btn" disabled={busy || prompt.trim() === ""}>案を作る</button>
         </div>
@@ -232,11 +252,28 @@ export default function RuleAdmin() {
 
       {proposal !== null && (
         <section className="proposal" aria-labelledby="rule-diff-title" data-testid="proposal">
-          <h3 id="rule-diff-title">判定ルールの{proposal.kind === "remove" ? "削除案" : "追加案"}の確認（まだ反映していません）</h3>
+          <h3 id="rule-diff-title">判定ルールの{KIND_NAME[proposal.kind]}の確認（まだ反映していません）</h3>
           <SourceBadge source={proposal.source} />
+          {proposal.kind === "update" && (
+            <p className="update-summary" data-testid="update-summary">
+              更新の対象: ルール{proposal.targetId}（ID・既存の条件・結果は変わらず、条件を追加します）。追加する条件:{" "}
+              {proposal.addedConditions.map((c) => `${c.questionId}=${ANSWER_LABEL[c.answer]}`).join("、")}
+            </p>
+          )}
           <div className="diff">
-            <RuleTable title="Before（現行）" rules={proposal.before} removedId={proposal.kind === "remove" ? proposal.targetId : undefined} />
-            <RuleTable title="After（反映した場合）" rules={proposal.after} addedId={proposal.kind === "add" ? proposal.targetId : undefined} />
+            <RuleTable
+              title="Before（現行）"
+              rules={proposal.before}
+              removedId={proposal.kind === "remove" ? proposal.targetId : undefined}
+              updatedId={proposal.kind === "update" ? proposal.targetId : undefined}
+            />
+            <RuleTable
+              title="After（反映した場合）"
+              rules={proposal.after}
+              addedId={proposal.kind === "add" ? proposal.targetId : undefined}
+              updatedId={proposal.kind === "update" ? proposal.targetId : undefined}
+              addedQuestions={proposal.addedConditions.map((c) => c.questionId)}
+            />
           </div>
           <p className="confirm-q" id="rule-confirm-q"><strong>反映しますか？</strong></p>
           <div className="confirm-actions" role="group" aria-labelledby="rule-confirm-q">

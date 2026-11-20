@@ -21,7 +21,7 @@ from uuid import uuid4
 import psycopg
 import psycopg.errors
 
-from app import db_retry, db_store, shared_db
+from app import db_retry, db_store, rule_admin, shared_db
 from app.domain import (
     InvalidProposal,
     JudgmentAlreadyRecorded,
@@ -31,8 +31,22 @@ from app.domain import (
     StoreBusy,
 )
 from app.question_validation import validate_model_output
-from app.rule_validation import validate_rule_output
-from app.shared_db import DbQuestionStore, DbRuleStore, PostgresAiQuota, SharedConfigDb
+from app.rule_matching import (
+    Answer,
+    ConditionState,
+    Result,
+    RowDisplay,
+    Rule,
+    match_rules,
+)
+from app.rule_validation import DemoRule, validate_rule_output
+from app.shared_db import (
+    DbQuestionStore,
+    DbRuleStore,
+    PostgresAiQuota,
+    SharedConfig,
+    SharedConfigDb,
+)
 from app.template_store import PostgresProposalTemplates
 from app.usage_quota import DuplicateAiRequest, QuotaExceeded, QuotaLimits
 from tests.test_intake import _Server, case_payload, make_app, send
@@ -40,6 +54,41 @@ from tests.test_intake import _Server, case_payload, make_app, send
 DOCS = Path(os.environ.get("DB_DOCS_DIR", "/repo/docs"))
 # 通常のbackendコンテナにも DB_HOST があるため、専用の目印（RUN_DB_TESTS）で切り替える。
 HAVE_DB = os.environ.get("RUN_DB_TESTS") == "1"
+# 条件の更新の検証で使う、架空のルールR04の追加（初期のルールはR01〜R03だけ）。
+ADD_R04 = {
+    "operation": "add_rule",
+    "rule": {"id": "R04", "result_code": "caution", "conditions": {"A10": "no"}},
+}
+UPDATE_PROMPT = "R04にA09がYesを追加して"
+
+
+def update_op(**additions):
+    """R04に条件を追加する、生成の出力。"""
+    return {
+        "operation": "update_rule",
+        "rule_id": "R04",
+        "add_conditions": additions,
+    }
+
+
+# 結果コード（APIの値）から、照合ロジックの結果への対応。
+# 照合そのものは app.rule_matching.match_rules を使う。
+RESULT_OF_CODE = {
+    "account_deletion": Result.ACCOUNT_DELETION,
+    "account_suspension": Result.ACCOUNT_SUSPENSION,
+    "caution": Result.CAUTION,
+    "no_issue": Result.NO_ISSUE,
+}
+
+
+class _StubRuleProposer:
+    """生成のスタブ（固定の出力を返す。AIにもAWSにも接続しない）。"""
+
+    def __init__(self) -> None:
+        self.output = None
+
+    def generate(self, prompt, current, next_id, questions):
+        return self.output
 
 
 def _connect(schema: str | None = None, autocommit: bool = False):
@@ -293,6 +342,572 @@ class DbFlow(unittest.TestCase):
                 revision,
                 question_revision=question_revision,
             )
+
+    def _approve_rule(self, db, store, raw, prompt=None, reuse_prompt=None):
+        """依頼の文面と生成の出力から、検証した提案を作り、承認する（DB）。"""
+        revision, current = store.snapshot()
+        question_revision, questions = DbQuestionStore(db).snapshot()
+        proposal = validate_rule_output(
+            raw,
+            current,
+            questions,
+            revision,
+            question_revision=question_revision,
+            prompt=prompt,
+        )
+        if reuse_prompt is None:
+            identifier = store.register(proposal)
+        else:
+            identifier = store.register_for_reuse(proposal, reuse_prompt)
+        return proposal, identifier
+
+    def test_approved_rule_update_is_visible_and_registered_judgments_keep_theirs(self):
+        """承認後に別接続で同じIDの更新を読める。判定未登録の案件は更新後のルールを使い、
+        登録済みの判定は当時の版（採用ルールの版・結果）のまま変わらない。"""
+
+        # 準備: 初期のルールに、架空のR04（版1）を足して承認する。
+        db, store = self._db_with_r04()
+        # 準備: 更新前に、R04（版1）を採用して登録した案件と、未登録の案件。
+        registered, _ = self.intake("456")
+        self.assertEqual(
+            self.judge(
+                registered,
+                {"result_code": "caution", "rule_id": "R04", "rule_revision": 1},
+            )[0],
+            204,
+        )
+        unregistered, _ = self.intake("456")
+        registered_before = self.get(registered)
+        unregistered_before = self.get(unregistered)
+        rules_before = send("GET", f"{self.server.base_url}/api/rules")[1]
+        r04_before = next(r for r in rules_before if r["rule_id"] == "R04")
+        self.assertEqual(r04_before["conditions"], {"A10": "no"})
+
+        # 更新（R04にA09=Yes）を承認する。
+        proposal, identifier = self._approve_rule(
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
+        )
+        self.assertEqual(
+            [r.rule_id for r in proposal.after], ["R01", "R02", "R03", "R04"]
+        )
+        revision, rules = store.approve(identifier)
+
+        # 別の接続（新しいDb・ストア）で、同じIDのまま更新を読める。R05は作られない。
+        other_revision, other_rules = self._fresh_store().snapshot()
+        self.assertEqual((other_revision, other_rules), (revision, rules))
+        self.assertEqual([r.rule_id for r in other_rules], ["R01", "R02", "R03", "R04"])
+        r04 = other_rules[-1]
+        self.assertEqual(
+            (r04.revision, r04.result_code, dict(r04.conditions)),
+            (2, "caution", {"A09": "yes", "A10": "no"}),
+        )
+        self.assertEqual(other_rules[:3], store.snapshot()[1][:3])  # 他のルールは同じ
+        # 旧い版の行は残り、内容も変わらない（登録済みの判定が参照できる）。
+        self.assertEqual(
+            self._r04_rows(),
+            [
+                ("R04", 1, "caution", {"A10": "no"}),
+                ("R04", 2, "caution", {"A09": "yes", "A10": "no"}),
+            ],
+        )
+
+        # 判定未登録の案件は、最新（更新後）のルールで照合する（画面が読む一覧）。
+        listed = send("GET", f"{self.server.base_url}/api/rules")[1]
+        self.assertEqual(
+            next(r for r in listed if r["rule_id"] == "R04"),
+            {
+                "rule_id": "R04",
+                "revision": 2,
+                "result_code": "caution",
+                "conditions": {"A09": "yes", "A10": "no"},
+            },
+        )
+        self.assertEqual(len(listed), len(rules_before))
+        # 登録済みの判定は当時のまま。未登録の案件も、更新だけでは登録されない。
+        self.assertEqual(self.get(registered), registered_before)
+        self.assertEqual(
+            self.get(registered)["result"]["adopted_rule"],
+            {"rule_id": "R04", "rule_revision": 1},
+        )
+        self.assertEqual(self.get(unregistered), unregistered_before)
+        self.assertIsNone(self.get(unregistered)["result"])
+        # 未登録の案件は、更新後の版を採用して登録できる。
+        self.assertEqual(
+            self.judge(
+                unregistered,
+                {"result_code": "caution", "rule_id": "R04", "rule_revision": 2},
+            )[0],
+            204,
+        )
+        self.assertEqual(
+            self.get(unregistered)["result"]["adopted_rule"],
+            {"rule_id": "R04", "rule_revision": 2},
+        )
+
+    def test_a_stale_rule_update_is_refused_and_leaves_the_rows_unchanged(self):
+        db, store = self._db_with_r04()
+        _, first = self._approve_rule(
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
+        )
+        _, second = self._approve_rule(
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
+        )
+        store.approve(first)
+        after_first = (store.snapshot(), self.rows("SELECT * FROM decision_rules"))
+        # 同じ基準で作った2つ目は、対象の版が進んだため反映しない（部分反映もしない）。
+        with self.assertRaises(ProposalConflict):
+            store.approve(second)
+        self.assertEqual(
+            (store.snapshot(), self.rows("SELECT * FROM decision_rules")), after_first
+        )
+        with self.assertRaises(ProposalNotFound):  # 使い切った提案
+            store.approve(second)
+
+    RULE_ROWS_SQL = (
+        "SELECT rule_id, revision, result_code, conditions FROM decision_rules"
+        " ORDER BY rule_id, revision"
+    )
+
+    def _db_with_r04(self, **db_options):
+        """初期のルールに、架空のR04（版1）を足して承認した状態のDbとストア。"""
+        db = SharedConfigDb(lambda: _connect(self.schema), **db_options)
+        store = DbRuleStore(db)
+        _, identifier = self._approve_rule(db, store, ADD_R04)
+        store.approve(identifier)
+        return db, store
+
+    def _fresh_store(self):
+        """別の接続（新しいDb・ストア）。"""
+        return DbRuleStore(SharedConfigDb(lambda: _connect(self.schema)))
+
+    def _r04_rows(self):
+        return self.rows(
+            "SELECT rule_id, revision, result_code, conditions FROM decision_rules"
+            " WHERE rule_id = 'R04' ORDER BY revision"
+        )
+
+    def test_sequential_rule_updates_keep_one_id_and_every_revision_row(self):
+        """R04（版1）にA09を追加して承認し、最新の基準でA11を追加して承認する。
+        同じIDのまま版3になり、別接続で読め、版1・2・3の行が内容のまま残り、
+        最新の一覧と一致する。"""
+
+        db, store = self._db_with_r04()
+        rows_v1 = self.rows(self.RULE_ROWS_SQL)
+        history_v1 = self._history()
+        listed_v1 = send("GET", f"{self.server.base_url}/api/rules")[1]
+        _, identifier = self._approve_rule(
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
+        )
+        revision_2, _ = store.approve(identifier)
+        # 最新の基準（R04は版2）から、2つ目の更新案を作る。
+        proposal, identifier = self._approve_rule(
+            db, store, update_op(A11="yes"), prompt="R04にA11がYesを追加して"
+        )
+        self.assertEqual(proposal.target.revision, 2)
+        self.assertEqual(dict(proposal.target.conditions), {"A09": "yes", "A10": "no"})
+        revision_3, rules_v3 = store.approve(identifier)
+        self.assertEqual(revision_3, revision_2 + 1)
+
+        # 別の接続（新しいDb・ストア）で、同じIDのR04が版3で読める。R05は作られない。
+        other_revision, other_rules = self._fresh_store().snapshot()
+        self.assertEqual((other_revision, other_rules), (revision_3, rules_v3))
+        self.assertEqual([r.rule_id for r in other_rules], ["R01", "R02", "R03", "R04"])
+        r04 = other_rules[-1]
+        self.assertEqual(
+            (r04.revision, r04.result_code, dict(r04.conditions)),
+            (3, "caution", {"A09": "yes", "A10": "no", "A11": "yes"}),
+        )
+        # 版1・2・3の行が、それぞれの内容のまま残る（旧い版を書き換えない）。
+        rows_v3 = self.rows(self.RULE_ROWS_SQL)
+        self.assertEqual(len(rows_v3), len(rows_v1) + 2)
+        self.assertEqual(
+            [r for r in rows_v3 if r[0] != "R04"], [r for r in rows_v1 if r[0] != "R04"]
+        )
+        self.assertEqual(
+            [r for r in rows_v3 if r[0] == "R04"],
+            [
+                ("R04", 1, "caution", {"A10": "no"}),
+                ("R04", 2, "caution", {"A09": "yes", "A10": "no"}),
+                ("R04", 3, "caution", {"A09": "yes", "A10": "no", "A11": "yes"}),
+            ],
+        )
+        self.assertEqual(len(self._history()), len(history_v1) + 2)  # 承認ごとに1版
+        # 最新の一覧（画面・照合が読む）は、版3と一致する。ルールの総数も同じ。
+        listed = send("GET", f"{self.server.base_url}/api/rules")[1]
+        self.assertEqual(
+            [r["rule_id"] for r in listed], [r["rule_id"] for r in listed_v1]
+        )  # R05は増えず、総数も同じ
+        self.assertEqual(
+            next(r for r in listed if r["rule_id"] == "R04"),
+            {
+                "rule_id": "R04",
+                "revision": 3,
+                "result_code": "caution",
+                "conditions": {"A09": "yes", "A10": "no", "A11": "yes"},
+            },
+        )
+        # 使い切った提案は、もう反映できない。
+        with self.assertRaises(ProposalNotFound):
+            store.approve(identifier)
+        self.assertEqual(self.rows(self.RULE_ROWS_SQL), rows_v3)
+
+    def test_updating_several_conditions_at_once_persists_one_new_row(self):
+        db, store = self._db_with_r04()
+        rows_before = self.rows(self.RULE_ROWS_SQL)
+        history_before = self._history()
+        _, identifier = self._approve_rule(
+            db,
+            store,
+            update_op(A09="yes", A11="no"),
+            prompt="R04にA09がYesとA11がNoを追加して",
+        )
+        revision, rules = store.approve(identifier)
+        # 必要最小限: 増えた行はR04の版2の1行だけ（条件は2つ入る）。承認で進む版は1つ。
+        rows_after = self.rows(self.RULE_ROWS_SQL)
+        self.assertEqual(
+            [r for r in rows_after if r not in rows_before],
+            [("R04", 2, "caution", {"A09": "yes", "A10": "no", "A11": "no"})],
+        )
+        self.assertEqual(len(rows_after), len(rows_before) + 1)
+        self.assertEqual(len(self._history()), len(history_before) + 1)
+        # 別の接続で、同じID・同じ総数のまま、2つの条件を読める。
+        other_revision, other_rules = self._fresh_store().snapshot()
+        self.assertEqual((other_revision, other_rules), (revision, rules))
+        self.assertEqual([r.rule_id for r in other_rules], ["R01", "R02", "R03", "R04"])
+        self.assertEqual(
+            dict(other_rules[-1].conditions),
+            {"A09": "yes", "A10": "no", "A11": "no"},
+        )
+
+    def test_partly_existing_conditions_over_http_persist_nothing(self):
+        """複数の条件の一部だけ既存なら、新規の条件が先でも後でも、422で全体を拒否し、
+        DBに提案も行も版も増やさない。"""
+        server, proposer = self._admin_server()
+        self._add_r04_over_http(server, proposer)
+        rows_before = self.rows(self.RULE_ROWS_SQL)
+        history_before = self._history()
+        pending_before = self.rows("SELECT count(*) FROM shared_proposals")
+        listed_before = send("GET", f"{server.base_url}/api/admin/rules")[1]
+        cases = (
+            ("R04にA09がYesとA10がNoを追加して", {"A09": "yes", "A10": "no"}),
+            ("R04にA10がNoとA11がYesを追加して", {"A10": "no", "A11": "yes"}),
+        )
+        for prompt, additions in cases:
+            proposer.output = update_op(**additions)
+            status, body = send(
+                "POST",
+                f"{server.base_url}/api/admin/rule-proposals",
+                {"prompt": prompt},
+            )
+            self.assertEqual(status, 422, prompt)
+            self.assertIn("追加済み", body["detail"])
+            self.assertNotIn("proposal_id", body)
+            self.assertEqual(self.rows(self.RULE_ROWS_SQL), rows_before, prompt)
+            self.assertEqual(self._history(), history_before, prompt)
+            self.assertEqual(
+                self.rows("SELECT count(*) FROM shared_proposals"), pending_before
+            )
+            self.assertEqual(
+                send("GET", f"{server.base_url}/api/admin/rules")[1], listed_before
+            )
+
+    def _refuse_several_when_one_became_present(self, already):
+        db, store = self._db_with_r04()
+        _, identifier = self._approve_rule(
+            db,
+            store,
+            update_op(A09="yes", A11="no"),
+            prompt="R04にA09がYesとA11がNoを追加して",
+        )
+        drifted_rules = tuple(
+            DemoRule(
+                r.rule_id,
+                r.revision,
+                r.result_code,
+                tuple(sorted({*r.conditions, (already, "yes")})),
+            )
+            if r.rule_id == "R04"
+            else r
+            for r in db.latest().rules
+        )
+        drifted = self._drift(db, drifted_rules)
+        self._refused_update_changes_nothing(db, store, identifier, drifted)
+        # 版2のR04の行は作られない（一方だけ足す部分反映もしない）。
+        self.assertEqual([r[1] for r in self._r04_rows()], [1])
+
+    def test_several_conditions_update_is_refused_when_the_first_became_present(self):
+        # 提案の後、版は同じまま、追加条件のうち先（A09）が既にあれば全体を拒否する。
+        self._refuse_several_when_one_became_present("A09")
+
+    def test_several_conditions_update_is_refused_when_the_last_became_present(self):
+        # 後（A11）が既にあれば、先の条件だけを足す部分反映もせず拒否する。
+        self._refuse_several_when_one_became_present("A11")
+
+    def test_rule_update_receipt_becomes_a_reusable_update_operation(self):
+        db, store = self._db_with_r04(reuse_enabled=True)
+        prompt = UPDATE_PROMPT
+        update = update_op(A09="yes")
+        _, identifier = self._approve_rule(
+            db, store, update, prompt=prompt, reuse_prompt=prompt
+        )
+        store.approve(identifier)
+        raw = PostgresProposalTemplates(lambda: _connect(self.schema)).lookup(
+            "rule", prompt
+        )
+        self.assertEqual(raw, update)  # 対象のIDと追加した条件だけを保存する
+        # 再利用のときも、現行のルールと依頼の文面で検証し直す（追加済みなので拒否）。
+        revision, current = store.snapshot()
+        question_revision, questions = DbQuestionStore(db).snapshot()
+        with self.assertRaises(InvalidProposal) as caught:
+            validate_rule_output(
+                raw,
+                current,
+                questions,
+                revision,
+                question_revision=question_revision,
+                prompt=prompt,
+            )
+        self.assertIn("追加済み", str(caught.exception))
+
+    def _admin_server(self):
+        """管理画面のAPI（判定ルール）を、DBの保存先で動かす。呼び出しごとに新しい接続・ストア。"""
+        db = SharedConfigDb(lambda: _connect(self.schema))
+        app = make_app(self.store, [])
+        app.include_router(rule_admin.router)
+        app.state.rule_store = DbRuleStore(db)
+        app.state.question_store = DbQuestionStore(db)
+        proposer = _StubRuleProposer()
+        app.state.rule_proposer = proposer
+        app.state.persistence = "database"
+        server = _Server(app)
+        server.__enter__()
+        self.addCleanup(server.__exit__)
+        return server, proposer
+
+    def _add_r04_over_http(self, server, proposer):
+        proposer.output = ADD_R04
+        status, created = send(
+            "POST",
+            f"{server.base_url}/api/admin/rule-proposals",
+            {"prompt": "設問A10がNoのとき注意とするルールを追加して"},
+        )
+        self.assertEqual((status, created["kind"]), (201, "add"), created)
+        status, body = send(
+            "POST",
+            f"{server.base_url}/api/admin/rule-proposals/{created['proposal_id']}/decision",
+            {"decision": "yes"},
+        )
+        self.assertEqual(status, 200, body)
+
+    def test_rule_update_over_http_is_read_back_by_a_separate_server_under_the_same_id(
+        self,
+    ):
+        """DB構成のHTTP経路（提案 → 決定 → 別のサーバー・接続で同じIDの更新を取得）。"""
+        writer, proposer = self._admin_server()
+        reader, _ = self._admin_server()  # 別のストア・接続（別のインスタンスの代わり）
+        self._add_r04_over_http(writer, proposer)
+        before = send("GET", f"{reader.base_url}/api/admin/rules")[1]
+        self.assertEqual([r["rule_id"] for r in before["rules"]][-1], "R04")
+        self.assertEqual(before["rules"][-1]["conditions"], {"A10": "no"})
+
+        proposer.output = update_op(A09="yes")
+        status, proposal = send(
+            "POST",
+            f"{writer.base_url}/api/admin/rule-proposals",
+            {"prompt": UPDATE_PROMPT},
+        )
+        self.assertEqual(status, 201, proposal)
+        self.assertEqual(
+            (proposal["kind"], proposal["target"]["rule_id"]), ("update", "R04")
+        )
+        self.assertEqual(proposal["added_conditions"], {"A09": "yes"})
+        self.assertEqual(len(proposal["after"]), len(proposal["before"]))  # R05は出ない
+        # 承認前は、別のサーバーから見ても変わらない。
+        self.assertEqual(send("GET", f"{reader.base_url}/api/admin/rules")[1], before)
+
+        proposals = f"{writer.base_url}/api/admin/rule-proposals"
+        decision = f"{proposals}/{proposal['proposal_id']}/decision"
+        status, decided = send("POST", decision, {"decision": "yes"})
+        self.assertEqual((status, decided["applied"]), (200, True), decided)
+        self.assertEqual(
+            [r["rule_id"] for r in decided["rules"]], ["R01", "R02", "R03", "R04"]
+        )
+        # 別のサーバーから、同じIDのR04の更新（版2・追加した条件・同じ結果）を読める。
+        read_back = send("GET", f"{reader.base_url}/api/admin/rules")[1]
+        self.assertEqual(read_back["rules"], decided["rules"])
+        self.assertEqual(
+            read_back["rules"][-1],
+            {
+                "rule_id": "R04",
+                "revision": 2,
+                "result_code": "caution",
+                "conditions": {"A09": "yes", "A10": "no"},
+            },
+        )
+        self.assertEqual(read_back["rules"][:3], before["rules"][:3])
+        listed = send("GET", f"{reader.base_url}/api/rules")[1]
+        self.assertEqual(
+            [r["rule_id"] for r in listed], ["R01", "R02", "R03", "R04"]
+        )  # R05はない
+        self.assertEqual(
+            next(r for r in listed if r["rule_id"] == "R04")["conditions"],
+            {"A09": "yes", "A10": "no"},
+        )
+        # 使い切った提案は、もう一度決められない。
+        self.assertEqual(send("POST", decision, {"decision": "yes"})[0], 404)
+
+    def test_unregistered_case_matches_the_updated_rule_registered_keeps_its_own(
+        self,
+    ):
+        """判定未登録の案件の実際の回答を、GET /api/rules で取得した最新ルールと、既存の
+        照合ロジック（app.rule_matching.match_rules）で照合する。更新で追加した条件により、
+        同じ案件の照合の表示が更新前後で変わる。登録済みの判定は当時のまま。"""
+        server, proposer = self._admin_server()
+        self._add_r04_over_http(server, proposer)
+        # 奇数のユーザーは、A09の自動回答がNo。更新で足す条件A09=Yesと食い違う。
+        registered, _ = self.intake("457")
+        self.assertEqual(
+            self.judge(
+                registered,
+                {"result_code": "caution", "rule_id": "R04", "rule_revision": 1},
+            )[0],
+            204,
+        )
+        unregistered, answers = self.intake("457")
+        self.assertEqual(answers, {"A09": "no"})
+        registered_before = self.get(registered)
+
+        def match_r04():
+            answers_now = {
+                q["question_code"]: q["answer"] or "unanswered"
+                for q in self.get(unregistered)["questions"]
+            }
+            latest = send("GET", f"{server.base_url}/api/rules")[1]
+            rules = tuple(
+                Rule(
+                    r["rule_id"],
+                    RESULT_OF_CODE[r["result_code"]],
+                    {q: Answer(a) for q, a in r["conditions"].items()},
+                )
+                for r in latest
+            )
+            return next(
+                m for m in match_rules(answers_now, rules).rules if m.rule_id == "R04"
+            )
+
+        before = match_r04()  # R04 = A10=No。A09は条件にないので食い違わない
+        self.assertEqual(before.display, RowDisplay.NORMAL)
+        self.assertEqual(before.states["A09"], ConditionState.ANY)
+
+        proposer.output = update_op(A09="yes")
+        _, proposal = send(
+            "POST",
+            f"{server.base_url}/api/admin/rule-proposals",
+            {"prompt": UPDATE_PROMPT},
+        )
+        proposals = f"{server.base_url}/api/admin/rule-proposals"
+        decision = f"{proposals}/{proposal['proposal_id']}/decision"
+        self.assertEqual(send("POST", decision, {"decision": "yes"})[0], 200)
+
+        after = match_r04()  # R04 = A09=Yes かつ A10=No。A09=No の回答と食い違う
+        self.assertEqual(after.display, RowDisplay.GRAY)
+        self.assertEqual(after.states["A09"], ConditionState.MISMATCH)
+        self.assertEqual(after.mismatched_questions, ("A09",))
+        # 登録済みの判定は、当時のまま（版1を採用）。
+        # 未登録の案件は、更新だけでは登録されない。
+        self.assertEqual(self.get(registered), registered_before)
+        self.assertEqual(
+            self.get(registered)["result"]["adopted_rule"],
+            {"rule_id": "R04", "rule_revision": 1},
+        )
+        self.assertIsNone(self.get(unregistered)["result"])
+
+    def test_pending_update_is_rebuilt_from_the_stored_payload(self):
+        db, store = self._db_with_r04()
+        proposal, identifier = self._approve_rule(
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
+        )
+        # 別のストア（別の接続）が、保存された内容から、
+        # 検証済みの提案と同じ内容を作り直す。
+        rebuilt = self._fresh_store().pending(identifier)
+        self.assertEqual(rebuilt, proposal)
+        self.assertEqual(rebuilt.updated.revision, rebuilt.target.revision + 1)
+        self.assertEqual(rebuilt.added_conditions, (("A09", "yes"),))
+        # 読むだけでは、提案も承認済みのルールも変わらない。
+        self.assertEqual(store.pending(identifier), proposal)
+        self.assertEqual(store.snapshot()[1][-1].revision, 1)
+
+    def _drift(self, db, rules):
+        """ルール一覧の版（rule_revision）を進めずに、ルールの中身だけが違う新しい行を足す。
+
+        通常の承認・復元は、ルールを変えるたびに rule_revision を進める。そのため、版の
+        比較を通ったあとに「対象がない」「条件が追加済み」になる状態は、通常の操作では
+        作れない。承認の防御分岐だけを確かめるため、行を直接足して作る。
+        """
+        latest = db.latest()
+        drifted = SharedConfig(
+            latest.config_revision + 1,
+            latest.question_revision,
+            latest.rule_revision,
+            latest.questions,
+            rules,
+            latest.removed_rule_ids,
+        )
+        with _connect(self.schema) as conn:
+            shared_db._insert_config(conn, drifted, "approval")
+        return drifted
+
+    def _update_proposal_on_r04(self):
+        db, store = self._db_with_r04()
+        _, identifier = self._approve_rule(
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
+        )
+        return db, store, identifier
+
+    def _refused_update_changes_nothing(self, db, store, identifier, drifted):
+        rules_sql = "SELECT * FROM decision_rules ORDER BY 1, 2"
+        rule_rows = self.rows(rules_sql)
+        history = self._history()
+        with self.assertRaises(ProposalConflict) as caught:
+            store.approve(identifier)
+        self.assertNotIsInstance(caught.exception, QuestionBaseChanged)
+        self.assertEqual(db.latest(), drifted)  # 設定は、準備した状態のまま
+        self.assertEqual(self.rows(rules_sql), rule_rows)
+        self.assertEqual(self._history(), history)  # 版は増えない
+        # 提案は使い切る（再試行で反映しない）。
+        with self.assertRaises(ProposalNotFound):
+            store.approve(identifier)
+
+    def test_update_is_refused_when_the_target_is_gone_despite_matching_versions(self):
+        db, store, identifier = self._update_proposal_on_r04()
+        drifted = self._drift(
+            db, tuple(r for r in db.latest().rules if r.rule_id != "R04")
+        )
+        # 版は一致しているので、版の比較では拒否されない。対象がないことで拒否する。
+        self.assertEqual(drifted.rule_revision, db.latest().rule_revision)
+        # 読むだけの確認（pending）も、対象がなければ拒否する。
+        with self.assertRaises(ProposalConflict):
+            store.pending(identifier)
+        self._refused_update_changes_nothing(db, store, identifier, drifted)
+        self.assertEqual([r[1] for r in self._r04_rows()], [1])
+
+    def test_update_is_refused_when_the_condition_is_already_there_despite_versions(
+        self,
+    ):
+        db, store, identifier = self._update_proposal_on_r04()
+        latest = db.latest()
+        already = tuple(
+            DemoRule(
+                r.rule_id, r.revision, r.result_code, (("A09", "yes"), *r.conditions)
+            )
+            if r.rule_id == "R04"
+            else r
+            for r in latest.rules
+        )
+        drifted = self._drift(db, already)
+        self._refused_update_changes_nothing(db, store, identifier, drifted)
+        # 版2のR04の行は作られない（重複した条件を足さない）。
+        self.assertEqual([r[1] for r in self._r04_rows()], [1])
 
     def test_initial_templates_match_exactly_per_target_and_stay_deleted(self):
         def connect():
