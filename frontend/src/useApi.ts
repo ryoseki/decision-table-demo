@@ -29,8 +29,9 @@ function useRemote<T>(load: () => Promise<T>, key: string): Remote<T> {
   return state.key === key ? state.value : { status: "loading" };
 }
 
-export function useCaseList(): Remote<CaseListRow[]> {
-  return useRemote(listCases, "list");
+/** 案件の一覧。version を変えると、取り直す（サンプル案件の作成後など）。 */
+export function useCaseList(version = 0): Remote<CaseListRow[]> {
+  return useRemote(listCases, `list:${version}`);
 }
 
 /** デモの設問一覧（設問管理）。version を変えると、取り直す。 */

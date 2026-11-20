@@ -129,6 +129,68 @@ class PostgresCaseStore:
             if updated != 1:
                 raise RuntimeError("自動回答を保存できる確認待ちの回答がありません")
 
+    # --- 共有のサンプル案件（app.sample_cases） ------------------------------------
+
+    def existing_case_ids(self, case_ids: tuple[str, ...]) -> set[str]:
+        """指定した案件IDのうち、保存済みのもの（読み取りだけ）。"""
+        marks = ", ".join(["%s"] * len(case_ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT case_id FROM review_cases WHERE case_id IN ({marks})",
+                tuple(case_ids),
+            ).fetchall()
+        return {case_id for (case_id,) in rows}
+
+    @with_occ_retry
+    def create_sample_case(self, sample: dict[str, Any]) -> bool:
+        """固定IDの案件を、1トランザクションで、まだ無いときだけ作る。作ればTrue。
+
+        案件・設問のコピー・結果・A09の回答（登録済みのサンプルは結果も）を同時に入れる。
+        すでにあれば何も書かずFalse（既存の案件・判定は変えない）。同時に同じIDを作ろうとした
+        側は、主キーの重複でDO NOTHINGになるか、衝突（40001）で再試行され、重複しない。
+        ON CONFLICT DO NOTHINGとINSERTだけを使い、FOR UPDATEには頼らない
+        （Aurora DSQL互換）。
+        """
+        case_id = sample["case_id"]
+        with self._connect() as conn:
+            inserted = conn.execute(
+                "INSERT INTO review_cases (case_id, summary, user_data, inquiry_data)"
+                " VALUES (%s, %s, %s, %s) ON CONFLICT (case_id) DO NOTHING",
+                (
+                    case_id,
+                    sample["summary"],
+                    Jsonb(sample["user"]),
+                    Jsonb(sample["inquiry"]),
+                ),
+            ).rowcount
+            if inserted != 1:
+                return False
+            conn.execute(
+                "INSERT INTO case_questions (case_id, question_code, revision,"
+                " category, prompt, source_kind, source_field)"
+                " SELECT %s, question_code, revision, category, prompt, source_kind,"
+                " source_field FROM review_questions",
+                (case_id,),
+            )
+            if sample["result_code"] is None:
+                conn.execute(
+                    "INSERT INTO case_results (case_id) VALUES (%s)", (case_id,)
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO case_results (case_id, result_code, recorded_by,"
+                    " recorded_at) VALUES (%s, %s, %s, now())",
+                    (case_id, sample["result_code"], OPERATOR_ID),
+                )
+            answer = sample["a09_answer"]
+            for question_code in AUTO_ANSWER_KEYS:
+                conn.execute(
+                    "INSERT INTO case_checks (case_id, question_code, answer,"
+                    " automated_answer) VALUES (%s, %s, %s, %s)",
+                    (case_id, question_code, answer or "pending", answer),
+                )
+        return True
+
     # --- 再表示 ---------------------------------------------------------------
 
     def get_case(self, case_id: str) -> dict[str, Any]:
