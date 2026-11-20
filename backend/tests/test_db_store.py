@@ -59,6 +59,16 @@ ADD_R04 = {
     "operation": "add_rule",
     "rule": {"id": "R04", "result_code": "caution", "conditions": {"A10": "no"}},
 }
+UPDATE_PROMPT = "R04にA09がYesを追加して"
+
+
+def update_op(**additions):
+    """R04に条件を追加する、生成の出力。"""
+    return {
+        "operation": "update_rule",
+        "rule_id": "R04",
+        "add_conditions": additions,
+    }
 
 
 # 結果コード（APIの値）から、照合ロジックの結果への対応。
@@ -355,14 +365,8 @@ class DbFlow(unittest.TestCase):
         """承認後に別接続で同じIDの更新を読める。判定未登録の案件は更新後のルールを使い、
         登録済みの判定は当時の版（採用ルールの版・結果）のまま変わらない。"""
 
-        def connect():
-            return _connect(self.schema)
-
-        db = SharedConfigDb(connect)
-        store = DbRuleStore(db)
         # 準備: 初期のルールに、架空のR04（版1）を足して承認する。
-        _, identifier = self._approve_rule(db, store, ADD_R04)
-        store.approve(identifier)
+        db, store = self._db_with_r04()
         # 準備: 更新前に、R04（版1）を採用して登録した案件と、未登録の案件。
         registered, _ = self.intake("456")
         self.assertEqual(
@@ -380,13 +384,8 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(r04_before["conditions"], {"A10": "no"})
 
         # 更新（R04にA09=Yes）を承認する。
-        update = {
-            "operation": "update_rule",
-            "rule_id": "R04",
-            "add_conditions": {"A09": "yes"},
-        }
         proposal, identifier = self._approve_rule(
-            db, store, update, prompt="R04にA09がYesを追加して"
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
         )
         self.assertEqual(
             [r.rule_id for r in proposal.after], ["R01", "R02", "R03", "R04"]
@@ -394,8 +393,7 @@ class DbFlow(unittest.TestCase):
         revision, rules = store.approve(identifier)
 
         # 別の接続（新しいDb・ストア）で、同じIDのまま更新を読める。R05は作られない。
-        other = DbRuleStore(SharedConfigDb(connect))
-        other_revision, other_rules = other.snapshot()
+        other_revision, other_rules = self._fresh_store().snapshot()
         self.assertEqual((other_revision, other_rules), (revision, rules))
         self.assertEqual([r.rule_id for r in other_rules], ["R01", "R02", "R03", "R04"])
         r04 = other_rules[-1]
@@ -405,15 +403,11 @@ class DbFlow(unittest.TestCase):
         )
         self.assertEqual(other_rules[:3], store.snapshot()[1][:3])  # 他のルールは同じ
         # 旧い版の行は残り、内容も変わらない（登録済みの判定が参照できる）。
-        stored = self.rows(
-            "SELECT revision, result_code, conditions FROM decision_rules"
-            " WHERE rule_id = 'R04' ORDER BY revision"
-        )
         self.assertEqual(
-            stored,
+            self._r04_rows(),
             [
-                (1, "caution", {"A10": "no"}),
-                (2, "caution", {"A09": "yes", "A10": "no"}),
+                ("R04", 1, "caution", {"A10": "no"}),
+                ("R04", 2, "caution", {"A09": "yes", "A10": "no"}),
             ],
         )
 
@@ -451,26 +445,13 @@ class DbFlow(unittest.TestCase):
         )
 
     def test_a_stale_rule_update_is_refused_and_leaves_the_rows_unchanged(self):
-        def connect():
-            return _connect(self.schema)
-
-        db = SharedConfigDb(connect)
-        store = DbRuleStore(db)
-        _, identifier = self._approve_rule(db, store, ADD_R04)
-        store.approve(identifier)
-        prompt = "R04にA09がYesを追加して"
-        first_op = {
-            "operation": "update_rule",
-            "rule_id": "R04",
-            "add_conditions": {"A09": "yes"},
-        }
-        second_op = {
-            "operation": "update_rule",
-            "rule_id": "R04",
-            "add_conditions": {"A09": "yes"},
-        }
-        _, first = self._approve_rule(db, store, first_op, prompt=prompt)
-        _, second = self._approve_rule(db, store, second_op, prompt=prompt)
+        db, store = self._db_with_r04()
+        _, first = self._approve_rule(
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
+        )
+        _, second = self._approve_rule(
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
+        )
         store.approve(first)
         after_first = (store.snapshot(), self.rows("SELECT * FROM decision_rules"))
         # 同じ基準で作った2つ目は、対象の版が進んだため反映しない（部分反映もしない）。
@@ -487,39 +468,40 @@ class DbFlow(unittest.TestCase):
         " ORDER BY rule_id, revision"
     )
 
-    def _update_op(self, **additions):
-        return {
-            "operation": "update_rule",
-            "rule_id": "R04",
-            "add_conditions": additions,
-        }
-
-    def _db_with_r04(self):
-        db = SharedConfigDb(lambda: _connect(self.schema))
+    def _db_with_r04(self, **db_options):
+        """初期のルールに、架空のR04（版1）を足して承認した状態のDbとストア。"""
+        db = SharedConfigDb(lambda: _connect(self.schema), **db_options)
         store = DbRuleStore(db)
         _, identifier = self._approve_rule(db, store, ADD_R04)
         store.approve(identifier)
         return db, store
+
+    def _fresh_store(self):
+        """別の接続（新しいDb・ストア）。"""
+        return DbRuleStore(SharedConfigDb(lambda: _connect(self.schema)))
+
+    def _r04_rows(self):
+        return self.rows(
+            "SELECT rule_id, revision, result_code, conditions FROM decision_rules"
+            " WHERE rule_id = 'R04' ORDER BY revision"
+        )
 
     def test_sequential_rule_updates_keep_one_id_and_every_revision_row(self):
         """R04（版1）にA09を追加して承認し、最新の基準でA11を追加して承認する。
         同じIDのまま版3になり、別接続で読め、版1・2・3の行が内容のまま残り、
         最新の一覧と一致する。"""
 
-        def connect():
-            return _connect(self.schema)
-
         db, store = self._db_with_r04()
         rows_v1 = self.rows(self.RULE_ROWS_SQL)
         history_v1 = self._history()
         listed_v1 = send("GET", f"{self.server.base_url}/api/rules")[1]
         _, identifier = self._approve_rule(
-            db, store, self._update_op(A09="yes"), prompt="R04にA09がYesを追加して"
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
         )
         revision_2, _ = store.approve(identifier)
         # 最新の基準（R04は版2）から、2つ目の更新案を作る。
         proposal, identifier = self._approve_rule(
-            db, store, self._update_op(A11="yes"), prompt="R04にA11がYesを追加して"
+            db, store, update_op(A11="yes"), prompt="R04にA11がYesを追加して"
         )
         self.assertEqual(proposal.target.revision, 2)
         self.assertEqual(dict(proposal.target.conditions), {"A09": "yes", "A10": "no"})
@@ -527,7 +509,7 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(revision_3, revision_2 + 1)
 
         # 別の接続（新しいDb・ストア）で、同じIDのR04が版3で読める。R05は作られない。
-        other_revision, other_rules = DbRuleStore(SharedConfigDb(connect)).snapshot()
+        other_revision, other_rules = self._fresh_store().snapshot()
         self.assertEqual((other_revision, other_rules), (revision_3, rules_v3))
         self.assertEqual([r.rule_id for r in other_rules], ["R01", "R02", "R03", "R04"])
         r04 = other_rules[-1]
@@ -570,16 +552,13 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(self.rows(self.RULE_ROWS_SQL), rows_v3)
 
     def test_updating_several_conditions_at_once_persists_one_new_row(self):
-        def connect():
-            return _connect(self.schema)
-
         db, store = self._db_with_r04()
         rows_before = self.rows(self.RULE_ROWS_SQL)
         history_before = self._history()
         _, identifier = self._approve_rule(
             db,
             store,
-            self._update_op(A09="yes", A11="no"),
+            update_op(A09="yes", A11="no"),
             prompt="R04にA09がYesとA11がNoを追加して",
         )
         revision, rules = store.approve(identifier)
@@ -592,7 +571,7 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(len(rows_after), len(rows_before) + 1)
         self.assertEqual(len(self._history()), len(history_before) + 1)
         # 別の接続で、同じID・同じ総数のまま、2つの条件を読める。
-        other_revision, other_rules = DbRuleStore(SharedConfigDb(connect)).snapshot()
+        other_revision, other_rules = self._fresh_store().snapshot()
         self.assertEqual((other_revision, other_rules), (revision, rules))
         self.assertEqual([r.rule_id for r in other_rules], ["R01", "R02", "R03", "R04"])
         self.assertEqual(
@@ -614,7 +593,7 @@ class DbFlow(unittest.TestCase):
             ("R04にA10がNoとA11がYesを追加して", {"A10": "no", "A11": "yes"}),
         )
         for prompt, additions in cases:
-            proposer.output = self._update_op(**additions)
+            proposer.output = update_op(**additions)
             status, body = send(
                 "POST",
                 f"{server.base_url}/api/admin/rule-proposals",
@@ -637,7 +616,7 @@ class DbFlow(unittest.TestCase):
         _, identifier = self._approve_rule(
             db,
             store,
-            self._update_op(A09="yes", A11="no"),
+            update_op(A09="yes", A11="no"),
             prompt="R04にA09がYesとA11がNoを追加して",
         )
         drifted_rules = tuple(
@@ -654,13 +633,7 @@ class DbFlow(unittest.TestCase):
         drifted = self._drift(db, drifted_rules)
         self._refused_update_changes_nothing(db, store, identifier, drifted)
         # 版2のR04の行は作られない（一方だけ足す部分反映もしない）。
-        self.assertEqual(
-            self.rows(
-                "SELECT revision FROM decision_rules WHERE rule_id = 'R04'"
-                " ORDER BY revision"
-            ),
-            [(1,)],
-        )
+        self.assertEqual([r[1] for r in self._r04_rows()], [1])
 
     def test_several_conditions_update_is_refused_when_the_first_became_present(self):
         # 提案の後、版は同じまま、追加条件のうち先（A09）が既にあれば全体を拒否する。
@@ -671,24 +644,16 @@ class DbFlow(unittest.TestCase):
         self._refuse_several_when_one_became_present("A11")
 
     def test_rule_update_receipt_becomes_a_reusable_update_operation(self):
-        def connect():
-            return _connect(self.schema)
-
-        db = SharedConfigDb(connect, reuse_enabled=True)
-        store = DbRuleStore(db)
-        _, identifier = self._approve_rule(db, store, ADD_R04)
-        store.approve(identifier)
-        prompt = "R04にA09がYesを追加して"
-        update = {
-            "operation": "update_rule",
-            "rule_id": "R04",
-            "add_conditions": {"A09": "yes"},
-        }
+        db, store = self._db_with_r04(reuse_enabled=True)
+        prompt = UPDATE_PROMPT
+        update = update_op(A09="yes")
         _, identifier = self._approve_rule(
             db, store, update, prompt=prompt, reuse_prompt=prompt
         )
         store.approve(identifier)
-        raw = PostgresProposalTemplates(connect).lookup("rule", prompt)
+        raw = PostgresProposalTemplates(lambda: _connect(self.schema)).lookup(
+            "rule", prompt
+        )
         self.assertEqual(raw, update)  # 対象のIDと追加した条件だけを保存する
         # 再利用のときも、現行のルールと依頼の文面で検証し直す（追加済みなので拒否）。
         revision, current = store.snapshot()
@@ -745,15 +710,11 @@ class DbFlow(unittest.TestCase):
         self.assertEqual([r["rule_id"] for r in before["rules"]][-1], "R04")
         self.assertEqual(before["rules"][-1]["conditions"], {"A10": "no"})
 
-        proposer.output = {
-            "operation": "update_rule",
-            "rule_id": "R04",
-            "add_conditions": {"A09": "yes"},
-        }
+        proposer.output = update_op(A09="yes")
         status, proposal = send(
             "POST",
             f"{writer.base_url}/api/admin/rule-proposals",
-            {"prompt": "R04にA09がYesを追加して"},
+            {"prompt": UPDATE_PROMPT},
         )
         self.assertEqual(status, 201, proposal)
         self.assertEqual(
@@ -838,15 +799,11 @@ class DbFlow(unittest.TestCase):
         self.assertEqual(before.display, RowDisplay.NORMAL)
         self.assertEqual(before.states["A09"], ConditionState.ANY)
 
-        proposer.output = {
-            "operation": "update_rule",
-            "rule_id": "R04",
-            "add_conditions": {"A09": "yes"},
-        }
+        proposer.output = update_op(A09="yes")
         _, proposal = send(
             "POST",
             f"{server.base_url}/api/admin/rule-proposals",
-            {"prompt": "R04にA09がYesを追加して"},
+            {"prompt": UPDATE_PROMPT},
         )
         proposals = f"{server.base_url}/api/admin/rule-proposals"
         decision = f"{proposals}/{proposal['proposal_id']}/decision"
@@ -866,23 +823,13 @@ class DbFlow(unittest.TestCase):
         self.assertIsNone(self.get(unregistered)["result"])
 
     def test_pending_update_is_rebuilt_from_the_stored_payload(self):
-        db = SharedConfigDb(lambda: _connect(self.schema))
-        store = DbRuleStore(db)
-        _, identifier = self._approve_rule(db, store, ADD_R04)
-        store.approve(identifier)
-        update = {
-            "operation": "update_rule",
-            "rule_id": "R04",
-            "add_conditions": {"A09": "yes"},
-        }
+        db, store = self._db_with_r04()
         proposal, identifier = self._approve_rule(
-            db, store, update, prompt="R04にA09がYesを追加して"
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
         )
         # 別のストア（別の接続）が、保存された内容から、
         # 検証済みの提案と同じ内容を作り直す。
-        rebuilt = DbRuleStore(SharedConfigDb(lambda: _connect(self.schema))).pending(
-            identifier
-        )
+        rebuilt = self._fresh_store().pending(identifier)
         self.assertEqual(rebuilt, proposal)
         self.assertEqual(rebuilt.updated.revision, rebuilt.target.revision + 1)
         self.assertEqual(rebuilt.added_conditions, (("A09", "yes"),))
@@ -911,19 +858,9 @@ class DbFlow(unittest.TestCase):
         return drifted
 
     def _update_proposal_on_r04(self):
-        db = SharedConfigDb(lambda: _connect(self.schema))
-        store = DbRuleStore(db)
-        _, identifier = self._approve_rule(db, store, ADD_R04)
-        store.approve(identifier)
+        db, store = self._db_with_r04()
         _, identifier = self._approve_rule(
-            db,
-            store,
-            {
-                "operation": "update_rule",
-                "rule_id": "R04",
-                "add_conditions": {"A09": "yes"},
-            },
-            prompt="R04にA09がYesを追加して",
+            db, store, update_op(A09="yes"), prompt=UPDATE_PROMPT
         )
         return db, store, identifier
 
@@ -952,13 +889,7 @@ class DbFlow(unittest.TestCase):
         with self.assertRaises(ProposalConflict):
             store.pending(identifier)
         self._refused_update_changes_nothing(db, store, identifier, drifted)
-        self.assertEqual(
-            self.rows(
-                "SELECT revision FROM decision_rules WHERE rule_id = 'R04'"
-                " ORDER BY revision"
-            ),
-            [(1,)],
-        )
+        self.assertEqual([r[1] for r in self._r04_rows()], [1])
 
     def test_update_is_refused_when_the_condition_is_already_there_despite_versions(
         self,
@@ -976,13 +907,7 @@ class DbFlow(unittest.TestCase):
         drifted = self._drift(db, already)
         self._refused_update_changes_nothing(db, store, identifier, drifted)
         # 版2のR04の行は作られない（重複した条件を足さない）。
-        self.assertEqual(
-            self.rows(
-                "SELECT revision FROM decision_rules WHERE rule_id = 'R04'"
-                " ORDER BY revision"
-            ),
-            [(1,)],
-        )
+        self.assertEqual([r[1] for r in self._r04_rows()], [1])
 
     def test_initial_templates_match_exactly_per_target_and_stay_deleted(self):
         def connect():

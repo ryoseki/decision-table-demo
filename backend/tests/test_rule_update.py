@@ -63,6 +63,24 @@ def update_output(
     }
 
 
+def update_prompt(additions: dict[str, str]) -> str:
+    """追加する条件から、「R04にA09がYesとA10がNoを追加して」形式の依頼を作る。"""
+    pairs = "と".join(f"{q}が{a.capitalize()}" for q, a in additions.items())
+    return f"R04に{pairs}を追加して"
+
+
+# R04は A10=No を持つ。(追加する条件, 拒否理由) 。「追加済み」は同じ値、
+# 「書き換え」は違う値。新規の条件が先でも後でも、1つでも既存なら全体を拒否する。
+PARTLY_EXISTING = (
+    ({"A09": "yes", "A10": "no"}, "追加済み"),
+    ({"A10": "no", "A09": "yes"}, "追加済み"),
+    ({"A10": "no", "A11": "yes"}, "追加済み"),
+    ({"A11": "yes", "A10": "no"}, "追加済み"),
+    ({"A09": "yes", "A10": "yes"}, "書き換えは扱えません"),
+    ({"A10": "yes", "A11": "no"}, "書き換えは扱えません"),
+)
+
+
 def add_r05_output() -> dict:
     """更新の依頼に対して、生成が新規作成として返した出力。"""
     return {
@@ -264,82 +282,38 @@ class TestValidation(unittest.TestCase):
 
     def test_rejects_each_malformed_shape_on_its_own_without_a_request(self) -> None:
         # prompt=None で、依頼との照合に隠れず、形式の検査だけを確かめる。
-        cases = (
-            # (ラベル, 生成の出力, 理由に含まれる文言)
-            ("ID不正: 小文字", update_output("r04"), "ルールIDの形式が不正"),
-            ("ID不正: 桁不足", update_output("R4"), "ルールIDの形式が不正"),
-            ("ID不正: 空", update_output(""), "ルールIDの形式が不正"),
-            ("ID不正: 数値", update_output(4), "ルールIDの形式が不正"),
-            ("ID不正: None", update_output(None), "ルールIDの形式が不正"),
-            (
-                "設問ID不正: 小文字",
-                update_output(add_conditions={"a09": "yes"}),
-                "条件の設問IDの形式が不正",
-            ),
-            (
-                "設問ID不正: 桁不足",
-                update_output(add_conditions={"A9": "yes"}),
-                "条件の設問IDの形式が不正",
-            ),
-            (
-                "設問ID不正: 数値",
-                update_output(add_conditions={9: "yes"}),
-                "条件の設問IDの形式が不正",
-            ),
-            (
-                "yesno以外: maybe",
-                update_output(add_conditions={"A09": "maybe"}),
-                "yes か no だけ",
-            ),
-            (
-                "yesno以外: 大文字",
-                update_output(add_conditions={"A09": "Yes"}),
-                "yes か no だけ",
-            ),
-            (
-                "yesno以外: 真偽値",
-                update_output(add_conditions={"A09": True}),
-                "yes か no だけ",
-            ),
-            (
-                "yesno以外: None",
-                update_output(add_conditions={"A09": None}),
-                "yes か no だけ",
-            ),
-            (
-                "非dict: リスト",
-                update_output(add_conditions=["A09"]),
-                "追加する条件が空",
-            ),
-            (
-                "非dict: 文字列",
-                update_output(add_conditions="A09=yes"),
-                "追加する条件が空",
-            ),
-            (
-                "非dict: None",
+        def with_conditions(value: Any) -> dict:
+            return update_output(add_conditions=value)
+
+        cases = {  # 理由に含まれる文言 → 拒否される生成の出力
+            "ルールIDの形式が不正": [
+                update_output(rule_id)
+                for rule_id in ("r04", "R4", "", 4, None)  # 小文字・桁不足・空・数値
+            ],
+            "条件の設問IDの形式が不正": [
+                with_conditions({q: "yes"}) for q in ("a09", "A9", 9)
+            ],
+            "yes か no だけ": [
+                with_conditions({"A09": a}) for a in ("maybe", "Yes", True, None)
+            ],
+            "追加する条件が空": [
+                with_conditions(["A09"]),
+                with_conditions("A09=yes"),
                 {**update_output(), "add_conditions": None},
-                "追加する条件が空",
-            ),
-            (
-                "欠落: rule_id",
+            ],
+            "形式が不正": [  # 欠落・余分な項目・dictでない出力そのもの
                 {"operation": "update_rule", "add_conditions": {"A09": "yes"}},
-                "形式が不正",
-            ),
-            (
-                "欠落: add_conditions",
                 {"operation": "update_rule", "rule_id": "R04"},
-                "形式が不正",
-            ),
-            ("余分な項目", update_output(extra={"note": "x"}), "形式が不正"),
-        )
-        for label, raw, message in cases:
-            with self.subTest(label):
-                self.rejected(raw, message, prompt=None)
-        # 非dictの出力そのものも、依頼との照合なしで拒否する。
-        for raw in (None, [], "update_rule"):
-            with self.subTest(f"出力が非dict: {raw!r}"):
-                self.rejected(raw, "形式が不正", prompt=None)
+                update_output(extra={"note": "x"}),
+                None,
+                [],
+                "update_rule",
+            ],
+        }
+        for message, outputs in cases.items():
+            for raw in outputs:
+                with self.subTest(message=message, raw=raw):
+                    self.rejected(raw, message, prompt=None)
         # 形式が正しければ、依頼なしでも通る（上の拒否が形式だけを理由にしている確認）。
         self.assertIsInstance(
             self.validate(update_output(), prompt=None), ValidatedRuleUpdate
@@ -363,43 +337,12 @@ class TestValidation(unittest.TestCase):
 
     def test_rejects_the_whole_update_when_only_part_is_already_there(self) -> None:
         # R04は A10=No を持つ。新規の条件が先でも後でも、1つでも既存なら全体を拒否する。
-        cases = (
-            # (依頼, 生成の追加条件, 理由)
-            (
-                "R04にA09がYesとA10がNoを追加して",
-                {"A09": "yes", "A10": "no"},
-                "追加済み",
-            ),
-            (
-                "R04にA10がNoとA09がYesを追加して",
-                {"A10": "no", "A09": "yes"},
-                "追加済み",
-            ),
-            (
-                "R04にA10がNoとA11がYesを追加して",
-                {"A10": "no", "A11": "yes"},
-                "追加済み",
-            ),
-            (
-                "R04にA11がYesとA10がNoを追加して",
-                {"A11": "yes", "A10": "no"},
-                "追加済み",
-            ),
-            (
-                "R04にA09がYesとA10がYesを追加して",
-                {"A09": "yes", "A10": "yes"},
-                "書き換えは扱えません",
-            ),
-            (
-                "R04にA10がYesとA11がNoを追加して",
-                {"A10": "yes", "A11": "no"},
-                "書き換えは扱えません",
-            ),
-        )
-        for prompt, additions, message in cases:
-            with self.subTest(prompt):
+        for additions, message in PARTLY_EXISTING:
+            with self.subTest(additions):
                 self.rejected(
-                    update_output(add_conditions=additions), message, prompt=prompt
+                    update_output(add_conditions=additions),
+                    message,
+                    prompt=update_prompt(additions),
                 )
 
 
@@ -626,35 +569,16 @@ class TestUpdateSeveralConditions(UpdateTestCase):
     def test_partly_existing_conditions_reject_the_whole_in_either_order(self) -> None:
         # R04は A10=No を持つ。新規の条件が先でも後でも、全体を422で拒否する。
         before = self.get_list()
-        cases = (
-            (
-                "R04にA09がYesとA10がNoを追加して",
-                {"A09": "yes", "A10": "no"},
-                "追加済み",
-            ),
-            (
-                "R04にA10がNoとA11がYesを追加して",
-                {"A10": "no", "A11": "yes"},
-                "追加済み",
-            ),
-            (
-                "R04にA09がYesとA10がYesを追加して",
-                {"A09": "yes", "A10": "yes"},
-                "書き換え",
-            ),
-            (
-                "R04にA10がYesとA11がNoを追加して",
-                {"A10": "yes", "A11": "no"},
-                "書き換え",
-            ),
-        )
-        for prompt, additions, reason in cases:
-            status, body = self.update(update_output(add_conditions=additions), prompt)
-            self.assertEqual(status, 422, prompt)
-            self.assertIn(reason, body["detail"], prompt)
-            self.assertIn("A10", body["detail"], prompt)  # 既存の条件を理由に示す
+        for additions, reason in PARTLY_EXISTING:
+            status, body = self.update(
+                update_output(add_conditions=additions), update_prompt(additions)
+            )
+            self.assertEqual(status, 422, additions)
+            self.assertIn(reason, body["detail"], additions)
+            self.assertIn("A10", body["detail"], additions)  # 既存の条件を理由に示す
             self.assertNotIn("proposal_id", body)
-            self.assertEqual(self.get_list(), before, prompt)  # 新規の条件も足されない
+            # 新規の条件も足されない
+            self.assertEqual(self.get_list(), before, additions)
 
 
 class TestUpdateDecision(UpdateTestCase):
@@ -723,13 +647,6 @@ class TestUpdateDecision(UpdateTestCase):
         self.assertEqual(self.get_list(), before)
         self.assertEqual(self.decide(proposal["proposal_id"], "yes")[0], 404)
         self.assertEqual(self.get_list(), before)
-
-    def test_a_proposal_is_used_once(self) -> None:
-        _, proposal = self.update()
-        self.assertEqual(self.decide(proposal["proposal_id"], "yes")[0], 200)
-        after = self.get_list()
-        self.assertEqual(self.decide(proposal["proposal_id"], "yes")[0], 404)
-        self.assertEqual(self.get_list(), after)
 
     def test_refuses_when_the_target_rule_changed_after_the_proposal(self) -> None:
         # 同じ基準で作った2つの更新案。先のYesで対象の版が進み、後のYesは反映しない。

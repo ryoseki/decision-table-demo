@@ -48,6 +48,7 @@ from app.rule_validation import (
     ValidatedRuleAdd,
     ValidatedRuleRemoval,
     ValidatedRuleUpdate,
+    with_added_conditions,
 )
 from app.template_store import save_template
 from app.usage_quota import (
@@ -331,22 +332,16 @@ class SharedConfigDb:
                 )
                 if target is None:
                     return ProposalConflict(proposal_id)
-                existing = dict(target.conditions)
                 additions = payload["add_conditions"]
                 # 対象の条件が提案後に変わっていたら足さない（版の比較への追加の防御）。
-                if any(question in existing for question in additions):
+                if any(question in dict(target.conditions) for question in additions):
                     return ProposalConflict(proposal_id)
-                updated = DemoRule(
-                    target_id,
-                    target.revision + 1,
-                    target.result_code,
-                    tuple(sorted({**existing, **additions}.items())),
-                )
+                new_rule = with_added_conditions(target, additions)
                 rules = tuple(
-                    updated if r.rule_id == target_id else r for r in current.rules
+                    new_rule if r.rule_id == target_id else r for r in current.rules
                 )
                 # 旧い版の行は残す（登録済みの判定は、当時の版を参照し続ける）。
-                self._insert_rule_row(conn, updated)
+                self._insert_rule_row(conn, new_rule)
             else:
                 added = _rule_of(payload["rule"])
                 if any(r.rule_id == added.rule_id for r in current.rules):
@@ -599,21 +594,8 @@ class DbRuleStore:
             )
             if target is None:  # 基準が変わっている（承認は拒否される）
                 raise ProposalConflict(proposal_id)
-            additions = payload["add_conditions"]
-            updated = DemoRule(
-                target.rule_id,
-                target.revision + 1,
-                target.result_code,
-                tuple(sorted({**dict(target.conditions), **additions}.items())),
-            )
-            return ValidatedRuleUpdate(
-                base[0],
-                base[1],
-                target,
-                updated,
-                tuple(sorted(additions.items())),
-                base[2],
-            )
+            additions = tuple(sorted(payload["add_conditions"].items()))
+            return ValidatedRuleUpdate(base[0], base[1], target, additions, base[2])
         return ValidatedRuleAdd(base[0], base[1], _rule_of(payload["rule"]), base[2])
 
     def approve(self, proposal_id: str) -> tuple[int, tuple[DemoRule, ...]]:

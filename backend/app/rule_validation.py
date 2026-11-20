@@ -77,15 +77,24 @@ class ValidatedRuleUpdate:
     base_revision: int
     base: tuple[DemoRule, ...]
     target: DemoRule
-    updated: DemoRule
     added_conditions: tuple[tuple[str, str], ...]
     base_question_revision: int
+
+    @property
+    def updated(self) -> DemoRule:
+        return with_added_conditions(self.target, dict(self.added_conditions))
 
     @property
     def after(self) -> tuple[DemoRule, ...]:
         return tuple(
             self.updated if r.rule_id == self.target.rule_id else r for r in self.base
         )
+
+
+def with_added_conditions(rule: DemoRule, additions: dict[str, str]) -> DemoRule:
+    """同じID・結果で、条件を足した次の版（条件は設問ID順）。"""
+    merged = tuple(sorted({**dict(rule.conditions), **additions}.items()))
+    return DemoRule(rule.rule_id, rule.revision + 1, rule.result_code, merged)
 
 
 def next_rule_id(current: tuple[DemoRule, ...], used_ids: frozenset[str]) -> str:
@@ -109,6 +118,27 @@ def find_invalid_question_references(
     return problems
 
 
+def _check_rule_id(rule_id: Any) -> None:
+    if not isinstance(rule_id, str) or not _RULE_ID.fullmatch(rule_id):
+        raise InvalidProposal("ルールIDの形式が不正です（例: R04）")
+
+
+def _check_conditions(
+    conditions: Any, questions: tuple[DemoQuestion, ...], empty_message: str
+) -> None:
+    """条件（設問ID→yes/no）の形式と、参照する設問が使えることを確かめる。"""
+    if not isinstance(conditions, dict) or not conditions:
+        raise InvalidProposal(empty_message)
+    for question_id, answer in conditions.items():
+        if not isinstance(question_id, str) or not _QUESTION_ID.fullmatch(question_id):
+            raise InvalidProposal("条件の設問IDの形式が不正です（例: A09）")
+        if not isinstance(answer, str) or answer not in _ANSWERS:
+            raise InvalidProposal(f"設問{question_id}の条件は yes か no だけです")
+    problems = find_invalid_question_references(sorted(conditions), questions)
+    if problems:
+        raise InvalidProposal("、".join(problems) + "（ルールは参照できません）")
+
+
 def _validate_removal(
     raw: dict,
     current: tuple[DemoRule, ...],
@@ -118,19 +148,16 @@ def _validate_removal(
     if set(raw) != {"operation", "rule_id"}:
         raise InvalidProposal("AIの出力の形式が不正です（operation と rule_id が必要）")
     rule_id = raw["rule_id"]
-    if not isinstance(rule_id, str) or not _RULE_ID.fullmatch(rule_id):
-        raise InvalidProposal("ルールIDの形式が不正です（例: R04）")
+    _check_rule_id(rule_id)
     target = next((r for r in current if r.rule_id == rule_id), None)
     if target is None:
         raise InvalidProposal(f"ルールID {rule_id} は存在しません")
     return ValidatedRuleRemoval(base_revision, current, target, question_revision)
 
 
-_RULE_REFERENCE = re.compile(r"R[0-9]{2,}")
-_QUESTION_REFERENCE = re.compile(r"A[0-9]{2}")
 # 曖昧な依頼の検知専用（小文字も含む）。ID・条件を読み取る正規表現には使わない。
-_RULE_REFERENCE_LOOSE = re.compile(r"R[0-9]{2,}", re.IGNORECASE)
-_QUESTION_REFERENCE_LOOSE = re.compile(r"A[0-9]{2}", re.IGNORECASE)
+_RULE_ID_ANY_CASE = re.compile(_RULE_ID.pattern, re.IGNORECASE)
+_QUESTION_ID_ANY_CASE = re.compile(_QUESTION_ID.pattern, re.IGNORECASE)
 _PROMPT_CONDITION = re.compile(
     r"(A[0-9]{2})\s*(?:が|は|を|=|＝|:|：)\s*(Yes|No)", re.IGNORECASE
 )
@@ -151,7 +178,7 @@ class UpdateIntent:
     conditions: dict[str, str]
 
 
-def _removes(prompt: str) -> bool:
+def mentions_removal(prompt: str) -> bool:
     """結果の名前（アカウント削除）を除いた文に「削除」があるか。"""
     operation_text = prompt
     for name in _RESULT_NAMES:
@@ -165,11 +192,11 @@ def read_update_intent(prompt: str) -> UpdateIntent | None:
     ルールID・追加・設問ごとのYes／Noがそろい、削除や新規の言葉がないとき。
     AIの出力を信用せず、出力と突き合わせるために、サーバー側で読む。
     """
-    ids = tuple(dict.fromkeys(_RULE_REFERENCE.findall(prompt)))
+    ids = tuple(dict.fromkeys(_RULE_ID.findall(prompt)))
     pairs = [(q, a.lower()) for q, a in _PROMPT_CONDITION.findall(prompt)]
     if not ids or not pairs or "追加" not in prompt:
         return None
-    if _NEW_RULE_PHRASE.search(prompt) or _removes(prompt):
+    if _NEW_RULE_PHRASE.search(prompt) or mentions_removal(prompt):
         return None
     conditions: dict[str, str] = {}
     for question_id, answer in pairs:
@@ -198,11 +225,11 @@ def _check_against_request(raw: Any, prompt: str) -> None:
         # 大文字小文字を区別せず兆候として扱う（受理はしない。新規作成にも落とさない）。
         if (
             operation == OPERATION_ADD
-            and _RULE_REFERENCE_LOOSE.search(prompt)
+            and _RULE_ID_ANY_CASE.search(prompt)
             and "追加" in prompt
-            and (_QUESTION_REFERENCE_LOOSE.search(prompt) or "条件" in prompt)
+            and (_QUESTION_ID_ANY_CASE.search(prompt) or "条件" in prompt)
             and not _NEW_RULE_PHRASE.search(prompt)
-            and not _removes(prompt)
+            and not mentions_removal(prompt)
         ):
             raise InvalidProposal(
                 "ルールIDを含む追加の依頼で、既存ルールへの条件の追加か、新しいルールの"
@@ -247,21 +274,13 @@ def _validate_update(
             "AIの出力の形式が不正です（operation・rule_id・add_conditions が必要）"
         )
     rule_id, additions = raw["rule_id"], raw["add_conditions"]
-    if not isinstance(rule_id, str) or not _RULE_ID.fullmatch(rule_id):
-        raise InvalidProposal("ルールIDの形式が不正です（例: R04）")
-    if not isinstance(additions, dict) or not additions:
-        raise InvalidProposal("追加する条件が空です（設問ごとのYes／Noが必要）")
-    for question_id, answer in additions.items():
-        if not isinstance(question_id, str) or not _QUESTION_ID.fullmatch(question_id):
-            raise InvalidProposal("条件の設問IDの形式が不正です（例: A09）")
-        if not isinstance(answer, str) or answer not in _ANSWERS:
-            raise InvalidProposal(f"設問{question_id}の条件は yes か no だけです")
+    _check_rule_id(rule_id)
+    _check_conditions(
+        additions, questions, "追加する条件が空です（設問ごとのYes／Noが必要）"
+    )
     target = next((r for r in current if r.rule_id == rule_id), None)
     if target is None:
         raise InvalidProposal(f"ルールID {rule_id} は存在しません")
-    problems = find_invalid_question_references(sorted(additions), questions)
-    if problems:
-        raise InvalidProposal("、".join(problems) + "（ルールは参照できません）")
     existing = dict(target.conditions)
     for question_id, answer in sorted(additions.items()):
         if question_id not in existing:
@@ -275,14 +294,20 @@ def _validate_update(
             f"ルール{rule_id}は設問{question_id}の条件を既に持っています"
             f"（{existing[question_id]}）。既存の条件の書き換えは扱えません"
         )
-    merged = tuple(sorted({**existing, **additions}.items()))
+    proposal = ValidatedRuleUpdate(
+        base_revision,
+        current,
+        target,
+        tuple(sorted(additions.items())),
+        question_revision,
+    )
     same = next(
         (
             r
             for r in current
             if r.rule_id != rule_id
             and r.result_code == target.result_code
-            and r.conditions == merged
+            and r.conditions == proposal.updated.conditions
         ),
         None,
     )
@@ -290,15 +315,7 @@ def _validate_update(
         raise InvalidProposal(
             f"更新後の条件と結果が、ルール{same.rule_id}と同じになります（重複）"
         )
-    updated = DemoRule(rule_id, target.revision + 1, target.result_code, merged)
-    return ValidatedRuleUpdate(
-        base_revision,
-        current,
-        target,
-        updated,
-        tuple(sorted(additions.items())),
-        question_revision,
-    )
+    return proposal
 
 
 def validate_rule_output(
@@ -340,21 +357,13 @@ def validate_rule_output(
         )
     rule_id, result_code = rule["id"], rule["result_code"]
     conditions = rule["conditions"]
-    if not isinstance(rule_id, str) or not _RULE_ID.fullmatch(rule_id):
-        raise InvalidProposal("ルールIDの形式が不正です（例: R04）")
+    _check_rule_id(rule_id)
     if not isinstance(result_code, str) or result_code not in RESULT_CODES:
         allowed = "・".join(RESULT_CODES)
         raise InvalidProposal(f"結果コードが不正です（{allowed} のいずれか）")
-    if not isinstance(conditions, dict) or not conditions:
-        raise InvalidProposal("ルールの条件が空です（設問ごとのYes／Noが必要）")
-    for question_id, answer in conditions.items():
-        if not isinstance(question_id, str) or not _QUESTION_ID.fullmatch(question_id):
-            raise InvalidProposal("条件の設問IDの形式が不正です（例: A09）")
-        if not isinstance(answer, str) or answer not in _ANSWERS:
-            raise InvalidProposal(f"設問{question_id}の条件は yes か no だけです")
-    problems = find_invalid_question_references(sorted(conditions), questions)
-    if problems:
-        raise InvalidProposal("、".join(problems) + "（ルールは参照できません）")
+    _check_conditions(
+        conditions, questions, "ルールの条件が空です（設問ごとのYes／Noが必要）"
+    )
     normalized = tuple(sorted(conditions.items()))
     if any(r.rule_id == rule_id for r in current):
         raise InvalidProposal(f"ルールID {rule_id} は既に存在します（重複）")
