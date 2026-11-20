@@ -5,7 +5,7 @@ PATCH・DELETE の7つになる。そこで、サーバー側で、書き込み�
 次の経路とメソッドだけに限る。それ以外は、アプリに届く前に405で拒否する。
 
 - POST /api/intake/cases（案件の受付）
-- POST /api/sample-cases（共有のサンプル案件の作成。固定の4件だけ。AIは呼ばない）
+- POST /api/sample-cases（共有のサンプル案件を1回の操作で1件作る。AIは呼ばない）
 - PUT /api/cases/{case_id}/judgment（判定の保存）
 - POST /api/admin/question-proposals と POST /api/admin/rule-proposals
 - 上の提案経路に /{id}/decision を付けた承認POST

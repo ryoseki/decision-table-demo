@@ -92,22 +92,28 @@ export async function listCases(): Promise<CaseListRow[]> {
   }));
 }
 
-/** 共有サンプル案件の作成結果。created は今回作った案件ID、existing は作成済みだった案件ID。 */
-export type SampleCasesResult = { created: string[]; existing: string[]; caseIds: string[] };
+/** 共有サンプル案件の作成結果。caseId は、その操作で決まる案件ID。created は、今回新しく作ったか（再送で作成済みなら false）。 */
+export type SampleCaseResult = { caseId: string; created: boolean };
 
 /**
- * 共有の架空サンプル案件（固定の4件）を、足りない分だけ作る（POST /api/sample-cases）。
- * 作成済みなら何も変えず、すべて existing で返る。サーバーが混み合ったとき（503）は、作成済みの分を
- * 残したまま失敗するので、もう一度押して再試行できる。
+ * 共有の架空サンプル案件を、操作1回につき1件作る（POST /api/sample-cases）。
+ * operationId は、その操作を表す依頼ID（UUID。Idempotency-Key）。同じ依頼IDの再送・失敗後の再試行は、
+ * 同じ案件になり、重複しない（created が false）。別の依頼IDは、別の案件を1件足す。
+ * 通信できない・503・応答を読み取れない失敗でも、作成の結果が分からないので、画面は同じ依頼IDで再試行する。
  */
-export async function createSampleCases(): Promise<SampleCasesResult> {
+export async function createSampleCase(operationId: string): Promise<SampleCaseResult> {
   const response = await request("/api/sample-cases", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Idempotency-Key": operationId },
     body: "{}",
   });
-  const r = (await response.json()) as { created: string[]; existing: string[]; case_ids: string[] };
-  return { created: r.created, existing: r.existing, caseIds: r.case_ids };
+  try {
+    const r = (await response.json()) as { case_id: unknown; created: unknown };
+    if (typeof r.case_id !== "string" || typeof r.created !== "boolean") throw new Error("形式が違う");
+    return { caseId: r.case_id, created: r.created };
+  } catch {
+    throw new ApiError(0, "サーバーの応答を読み取れませんでした");
+  }
 }
 
 type ApiCase = {

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { getCase, listCases, listRules, type CaseListRow } from "./api";
+import { useEffect, useRef, useState } from "react";
+import { createSampleCase, describeError, getCase, listCases, listRules, proposalRequestId, type CaseListRow } from "./api";
 import type { Rule } from "./matching";
 import type { ReviewCase } from "./data/cases";
 import { getDemoQuestions, type DemoQuestionList } from "./questionsApi";
@@ -27,6 +27,51 @@ function useRemote<T>(load: () => Promise<T>, key: string): Remote<T> {
   }, [key]);
   // key が変わった直後は、前の結果ではなく、読み込み中を返す。
   return state.key === key ? state.value : { status: "loading" };
+}
+
+/** サンプル案件の作成の状態と操作（useSampleCreation の戻り値）。 */
+export type SampleCreation = {
+  /** 作成に成功するたびに進む。一覧の取り直しの合図。 */
+  version: number;
+  creating: boolean;
+  notice: string | null;
+  error: string | null;
+  create: () => void;
+};
+
+/**
+ * サンプル案件の作成。1回の操作は依頼ID（UUID）で表す。成功したら次は新しい操作、失敗したら
+ * （サーバーで作成済みかもしれないので）同じ依頼IDで再試行する。
+ * 未完了の操作を画面の切り替え（一覧のアンマウント）で失わないよう、App が生きている間保持するフックにする。
+ * ブラウザー全体の再読み込み・タブを閉じたあとは保たない（保存はしない）。
+ */
+export function useSampleCreation(): SampleCreation {
+  const [version, setVersion] = useState(0);
+  const [creating, setCreating] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const operationId = useRef<string | null>(null);
+  const create = async () => {
+    operationId.current ??= proposalRequestId();
+    setCreating(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const result = await createSampleCase(operationId.current);
+      operationId.current = null; // 次の押下は、新しい操作
+      setNotice(
+        result.created
+          ? `サンプル案件を1件作成しました（${result.caseId}）。`
+          : `この操作の案件（${result.caseId}）は作成済みでした。新しく作成した案件はありません。`,
+      );
+      setVersion((v) => v + 1);
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setCreating(false);
+    }
+  };
+  return { version, creating, notice, error, create };
 }
 
 /** 案件の一覧。version を変えると、取り直す（サンプル案件の作成後など）。 */

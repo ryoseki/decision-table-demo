@@ -638,18 +638,28 @@ class TestSampleCasesThroughMain(unittest.TestCase):
         self.addCleanup(setattr, main.app.state, "case_store", original)
 
     def test_the_real_app_registers_the_route_and_serves_it_through_the_guard(self):
-        from app import sample_cases
+        from uuid import uuid4
 
         with _Server(self.main.app) as server:
             url = server.base_url + "/api/sample-cases"
-            # 公開環境と同じく、エッジの印（接続元IP）が付いた要求
+            # 公開環境と同じく、エッジの印（接続元IP）と依頼IDが付いた要求
             edge = {"X-Demo-Viewer-Ip": "192.0.2.1"}
-            status, body = send("POST", url, None, edge)
+            key = {"Idempotency-Key": str(uuid4())}
+            status, first = send("POST", url, None, {**edge, **key})
+            self.assertEqual((status, first["created"]), (201, True))
+            # 同じ依頼の再送は、同じ案件（作成済み）
+            status, body = send("POST", url, None, {**edge, **key})
             self.assertEqual(
-                (status, body["created"]), (201, list(sample_cases.SAMPLE_CASE_IDS))
+                (status, body), (200, {"case_id": first["case_id"], "created": False})
             )
-            status, body = send("POST", url, None, edge)
-            self.assertEqual((status, body["created"]), (200, []))
+            # 別の依頼は、別の案件を1件足す
+            status, second = send(
+                "POST", url, None, {**edge, "Idempotency-Key": str(uuid4())}
+            )
+            self.assertEqual((status, second["created"]), (201, True))
+            self.assertNotEqual(second["case_id"], first["case_id"])
+            # 依頼IDがなければ、何も作らない
+            self.assertEqual(send("POST", url, None, edge)[0], 422)
             for method, path in (
                 ("PUT", "/api/sample-cases"),
                 ("DELETE", "/api/sample-cases"),
@@ -662,7 +672,7 @@ class TestSampleCasesThroughMain(unittest.TestCase):
                     self.assertEqual(
                         send(method, server.base_url + path, {}, edge)[0], 405
                     )
-        self.assertEqual(len(self.store.cases), 4)  # 拒否した要求は何も変えない
+        self.assertEqual(len(self.store.cases), 2)  # 拒否した要求は何も変えない
         # 作成にAIの利用枠（接続元別）は使わない
         quota = getattr(self.main.app.state, "ai_quota", None)
         if quota is not None:

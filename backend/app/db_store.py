@@ -131,22 +131,12 @@ class PostgresCaseStore:
 
     # --- 共有のサンプル案件（app.sample_cases） ------------------------------------
 
-    def existing_case_ids(self, case_ids: tuple[str, ...]) -> set[str]:
-        """指定した案件IDのうち、保存済みのもの（読み取りだけ）。"""
-        marks = ", ".join(["%s"] * len(case_ids))
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"SELECT case_id FROM review_cases WHERE case_id IN ({marks})",
-                tuple(case_ids),
-            ).fetchall()
-        return {case_id for (case_id,) in rows}
-
     @with_occ_retry
     def create_sample_case(self, sample: dict[str, Any]) -> bool:
-        """固定IDの案件を、1トランザクションで、まだ無いときだけ作る。作ればTrue。
+        """依頼IDから決まる案件IDの案件を、1トランザクションで、まだ無いときだけ作る。作ればTrue。
 
         案件・設問のコピー・結果・A09の回答（登録済みのサンプルは結果も）を同時に入れる。
-        すでにあれば何も書かずFalse（既存の案件・判定は変えない）。同時に同じIDを作ろうとした
+        すでにあれば何も書かずFalse（同じ依頼の再送。既存の案件・判定は変えない）。同時に同じIDを作ろうとした
         側は、主キーの重複でDO NOTHINGになるか、衝突（40001）で再試行され、重複しない。
         ON CONFLICT DO NOTHINGとINSERTだけを使い、FOR UPDATEには頼らない
         （Aurora DSQL互換）。

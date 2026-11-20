@@ -1,9 +1,11 @@
 // 実行: npm test（Vitest）。APIの呼び出しを、fetch のスタブで確認する（サーバーに接続しない）。
 import { afterEach, expect, test, vi } from "vitest";
-import { ApiError, createSampleCases, describeError, getCase, listCases, listRules, saveJudgment, signedBody } from "./api";
+import { ApiError, createSampleCase, describeError, getCase, listCases, listRules, saveJudgment, signedBody } from "./api";
 import { apiCase, apiRow, stubFetch } from "./testing";
 
 afterEach(() => vi.unstubAllGlobals());
+
+const KEY = "11111111-2222-4333-8444-555555555555";
 
 const allConditions = (v: "yes" | "no"): Record<string, string> =>
   Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`A${String(i + 1).padStart(2, "0")}`, v]));
@@ -230,35 +232,37 @@ test("POST・PUT: 実際に送る日本語のJSON文字列のUTF-8バイト列�
   expect(await signedBody({ method: "POST" })).toEqual({ method: "POST" });
 });
 
-test("サンプル案件の作成: 本文つきのPOSTをOAC用の署名ヘッダー付きで送り、応答を画面の形にする", async () => {
+test("サンプル案件の作成: 依頼ID（Idempotency-Key）と本文つきのPOSTをOAC用の署名ヘッダー付きで送り、応答を画面の形にする", async () => {
+  const key = "11111111-2222-4333-8444-555555555555";
   const spy = stubFetch({
-    "POST /api/sample-cases": {
-      status: 201,
-      body: { created: ["CASE-SAMPLE-01"], existing: ["CASE-SAMPLE-02"], case_ids: ["CASE-SAMPLE-01", "CASE-SAMPLE-02"] },
-    },
+    "POST /api/sample-cases": { status: 201, body: { case_id: "CASE-SAMPLE-0123456789ABCDEF", created: true } },
   });
-  const result = await createSampleCases();
-  expect(result).toEqual({
-    created: ["CASE-SAMPLE-01"],
-    existing: ["CASE-SAMPLE-02"],
-    caseIds: ["CASE-SAMPLE-01", "CASE-SAMPLE-02"],
-  });
+  const result = await createSampleCase(key);
+  expect(result).toEqual({ caseId: "CASE-SAMPLE-0123456789ABCDEF", created: true });
   const init = spy.mock.calls[0][1] as RequestInit;
   expect(init.method).toBe("POST");
   expect(init.body).toBe("{}");
   const headers = new Headers(init.headers);
   expect(headers.get("content-type")).toBe("application/json");
+  expect(headers.get("idempotency-key")).toBe(key);
   // 空のJSONオブジェクト "{}" のSHA-256
   expect(headers.get("x-amz-content-sha256")).toBe("44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a");
+  stubFetch({ "POST /api/sample-cases": { status: 200, body: { case_id: "CASE-SAMPLE-0123456789ABCDEF", created: false } } });
+  expect(await createSampleCase(key)).toEqual({ caseId: "CASE-SAMPLE-0123456789ABCDEF", created: false });
 });
 
 test("サンプル案件の作成: 503・405・接続失敗は、画面に出せる理由つきの ApiError にする", async () => {
   stubFetch({ "POST /api/sample-cases": { status: 503 } });
-  await expect(createSampleCases()).rejects.toMatchObject({ name: "ApiError", status: 503 });
+  await expect(createSampleCase(KEY)).rejects.toMatchObject({ name: "ApiError", status: 503 });
   stubFetch({ "POST /api/sample-cases": { status: 405 } });
-  await expect(createSampleCases()).rejects.toMatchObject({ status: 405 });
+  await expect(createSampleCase(KEY)).rejects.toMatchObject({ status: 405 });
   stubFetch({ "POST /api/sample-cases": new TypeError("network") });
-  const error = await createSampleCases().catch((e: unknown) => e);
+  const error = await createSampleCase(KEY).catch((e: unknown) => e);
   expect(error).toBeInstanceOf(ApiError);
   expect(describeError(error)).toContain("接続できませんでした");
+  // 応答の形が違う（読み取れない）ときも、画面に出せる理由つきの ApiError にする
+  for (const body of [{}, { case_id: 1, created: true }, { case_id: "CASE-X", created: "yes" }]) {
+    stubFetch({ "POST /api/sample-cases": { status: 201, body } });
+    await expect(createSampleCase(KEY)).rejects.toMatchObject({ name: "ApiError", message: expect.stringContaining("読み取れませんでした") });
+  }
 });

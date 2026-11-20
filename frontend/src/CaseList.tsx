@@ -1,44 +1,32 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { AnswerCounts } from "./AnswerCounts";
 import { StatusBadge } from "./Badges";
-import { createSampleCases, describeError } from "./api";
+import { describeError } from "./api";
 import { caseStatuses, statusOf, type CaseStatus } from "./data/cases";
 import { detailHref } from "./route";
-import { useCaseList } from "./useApi";
+import { useCaseList, type SampleCreation } from "./useApi";
 
 const normalize = (s: string) => s.normalize("NFKC").toLowerCase();
 
 export type ListFilter = { query: string; status: CaseStatus | "all" };
 
 // 検索語と状態は App が持ち、詳細から戻っても保持する。
-export default function CaseList({ filter, onFilterChange }: { filter: ListFilter; onFilterChange: (f: ListFilter) => void }) {
+export default function CaseList({
+  filter,
+  onFilterChange,
+  sample,
+}: {
+  filter: ListFilter;
+  onFilterChange: (f: ListFilter) => void;
+  sample: SampleCreation;
+}) {
   const { query, status } = filter;
   const setQuery = (q: string) => onFilterChange({ ...filter, query: q });
   const setStatus = (s: CaseStatus | "all") => onFilterChange({ ...filter, status: s });
 
-  // サンプル案件の作成。成功したら version を進めて、一覧を取り直す（ブラウザーの再読み込みは要らない）。
-  const [version, setVersion] = useState(0);
-  const [creating, setCreating] = useState(false);
-  const [sampleNotice, setSampleNotice] = useState<string | null>(null);
-  const [sampleError, setSampleError] = useState<string | null>(null);
-  const createSamples = async () => {
-    setCreating(true);
-    setSampleNotice(null);
-    setSampleError(null);
-    try {
-      const result = await createSampleCases();
-      setSampleNotice(
-        result.created.length > 0
-          ? `サンプル案件を${result.created.length}件作成しました。共有のサンプルは全${result.caseIds.length}件です。`
-          : `サンプル案件は作成済みです（全${result.caseIds.length}件）。新しく作成した案件はありません。`,
-      );
-      setVersion((v) => v + 1);
-    } catch (error) {
-      setSampleError(describeError(error));
-    } finally {
-      setCreating(false);
-    }
-  };
+  // サンプル案件の作成の状態は App が持つ（画面を切り替えても、未完了の操作を失わない）。
+  // 成功したら version が進み、一覧を取り直す（ブラウザーの再読み込みは要らない）。
+  const { version, creating, notice: sampleNotice, error: sampleError, create: createSample } = sample;
 
   const remote = useCaseList(version);
   const cases = useMemo(() => (remote.status === "ok" ? remote.data : []), [remote]);
@@ -62,10 +50,10 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
         <h2 id="list-title" tabIndex={-1}>審査対象一覧</h2>
         <p className="lead">受領したアカウント乗っ取りの申告を確認します。</p>
         <div className="sample-action">
-          <button type="button" className="btn" data-testid="create-samples" disabled={creating} aria-busy={creating} onClick={createSamples}>
+          <button type="button" className="btn" data-testid="create-samples" disabled={creating} aria-busy={creating} onClick={() => createSample()}>
             {creating ? "作成中…" : "サンプル案件を作成"}
           </button>
-          <p className="hint">架空の4件を、利用者全員で共有します。作成済みの場合は、増えません。</p>
+          <p className="hint">押すたびに、架空の案件を1件追加します。案件は利用者全員で共有します。</p>
           {sampleNotice !== null && (
             <p className="notice-ok" data-testid="sample-notice" aria-live="polite">{sampleNotice}</p>
           )}
@@ -73,7 +61,7 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
             <div className="error sample-error" role="alert" data-testid="sample-error">
               <p className="empty-title">サンプル案件を作成できませんでした</p>
               <p>{sampleError}</p>
-              <p>作成済みの案件は残っています。もう一度「サンプル案件を作成」を押して、再試行できます。</p>
+              <p>もう一度「サンプル案件を作成」を押して、再試行できます。同じ操作の再試行なので、案件は重複しません。</p>
             </div>
           )}
         </div>
