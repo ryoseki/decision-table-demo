@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { AnswerCounts } from "./AnswerCounts";
 import { StatusBadge } from "./Badges";
-import { describeError } from "./api";
+import { createSampleCases, describeError } from "./api";
 import { caseStatuses, statusOf, type CaseStatus } from "./data/cases";
 import { detailHref } from "./route";
 import { useCaseList } from "./useApi";
@@ -16,7 +16,31 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
   const setQuery = (q: string) => onFilterChange({ ...filter, query: q });
   const setStatus = (s: CaseStatus | "all") => onFilterChange({ ...filter, status: s });
 
-  const remote = useCaseList();
+  // サンプル案件の作成。成功したら version を進めて、一覧を取り直す（ブラウザーの再読み込みは要らない）。
+  const [version, setVersion] = useState(0);
+  const [creating, setCreating] = useState(false);
+  const [sampleNotice, setSampleNotice] = useState<string | null>(null);
+  const [sampleError, setSampleError] = useState<string | null>(null);
+  const createSamples = async () => {
+    setCreating(true);
+    setSampleNotice(null);
+    setSampleError(null);
+    try {
+      const result = await createSampleCases();
+      setSampleNotice(
+        result.created.length > 0
+          ? `サンプル案件を${result.created.length}件作成しました。共有のサンプルは全${result.caseIds.length}件です。`
+          : `サンプル案件は作成済みです（全${result.caseIds.length}件）。新しく作成した案件はありません。`,
+      );
+      setVersion((v) => v + 1);
+    } catch (error) {
+      setSampleError(describeError(error));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const remote = useCaseList(version);
   const cases = useMemo(() => (remote.status === "ok" ? remote.data : []), [remote]);
 
   const filtered = useMemo(() => {
@@ -37,6 +61,22 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
       <div className="page-head">
         <h2 id="list-title" tabIndex={-1}>審査対象一覧</h2>
         <p className="lead">受領したアカウント乗っ取りの申告を確認します。</p>
+        <div className="sample-action">
+          <button type="button" className="btn" data-testid="create-samples" disabled={creating} aria-busy={creating} onClick={createSamples}>
+            {creating ? "作成中…" : "サンプル案件を作成"}
+          </button>
+          <p className="hint">架空の4件を、利用者全員で共有します。作成済みの場合は、増えません。</p>
+          {sampleNotice !== null && (
+            <p className="notice-ok" data-testid="sample-notice" aria-live="polite">{sampleNotice}</p>
+          )}
+          {sampleError !== null && (
+            <div className="error sample-error" role="alert" data-testid="sample-error">
+              <p className="empty-title">サンプル案件を作成できませんでした</p>
+              <p>{sampleError}</p>
+              <p>作成済みの案件は残っています。もう一度「サンプル案件を作成」を押して、再試行できます。</p>
+            </div>
+          )}
+        </div>
       </div>
 
       {remote.status === "loading" && (

@@ -600,6 +600,10 @@ class TestInternalMockThroughGuard(unittest.TestCase):
                 ("PUT", "/api/intake/cases"),
                 ("POST", "/mock/v1/auto-answers/A09/../A10"),
                 ("POST", "/api/admin/other"),
+                # 共有サンプル案件は、固定のPOST（下の実配線のテスト）以外を開けない
+                ("PUT", "/api/sample-cases"),
+                ("DELETE", "/api/sample-cases"),
+                ("POST", "/api/sample-cases/reset"),
             ):
                 with self.subTest(method=method, path=path):
                     status, _ = send(method, server.base_url + path, {}, edge)
@@ -615,3 +619,51 @@ class TestInternalMockThroughGuard(unittest.TestCase):
                 {"X-Demo-Viewer-Ip": "192.0.2.1"},
             )
         self.assertEqual(status, 405)
+
+
+class TestSampleCasesThroughMain(unittest.TestCase):
+    """実際の app.main（ルーターの配線と書き込みガード）で、共有サンプルの作成を通す。
+
+    保存先だけを、DBなしのテスト用に差し替える（SQLはDB統合テストの受け持ち）。
+    """
+
+    def setUp(self):
+        from app import main
+        from tests.test_sample_cases import SampleStore
+
+        self.main = main
+        self.store = SampleStore()
+        original = main.app.state.case_store
+        main.app.state.case_store = self.store
+        self.addCleanup(setattr, main.app.state, "case_store", original)
+
+    def test_the_real_app_registers_the_route_and_serves_it_through_the_guard(self):
+        from app import sample_cases
+
+        with _Server(self.main.app) as server:
+            url = server.base_url + "/api/sample-cases"
+            # 公開環境と同じく、エッジの印（接続元IP）が付いた要求
+            edge = {"X-Demo-Viewer-Ip": "192.0.2.1"}
+            status, body = send("POST", url, None, edge)
+            self.assertEqual(
+                (status, body["created"]), (201, list(sample_cases.SAMPLE_CASE_IDS))
+            )
+            status, body = send("POST", url, None, edge)
+            self.assertEqual((status, body["created"]), (200, []))
+            for method, path in (
+                ("PUT", "/api/sample-cases"),
+                ("DELETE", "/api/sample-cases"),
+                ("PATCH", "/api/sample-cases"),
+                ("POST", "/api/sample-cases/reset"),
+                ("POST", "/api/sample-cases/"),
+                ("DELETE", "/api/cases/CASE-SAMPLE-01"),
+            ):
+                with self.subTest(method=method, path=path):
+                    self.assertEqual(
+                        send(method, server.base_url + path, {}, edge)[0], 405
+                    )
+        self.assertEqual(len(self.store.cases), 4)  # 拒否した要求は何も変えない
+        # 作成にAIの利用枠（接続元別）は使わない
+        quota = getattr(self.main.app.state, "ai_quota", None)
+        if quota is not None:
+            self.assertEqual(quota.used("v4:192.0.2.1"), (0, 0))

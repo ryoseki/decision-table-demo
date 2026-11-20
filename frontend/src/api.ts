@@ -92,6 +92,24 @@ export async function listCases(): Promise<CaseListRow[]> {
   }));
 }
 
+/** 共有サンプル案件の作成結果。created は今回作った案件ID、existing は作成済みだった案件ID。 */
+export type SampleCasesResult = { created: string[]; existing: string[]; caseIds: string[] };
+
+/**
+ * 共有の架空サンプル案件（固定の4件）を、足りない分だけ作る（POST /api/sample-cases）。
+ * 作成済みなら何も変えず、すべて existing で返る。サーバーが混み合ったとき（503）は、作成済みの分を
+ * 残したまま失敗するので、もう一度押して再試行できる。
+ */
+export async function createSampleCases(): Promise<SampleCasesResult> {
+  const response = await request("/api/sample-cases", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const r = (await response.json()) as { created: string[]; existing: string[]; case_ids: string[] };
+  return { created: r.created, existing: r.existing, caseIds: r.case_ids };
+}
+
 type ApiCase = {
   case_id: string;
   summary: string;

@@ -32,10 +32,12 @@ from app.domain import (
 )
 from app.question_validation import validate_model_output
 from app.rule_validation import validate_rule_output
+from app.sample_cases import SAMPLE_CASES
 from app.shared_db import DbQuestionStore, DbRuleStore, PostgresAiQuota, SharedConfigDb
 from app.template_store import PostgresProposalTemplates
 from app.usage_quota import DuplicateAiRequest, QuotaExceeded, QuotaLimits
 from tests.test_intake import _Server, case_payload, make_app, send
+from tests.test_sample_cases import make_sample_app
 
 DOCS = Path(os.environ.get("DB_DOCS_DIR", "/repo/docs"))
 # 通常のbackendコンテナにも DB_HOST があるため、専用の目印（RUN_DB_TESTS）で切り替える。
@@ -105,6 +107,21 @@ class _PauseAfterLockConnection(_FailingConnection):
             if not self._release.wait(10):
                 raise RuntimeError("検証用の待ちが解除されなかった")
         return result
+
+
+class _FailNthExecute(_FailingConnection):
+    """指定のSQLを、共有の回数の n 回目に実行するときだけ失敗させる接続のラッパー。"""
+
+    def __init__(self, conn, fail_prefix: str, state: dict):
+        super().__init__(conn, fail_prefix)
+        self._state = state
+
+    def execute(self, sql, *args):
+        if sql.lstrip().startswith(self._fail_prefix):
+            self._state["seen"] += 1
+            if self._state["seen"] == self._state["fail_at"]:
+                raise RuntimeError("検証用の失敗")
+        return self._conn.execute(sql, *args)
 
 
 @unittest.skipUnless(HAVE_DB, "RUN_DB_TESTS=1 でないためスキップ（要ローカルDB）")
@@ -1318,6 +1335,341 @@ class DbFlow(unittest.TestCase):
             ),
         )
         self.assertEqual((status, self.mock_calls), (422, []))
+
+    # --- 共有のサンプル案件（POST /api/sample-cases） --------------------------------
+
+    SAMPLE_IDS = (
+        "CASE-SAMPLE-01",
+        "CASE-SAMPLE-02",
+        "CASE-SAMPLE-03",
+        "CASE-SAMPLE-04",
+    )
+
+    def sample_server(self, store=None):
+        server = _Server(make_sample_app(store or self.store, self.mock_calls))
+        server.__enter__()
+        self.addCleanup(server.__exit__)
+        return server
+
+    def create_samples(self, server):
+        return send("POST", f"{server.base_url}/api/sample-cases", {})
+
+    def sample_counts(self):
+        marks = ", ".join(["%s"] * len(self.SAMPLE_IDS))
+        ids = self.SAMPLE_IDS
+        return {
+            table: self.rows(
+                f"SELECT count(*) FROM {table} WHERE case_id IN ({marks})", ids
+            )[0][0]
+            for table in (
+                "review_cases",
+                "case_questions",
+                "case_results",
+                "case_checks",
+            )
+        }
+
+    def sample_state(self):
+        return (
+            self.rows(
+                "SELECT case_id, summary, user_data, inquiry_data FROM review_cases"
+                " WHERE case_id LIKE 'CASE-SAMPLE-%%' ORDER BY case_id"
+            ),
+            self.rows(
+                "SELECT case_id, result_code, rule_id, recorded_by, recorded_at"
+                " FROM case_results WHERE case_id LIKE 'CASE-SAMPLE-%%'"
+                " ORDER BY case_id"
+            ),
+            self.rows(
+                "SELECT case_id, question_code, answer, automated_answer"
+                " FROM case_checks WHERE case_id LIKE 'CASE-SAMPLE-%%'"
+                " ORDER BY case_id, question_code"
+            ),
+        )
+
+    def test_samples_are_created_from_an_empty_db_with_the_seed_composition(self):
+        self.assertEqual(self.rows("SELECT count(*) FROM review_cases"), [(0,)])
+        server = self.sample_server()
+        status, body = self.create_samples(server)
+        self.assertEqual((status, body["created"]), (201, list(self.SAMPLE_IDS)))
+        self.assertEqual(
+            self.sample_counts(),
+            {
+                "review_cases": 4,
+                "case_questions": 48,
+                "case_results": 4,
+                "case_checks": 4,
+            },
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT case_id, answer, automated_answer FROM case_checks"
+                " ORDER BY case_id"
+            ),
+            [
+                ("CASE-SAMPLE-01", "yes", "yes"),
+                ("CASE-SAMPLE-02", "no", "no"),
+                ("CASE-SAMPLE-03", "pending", None),
+                ("CASE-SAMPLE-04", "yes", "yes"),
+            ],
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT case_id, result_code, recorded_by FROM case_results"
+                " WHERE result_code IS NOT NULL"
+            ),
+            [("CASE-SAMPLE-04", "no_issue", "OP-1")],
+        )
+        self.assertEqual(self.mock_calls, [])  # HTTPモックは呼ばない
+        # 画面と同じ読み出しで、未審査2・確認待ち1・登録済み1になる
+        rows = {r["case_id"]: r for r in self.get_list()}
+        self.assertEqual(
+            [
+                (r["result_code"], r["counts"]["pending"])
+                for r in (rows[i] for i in self.SAMPLE_IDS)
+            ],
+            [(None, 0), (None, 0), (None, 1), ("no_issue", 0)],
+        )
+
+    def expect_seed_composition(self):
+        """共有セットが、ちょうど4件で、構成どおりの中身（先に作った側のまま）であること。"""
+        self.assertEqual(
+            self.sample_counts(),
+            {
+                "review_cases": 4,
+                "case_questions": 48,
+                "case_results": 4,
+                "case_checks": 4,
+            },
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT case_id, answer, automated_answer FROM case_checks"
+                " ORDER BY case_id"
+            ),
+            [
+                ("CASE-SAMPLE-01", "yes", "yes"),
+                ("CASE-SAMPLE-02", "no", "no"),
+                ("CASE-SAMPLE-03", "pending", None),
+                ("CASE-SAMPLE-04", "yes", "yes"),
+            ],
+        )
+        self.assertEqual(
+            self.rows(
+                "SELECT case_id, result_code, recorded_by FROM case_results"
+                " WHERE result_code IS NOT NULL"
+            ),
+            [("CASE-SAMPLE-04", "no_issue", "OP-1")],
+        )
+
+    def get_list(self):
+        status, body = send("GET", f"{self.server.base_url}/api/cases")
+        self.assertEqual(status, 200)
+        return body
+
+    def test_repeating_does_not_duplicate_or_rewrite_any_row(self):
+        server = self.sample_server()
+        self.create_samples(server)
+        before = self.sample_state()
+        status, body = self.create_samples(server)
+        self.assertEqual((status, body["created"]), (200, []))
+        self.assertEqual(self.sample_counts()["review_cases"], 4)
+        self.assertEqual(self.sample_state(), before)  # 作成時刻も変わらない
+
+    def test_a_saved_judgment_survives_repeating_and_concurrent_requests(self):
+        server = self.sample_server()
+        self.create_samples(server)
+        first = self.SAMPLE_IDS[0]
+        status, _ = send(
+            "PUT",
+            f"{server.base_url}/api/cases/{first}/judgment",
+            {"result_code": "caution", "answers": {"A01": "yes"}},
+        )
+        self.assertEqual(status, 204)
+        before = self.sample_state()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: self.create_samples(server), range(8)))
+        self.assertEqual([r[0] for r in results], [200] * 8)
+        self.assertEqual(self.sample_state(), before)
+        view = send("GET", f"{server.base_url}/api/cases/{first}")[1]
+        self.assertEqual(view["result"]["result_code"], "caution")
+        self.assertEqual(self.answers_of(view)["A01"], "yes")
+
+    def settle_after_contention(self, server, results):
+        """競合のあとの共通の確認。待たせる方式でない保存先（DSQLのOCC）でも成り立つ形にする。
+
+        同時の要求は、200・201・503のどれでもよい（500は不可）。503の応答には、
+        確定済みの分が出ないため、応答の created の合計が全IDになることには
+        頼らない。確認するのは、応答に出た created の重複がないこと、保存された行
+        （固定のIDだけ・4件まで・子の行がそろう）、普通の再試行で構成どおりの
+        4件になることである。
+        """
+        self.assertEqual(
+            sorted({status for status, _ in results} - {200, 201, 503}),
+            [],
+            "200・201・503以外（500を含む）にならない",
+        )
+        reported = [i for _, body in results for i in body.get("created", [])]
+        self.assertEqual(
+            len(reported), len(set(reported)), "同じ案件を2回作ったと報告しない"
+        )
+        stored = [
+            r[0]
+            for r in self.rows(
+                "SELECT case_id FROM review_cases WHERE case_id LIKE 'CASE-SAMPLE-%%'"
+                " ORDER BY case_id"
+            )
+        ]
+        self.assertEqual(stored, sorted(set(stored)), "同じ案件が2行にならない")
+        self.assertLessEqual(set(stored), set(self.SAMPLE_IDS), "固定のIDだけ")
+        self.assertLessEqual(
+            set(reported), set(stored), "作ったと報告した案件は保存されている"
+        )
+        self.assertEqual(
+            self.rows("SELECT count(*) FROM review_cases"), [(len(stored),)]
+        )
+        counts = self.sample_counts()  # 1案件あたり12設問・結果1・確認1
+        self.assertEqual(counts["review_cases"], len(stored))
+        self.assertEqual(counts["case_questions"], 12 * len(stored))
+        self.assertEqual(counts["case_results"], len(stored))
+        self.assertEqual(counts["case_checks"], len(stored))
+        # 競合のあとの、普通の（1本ずつの）再試行
+        status, body = self.create_samples(server)
+        self.assertIn(status, (200, 201))
+        self.assertEqual(
+            sorted(body["created"]),
+            sorted(set(self.SAMPLE_IDS) - set(stored)),
+            "再試行で作るのは、まだない案件だけ",
+        )
+        self.expect_seed_composition()
+        self.assertEqual(self.rows("SELECT count(*) FROM review_cases"), [(4,)])
+        status, body = self.create_samples(server)
+        self.assertEqual((status, body["created"]), (200, []))
+        self.expect_seed_composition()
+
+    def test_concurrent_first_requests_settle_on_four_samples_after_a_retry(self):
+        server = self.sample_server()
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            results = list(pool.map(lambda _: self.create_samples(server), range(12)))
+        self.settle_after_contention(server, results)
+
+    def test_concurrent_requests_through_separate_stores_never_exceed_four(self):
+        """アプリのインスタンスが別でも（別の保存先・別の接続）、共有セットは4件まで。"""
+        servers = [
+            self.sample_server(
+                db_store.PostgresCaseStore(lambda: _connect(self.schema))
+            )
+            for _ in range(3)
+        ]
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            results = list(
+                pool.map(lambda i: self.create_samples(servers[i % 3]), range(12))
+            )
+        self.settle_after_contention(servers[0], results)
+
+    def test_a_failure_midway_rolls_back_that_case_and_retry_fills_only_the_rest(self):
+        # 3件目の結果の保存で失敗させる（案件・設問のコピーは入っているが、戻る）
+        state = {"seen": 0, "fail_at": 3}
+        flaky = db_store.PostgresCaseStore(
+            lambda: _FailNthExecute(
+                _connect(self.schema), "INSERT INTO case_results", state
+            )
+        )
+        server = self.sample_server(flaky)
+        status, _ = self.create_samples(server)
+        self.assertEqual(status, 500)
+        self.assertEqual(
+            self.rows("SELECT case_id FROM review_cases ORDER BY case_id"),
+            [(i,) for i in self.SAMPLE_IDS[:2]],
+            "失敗した案件は、案件の行も残らない",
+        )
+        self.assertEqual(self.sample_counts()["case_questions"], 24)
+        kept = self.sample_state()
+        # 再試行（同じ保存先。失敗は1回だけ）
+        status, body = self.create_samples(server)
+        self.assertEqual((status, body["created"]), (201, list(self.SAMPLE_IDS[2:])))
+        self.assertEqual(self.sample_counts()["review_cases"], 4)
+        self.assertEqual(self.sample_counts()["case_questions"], 48)
+        after = self.sample_state()
+        self.assertEqual(after[0][:2], kept[0])  # 先の2件は、そのまま
+        self.assertEqual(after[1][:2], kept[1])
+        self.assertEqual(after[2][:2], kept[2])
+
+    def test_store_level_creation_of_an_existing_sample_changes_nothing(self):
+        """経路の「作成済みの確認」を通さず、保存先へ直接、作成済みの案件を作らせる（競合した側の動き）。"""
+        server = self.sample_server()
+        self.create_samples(server)
+        first = self.SAMPLE_IDS[0]
+        status, _ = send(
+            "PUT",
+            f"{server.base_url}/api/cases/{first}/judgment",
+            {"result_code": "caution", "answers": {"A01": "yes"}},
+        )
+        self.assertEqual(status, 204)
+        before = self.sample_state()
+        for sample in SAMPLE_CASES:
+            self.assertFalse(self.store.create_sample_case(sample), sample["case_id"])
+        # 判定・回答・作成時刻が変わらない
+        self.assertEqual(self.sample_state(), before)
+        self.assertEqual(self.sample_counts()["case_questions"], 48)
+
+    def test_conflict_retry_creates_the_sample_once(self):
+        waits = self._no_wait()
+        counter = [0]
+        flaky = db_store.PostgresCaseStore(
+            lambda: _ConflictOnceConnection(
+                _connect(self.schema), "INSERT INTO case_results", counter
+            )
+        )
+        sample = {
+            "case_id": "CASE-SAMPLE-01",
+            "summary": "架空",
+            "user": {"user_id": "456"},
+            "inquiry": {"subject": "架空", "body": "架空"},
+            "a09_answer": "yes",
+            "result_code": None,
+        }
+        self.assertTrue(flaky.create_sample_case(sample))
+        self.assertEqual(len(waits), 1, "1回衝突して再試行")
+        self.assertEqual(self.sample_counts()["review_cases"], 1)
+        self.assertEqual(self.sample_counts()["case_questions"], 12)
+        self.assertEqual(self.sample_counts()["case_checks"], 1)
+
+    def test_a_case_with_a_sample_id_that_already_exists_is_not_overwritten(self):
+        with _connect(self.schema) as conn:
+            conn.execute(
+                "INSERT INTO review_cases (case_id, summary, user_data, inquiry_data)"
+                " VALUES ('CASE-SAMPLE-02', '既存の架空案件', '{\"user_id\": \"9\"}',"
+                ' \'{"subject": "s", "body": "b"}\')'
+            )
+        server = self.sample_server()
+        status, body = self.create_samples(server)
+        self.assertEqual(status, 201)
+        self.assertNotIn("CASE-SAMPLE-02", body["created"])
+        self.assertEqual(
+            self.rows(
+                "SELECT summary, user_data FROM review_cases"
+                " WHERE case_id = 'CASE-SAMPLE-02'"
+            ),
+            [("既存の架空案件", {"user_id": "9"})],
+        )
+        self.assertEqual(self.sample_counts()["review_cases"], 4)
+
+    def test_sample_creation_uses_only_dsql_compatible_statements(self):
+        """行ロック（FOR UPDATE）に頼らない（DSQLは待たせず衝突で失敗させる）。"""
+        statements: list[str] = []
+
+        class Recording(_FailingConnection):
+            def execute(self, sql, *args):
+                statements.append(sql)
+                return self._conn.execute(sql, *args)
+
+        store = db_store.PostgresCaseStore(lambda: Recording(_connect(self.schema), ""))
+        self.create_samples(self.sample_server(store))
+        self.assertTrue(statements)
+        self.assertFalse([q for q in statements if "FOR UPDATE" in q])
+        upserts = [q for q in statements if "ON CONFLICT (case_id) DO NOTHING" in q]
+        self.assertTrue(upserts)
 
 
 if __name__ == "__main__":

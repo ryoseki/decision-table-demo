@@ -43,9 +43,48 @@ services:
       - ./e2e/fixtures:/fixtures:ro
     command: ["python", "/fixtures/seed_retirement_case.py"]
     restart: "no"
+  # 共有サンプル案件のE2E用に、案件が1件もない専用スキーマ（同じE2E専用DBの中）と、それを使うバックエンド。
+  # 画面からの /api は、テスト側で、このバックエンドへ向ける（shared-demo と同じ方法）。
+  e2e-empty-db-init:
+    build: ./db
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_NAME: "${DB_NAME:-decision_demo}"
+      DB_USER: "${DB_USER:-demo_admin}"
+      DB_PASSWORD: ""
+      DB_SCHEMA: e2e_empty
+      PYTHONPATH: /db:/fixtures
+      DOCS_DIR: /repo/docs
+    volumes:
+      - ./docs:/repo/docs:ro
+      - ./e2e/fixtures:/fixtures:ro
+    command: ["python", "/fixtures/init_empty_schema.py"]
+    restart: "no"
+  e2e-empty-backend:
+    build: ./backend
+    depends_on:
+      e2e-empty-db-init:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: db
+      DB_NAME: "${DB_NAME:-decision_demo}"
+      DB_USER: "${DB_USER:-demo_admin}"
+      DB_PASSWORD: ""
+      DB_SCHEMA: e2e_empty
+      MOCK_BASE_URL: "http://127.0.0.1:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
   e2e:
     build: ./e2e
     depends_on:
+      e2e-empty-backend:
+        condition: service_healthy
       e2e-shared-backend:
         condition: service_healthy
       e2e-fixture:

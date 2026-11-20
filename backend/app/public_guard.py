@@ -5,6 +5,7 @@ PATCH・DELETE の7つになる。そこで、サーバー側で、書き込み�
 次の経路とメソッドだけに限る。それ以外は、アプリに届く前に405で拒否する。
 
 - POST /api/intake/cases（案件の受付）
+- POST /api/sample-cases（共有のサンプル案件の作成。固定の4件だけ。AIは呼ばない）
 - PUT /api/cases/{case_id}/judgment（判定の保存）
 - POST /api/admin/question-proposals と POST /api/admin/rule-proposals
 - 上の提案経路に /{id}/decision を付けた承認POST
@@ -27,6 +28,7 @@ _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _SEGMENT = r"[^/]+"
 PUBLIC_WRITE_ROUTES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("POST", re.compile(r"/api/intake/cases")),
+    ("POST", re.compile(r"/api/sample-cases")),
     ("PUT", re.compile(rf"/api/cases/{_SEGMENT}/judgment")),
     ("POST", re.compile(r"/api/admin/(question|rule)-proposals")),
     ("POST", re.compile(rf"/api/admin/(question|rule)-proposals/{_SEGMENT}/decision")),
