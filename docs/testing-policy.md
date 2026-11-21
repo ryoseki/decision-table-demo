@@ -55,10 +55,10 @@
 | バックエンドの書き方 | `ruff`（lint と整形の確認） | `docker compose run --rm --no-deps --build backend sh -c 'ruff check . && ruff format --check .'` |
 | バックエンドの依存の向き | `import-linter`（契約は `backend/pyproject.toml`。契約の名前に直し方を書いている） | `docker compose run --rm --no-deps --build backend lint-imports` |
 | フロントの書き方と依存の向き | ESLint（依存の向きは `no-restricted-imports`。メッセージに直し方を書いている） | `docker compose run --rm --no-deps --build frontend npm run lint` |
-| PythonとTypeScriptの危険な書き方 | Semgrep（ローカルのルール。版とルールは固定。範囲と限界は [docs/semgrep.md](semgrep.md)） | `bash scripts/semgrep.sh`（ルールの検証は `bash scripts/semgrep.sh fixtures`） |
+| PythonとTypeScriptの危険な書き方 | Semgrep（標準ルール `p/default`。版は固定、ルールはレジストリから取得。範囲と限界は [docs/semgrep.md](semgrep.md)） | `bash scripts/semgrep.sh` |
 
 - 依存の向きの検査は、CIでも実行する。Semgrepは、CIには載せていない。独立した新しいClaude Codeセッションのレビューが、WSLで実行して確認する（[AGENTS.md](../AGENTS.md)）。
-- Semgrepの結果は、問題なし（0）・検出あり（10）・実行できない（20）・失敗（30）で区別する。実行できない・失敗は、未実行・未完了として報告し、成功扱いにしない。Semgrepの結果と検出の確認記録は、「テスト不足のレビュー」には渡さない。
+- Semgrepの終了コードは、0（検出なし）・1（検出あり）・125／127（Dockerに接続できない・ない。未実行）・その他（失敗）で区別する。未実行・失敗は、未完了として報告し、成功扱いにしない。終了コードだけで問題なしとせず、出力の概要を読む。Semgrepの結果は、「テスト不足のレビュー」には渡さない。
 - 検査を緩める・無視する（契約や設定の変更）のは、理由を示して人に相談する。AIが黙って緩めない。
 - 新しい検査を足したら、違反を一時的に入れて、失敗することを確認する（決まり4）。
 

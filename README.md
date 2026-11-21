@@ -328,15 +328,13 @@ It uses Go's standard regular expression engine and masks detected values. Valid
 
 ## Static analysis with Semgrep
 
-In an Ubuntu terminal, run the following commands from the root of the clone. Docker and `python3` are required. The first run pulls a Semgrep container image pinned by version and digest; scans themselves run with no network, a read-only source mount, and local rules only.
+In an Ubuntu terminal, run the following command from the root of the clone. Docker is required, and so is network access, because the standard `p/default` rule set is fetched from the Semgrep registry on each run. The first run pulls a Semgrep container image pinned by version and digest. The source is mounted read-only and metrics are off.
 
 ```bash
 bash scripts/semgrep.sh            # scan the Python and TypeScript sources
-bash scripts/semgrep.sh fixtures   # check the rules against fictional violation examples
-python3 -B -I -m unittest discover -s tests/semgrep
 ```
 
-Exit code `0` means no findings, `10` findings, `20` unavailable (not run; never treat it as clean), and `30` failure (for example a file that cannot be parsed, or zero target files, which means nothing was scanned). The rules cover only a few dangerous patterns (SQL built from strings, shell commands, `eval`, unsafe deserialization, HTML injection in React and the DOM), so a clean result is not a statement that the app is secure. Targets, exclusions, the version choice, rule rationale, limits, and how the independent Claude Code review uses the results are in [docs/semgrep.md](docs/semgrep.md). Betterleaks above remains the secret scan.
+The exit code is Semgrep's own: `0` means no findings, `1` findings, `125` or `127` Docker is unreachable or missing (not run; never treat it as clean), and any other code is a failure. Read the scan summary (files scanned, skipped, errors) before calling a run clean; a clean result is not a statement that the app is secure. Targets, exclusions, rule updates, limits, and how the independent Claude Code review uses the results are in [docs/semgrep.md](docs/semgrep.md). Betterleaks above remains the secret scan.
 
 ## Verification records
 
