@@ -99,7 +99,7 @@ Semgrepの終了コードだけでは判定しない。出力（JSON）の `erro
 
 ## 検出の確認記録
 
-`security/semgrep/triage.tsv` は、初回（2026-11-20、基準のコミット `9e67f3b`）の検出13件を、Claude Codeが読んで判断した記録。列は、ルールID、ファイル、件数、理由。**参考の記録であり、ツールは読まない。** 検出の表示・終了コードには影響せず、検出を隠したり、承認や抑制を表したりしない。
+`security/semgrep/triage.tsv` は、初回のPR提出前の検査（2026-11-22、基準のコミット `dce0d1b`）の検出11件（`backend/tests/test_db_store.py` 2件、`backend/tests/test_dev_init.py` 3件、`db/verify_schema.py` 5件、`infra/edge/viewer-ip.test.js` 1件）を、Claude Codeが読んで判断した記録。列は、ルールID、ファイル、件数、理由。**参考の記録であり、ツールは読まない。** 検出の表示・終了コードには影響せず、検出を隠したり、承認や抑制を表したりしない。
 
 - `bash scripts/semgrep.sh` は、検出をすべてそのまま表示し、1件でもあれば終了コード10を返す。
 - 記録は、ファイルと件数だけで持つ。コードが変わって、検出が入れ替わっても、記録は自動では追従しない。レビュー担当は、検出の行を読み直して判断し、記録に頼らない。

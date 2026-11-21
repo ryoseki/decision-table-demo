@@ -2,10 +2,8 @@
 # 列（タブ区切り）: ルールID, ファイル（リポジトリのルートからの相対）, 件数, 理由
 # 参考の記録。ツール（scripts/semgrep.sh）はこのファイルを読まない。検出の表示・終了コードに影響せず、承認や抑制を表さない。
 # コードが変わると検出は入れ替わるため、レビュー担当は、記録に頼らず、検出の行を読み直す。
-# 初回の確認: 2026-11-20（基準のコミット 9e67f3b。確認した人: Claude Code。人のレビューは未実施）。
-py-sql-dynamic-string	backend/app/db_store.py	1	誤検出。f文字列に入れるのは、プレースホルダ（%s）を並べた文字列だけで、値は第2引数で渡している。
+# 初回の確認: 2026-11-22（基準のコミット dce0d1b、検出11件。確認した人: Claude Code。人のレビューは未実施）。
 py-sql-dynamic-string	backend/tests/test_db_store.py	2	許容（テスト）。スキーマ名は secrets.token_hex から作った固定形式で、利用者の入力ではない。DB統合テストだけが実行する。
 py-sql-dynamic-string	backend/tests/test_dev_init.py	3	許容（テスト）。スキーマ名は secrets.token_hex から作った固定形式、テーブル名はテスト内の固定の集合。利用者の入力ではない。
-py-sql-dynamic-string	e2e/fixtures/init_empty_schema.py	1	許容（E2E専用）。環境変数のスキーマ名を、直前に正規表現（e2e_ で始まる小文字英数字と _）で全体照合し、合わなければ中止する。compose.e2e.yaml の専用サービスだけが実行する。
 py-sql-dynamic-string	db/verify_schema.py	5	許容（運用者が手で実行する検証）。スキーマ名は、main の先頭で正規表現（dsql_verify_ と8桁の16進）で全体照合し、合わなければ中止する。表名・列名は、スクリプト内の固定の一覧と、リポジトリ内の架空データ（docs/decision-support-sample.json）に由来する。
 ts-eval-dynamic-code	infra/edge/viewer-ip.test.js	1	許容（テスト）。vm.runInNewContext に渡すのは、リポジトリ内の viewer-ip.js の内容で、外部の入力ではない。CloudFront Functionsの関数をNodeで実行するための、意図した使い方。
