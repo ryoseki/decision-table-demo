@@ -171,7 +171,7 @@ def timeout_fetch():
     raise TimeoutError("モックの応答なし（検証用）")
 
 
-TABLES_REVERSE = ["proposal_template_migrations", "proposal_templates", "processed_shared_proposals", "ai_usage_requests", "ai_usage_counters", "shared_proposals", "shared_config_revisions", "case_checks", "case_results", "case_questions", "decision_rules", "review_questions", "review_cases"]
+TABLES_REVERSE = ["sample_case_operations", "proposal_template_migrations", "proposal_templates", "processed_shared_proposals", "ai_usage_requests", "ai_usage_counters", "shared_proposals", "shared_config_revisions", "case_checks", "case_results", "case_questions", "decision_rules", "review_questions", "review_cases"]
 
 
 def main() -> int:
@@ -226,7 +226,9 @@ def run() -> int:
     print(f"対象: PostgreSQL {version}" + ("（DB_SCHEMA指定あり）" if SCHEMA else "（ローカル。Aurora DSQLではない）"), flush=True)
 
     ddl = extract_ddl()
-    record("DDL案を文書から取り出せた（9テーブル）", len(ddl) == 9, f"{len(ddl)}文")
+    ddl_tables = [re.match(r"CREATE TABLE (\w+)", stmt).group(1) for stmt in ddl]
+    record("DDL案のテーブルが検証・後片付けの対象と一致する",
+           sorted(ddl_tables) == sorted(TABLES_REVERSE), f"{len(ddl)}文")
 
     banned = re.compile(r"\b(SERIAL|TRIGGER|TEMP|TEMPORARY|EXTENSION|TRUNCATE|TABLESPACE|CREATE TYPE|PLPGSQL)\b", re.I)
     plain_index = re.compile(r"CREATE\s+(UNIQUE\s+)?INDEX\s+(?!ASYNC)", re.I)

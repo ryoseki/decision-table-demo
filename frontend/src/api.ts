@@ -92,14 +92,12 @@ export async function listCases(): Promise<CaseListRow[]> {
   }));
 }
 
-/** 共有サンプル案件の作成結果。caseId は、その操作で決まる案件ID。created は、今回新しく作ったか（再送で作成済みなら false）。 */
+/** caseId は操作IDに対応して保存された案件ID。created は今回作成した場合に true。 */
 export type SampleCaseResult = { caseId: string; created: boolean };
 
 /**
- * 共有の架空サンプル案件を、操作1回につき1件作る（POST /api/sample-cases）。
- * operationId は、その操作を表す依頼ID（UUID。Idempotency-Key）。同じ依頼IDの再送・失敗後の再試行は、
- * 同じ案件になり、重複しない（created が false）。別の依頼IDは、別の案件を1件足す。
- * 通信できない・503・応答を読み取れない失敗でも、作成の結果が分からないので、画面は同じ依頼IDで再試行する。
+ * 操作IDのUUIDを付けて共有サンプルを1件作成する。同じ操作IDの再送は既存案件を返す。
+ * 通信失敗や応答の読み取り失敗では作成済みの場合もあるため、呼び出し側は同じIDで再試行する。
  */
 export async function createSampleCase(operationId: string): Promise<SampleCaseResult> {
   const response = await request("/api/sample-cases", {

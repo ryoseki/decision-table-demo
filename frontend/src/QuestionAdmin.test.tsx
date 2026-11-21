@@ -495,7 +495,9 @@ test("廃止案: 既存案件への影響を、判定未登録と判定登録済
   const unjudged = screen.getByTestId("impact-CASE-U1");
   expect(unjudged.textContent).toContain("保存済みの回答: Yes");
   expect(unjudged.textContent).not.toContain("登録時の結果");
-  expect(within(unjudged).getByRole("link", { name: "CASE-U1" }).getAttribute("href")).toBe("#/cases/CASE-U1");
+  const link = within(unjudged).getByRole("link", { name: "CASE-U1" });
+  expect(link.getAttribute("href")).toBe("#/cases/CASE-U1");
+  expect(link.getAttribute("title")).toBe("CASE-U1");
   const judged = screen.getByTestId("impact-CASE-J1");
   expect(judged.textContent).toContain("保存済みの回答: No");
   expect(judged.textContent).toContain("登録時の結果: 問題なし");

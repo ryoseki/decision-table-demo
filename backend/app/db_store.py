@@ -22,6 +22,7 @@ from app.domain import (
     CaseNotFound,
     InvalidJudgment,
     JudgmentAlreadyRecorded,
+    StoreBusy,
     new_case_id,
 )
 
@@ -70,6 +71,10 @@ def _dsql_token(endpoint: str, user: str) -> str:
     if user == "admin":
         return client.generate_db_connect_admin_auth_token(endpoint, region)
     return client.generate_db_connect_auth_token(endpoint, region)
+
+
+class _CaseIdCollision(Exception):
+    """短い案件IDの衝突。操作のトランザクションを戻して採番し直す。"""
 
 
 class PostgresCaseStore:
@@ -133,53 +138,98 @@ class PostgresCaseStore:
 
     @with_occ_retry
     def create_sample_case(self, sample: dict[str, Any]) -> bool:
-        """依頼IDから決まる案件IDの案件を、1トランザクションで、まだ無いときだけ作る。作ればTrue。
+        """明示IDの架空案件を、テストfixtureに用意するためのhelper。
 
-        案件・設問のコピー・結果・A09の回答（登録済みのサンプルは結果も）を同時に入れる。
-        すでにあれば何も書かずFalse（同じ依頼の再送。既存の案件・判定は変えない）。同時に同じIDを作ろうとした
-        側は、主キーの重複でDO NOTHINGになるか、衝突（40001）で再試行され、重複しない。
-        ON CONFLICT DO NOTHINGとINSERTだけを使い、FOR UPDATEには頼らない
-        （Aurora DSQL互換）。
+        アプリの処理からは呼ばない。既存案件には書き込まない。
         """
-        case_id = sample["case_id"]
         with self._connect() as conn:
-            inserted = conn.execute(
-                "INSERT INTO review_cases (case_id, summary, user_data, inquiry_data)"
-                " VALUES (%s, %s, %s, %s) ON CONFLICT (case_id) DO NOTHING",
-                (
-                    case_id,
-                    sample["summary"],
-                    Jsonb(sample["user"]),
-                    Jsonb(sample["inquiry"]),
-                ),
-            ).rowcount
-            if inserted != 1:
-                return False
+            return self._insert_sample_case(conn, sample)
+
+    @staticmethod
+    def _insert_sample_case(conn, sample: dict[str, Any]) -> bool:
+        case_id = sample["case_id"]
+        inserted = conn.execute(
+            "INSERT INTO review_cases (case_id, summary, user_data, inquiry_data)"
+            " VALUES (%s, %s, %s, %s) ON CONFLICT (case_id) DO NOTHING",
+            (
+                case_id,
+                sample["summary"],
+                Jsonb(sample["user"]),
+                Jsonb(sample["inquiry"]),
+            ),
+        ).rowcount
+        if inserted != 1:
+            return False
+        conn.execute(
+            "INSERT INTO case_questions (case_id, question_code, revision,"
+            " category, prompt, source_kind, source_field)"
+            " SELECT %s, question_code, revision, category, prompt, source_kind,"
+            " source_field FROM review_questions",
+            (case_id,),
+        )
+        if sample["result_code"] is None:
+            conn.execute("INSERT INTO case_results (case_id) VALUES (%s)", (case_id,))
+        else:
             conn.execute(
-                "INSERT INTO case_questions (case_id, question_code, revision,"
-                " category, prompt, source_kind, source_field)"
-                " SELECT %s, question_code, revision, category, prompt, source_kind,"
-                " source_field FROM review_questions",
-                (case_id,),
+                "INSERT INTO case_results (case_id, result_code, recorded_by,"
+                " recorded_at) VALUES (%s, %s, %s, now())",
+                (case_id, sample["result_code"], OPERATOR_ID),
             )
-            if sample["result_code"] is None:
-                conn.execute(
-                    "INSERT INTO case_results (case_id) VALUES (%s)", (case_id,)
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO case_results (case_id, result_code, recorded_by,"
-                    " recorded_at) VALUES (%s, %s, %s, now())",
-                    (case_id, sample["result_code"], OPERATOR_ID),
-                )
-            answer = sample["a09_answer"]
-            for question_code in AUTO_ANSWER_KEYS:
-                conn.execute(
-                    "INSERT INTO case_checks (case_id, question_code, answer,"
-                    " automated_answer) VALUES (%s, %s, %s, %s)",
-                    (case_id, question_code, answer or "pending", answer),
-                )
+        answer = sample["a09_answer"]
+        for question_code in AUTO_ANSWER_KEYS:
+            conn.execute(
+                "INSERT INTO case_checks (case_id, question_code, answer,"
+                " automated_answer) VALUES (%s, %s, %s, %s)",
+                (case_id, question_code, answer or "pending", answer),
+            )
         return True
+
+    def create_sample_operation(self, sample: dict[str, Any]) -> tuple[str, bool]:
+        """操作と案件を一括保存し、案件IDの衝突時は採番し直す。"""
+        for _ in range(16):
+            try:
+                return self._create_sample_operation(sample)
+            except _CaseIdCollision:
+                continue
+        raise StoreBusy("短い案件IDを確保できませんでした")
+
+    @with_occ_retry
+    def _create_sample_operation(self, sample: dict[str, Any]) -> tuple[str, bool]:
+        key = sample["operation_key"]
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT case_id FROM sample_case_operations WHERE operation_key = %s",
+                (key,),
+            ).fetchone()
+            if existing is not None:
+                return existing[0], False
+            case_id = new_case_id()
+            try:
+                reserved = conn.execute(
+                    "INSERT INTO sample_case_operations (operation_key, case_id)"
+                    " VALUES (%s, %s) ON CONFLICT (operation_key) DO NOTHING",
+                    (key, case_id),
+                ).rowcount
+            except psycopg.errors.UniqueViolation:
+                # 操作IDの重複は ON CONFLICT (operation_key) DO NOTHING で処理済み。
+                # 残る一意制約違反は案件IDの衝突なので、全体を戻して採番し直す。
+                raise _CaseIdCollision from None
+            if reserved != 1:
+                winner = conn.execute(
+                    "SELECT case_id FROM sample_case_operations"
+                    " WHERE operation_key = %s",
+                    (key,),
+                ).fetchone()
+                if winner is None:
+                    # 別要求の確定が現在のスナップショットに見えない場合は再接続。
+                    raise psycopg.errors.SerializationFailure(
+                        "操作の保存を再確認します"
+                    )
+                return winner[0], False
+            if not self._insert_sample_case(conn, {**sample, "case_id": case_id}):
+                # 通常受付の案件IDとの衝突も、対応表を含めて戻す。
+                raise _CaseIdCollision
+            return case_id, True
 
     # --- 再表示 ---------------------------------------------------------------
 

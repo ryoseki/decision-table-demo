@@ -65,7 +65,7 @@ function CaseImpactList({ title, cases, note }: { title: string; cases: ImpactCa
         <ul>
           {cases.map((c) => (
             <li key={c.caseId} data-testid={`impact-${c.caseId}`}>
-              <a href={detailHref(c.caseId)}>{c.caseId}</a> {c.summary}
+              <a href={detailHref(c.caseId)} title={c.caseId}>{c.caseId}</a> {c.summary}
               <span className="impact-detail"> 保存済みの回答: {answerLabel(c.answer)}</span>
               {c.result !== undefined && <span className="impact-detail"> 登録時の結果: {c.result}</span>}
             </li>

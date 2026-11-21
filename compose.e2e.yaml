@@ -43,8 +43,8 @@ services:
       - ./e2e/fixtures:/fixtures:ro
     command: ["python", "/fixtures/seed_retirement_case.py"]
     restart: "no"
-  # 共有サンプル案件のE2E用に、案件が1件もない専用スキーマ（同じE2E専用DBの中）と、それを使うバックエンド。
-  # 画面からの /api は、テスト側で、このバックエンドへ向ける（shared-demo と同じ方法）。
+  # 空の一覧から試すため、他のspecの案件とスキーマを分ける。
+  # sample-cases.spec.ts が画面の /api を専用バックエンドへ向ける。
   e2e-empty-db-init:
     build: ./db
     depends_on:

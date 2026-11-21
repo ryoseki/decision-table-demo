@@ -36,8 +36,13 @@ IAM_ROLE_ARN = re.compile(r"arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,51
 APP_WRITE_TABLES = ("review_cases", "case_questions", "case_results", "case_checks")
 APP_READ_TABLES = ("review_questions",)
 # 公開デモの共有データ。承認結果は追記だけ（UPDATE・DELETEなし）。承認で追加したルールは
-# decision_rules に不変の行として足す（INSERTだけ。UPDATE・DELETEなし）。
-APP_APPEND_TABLES = ("shared_config_revisions", "decision_rules", "ai_usage_requests")
+# decision_rules に不変の行として足す。操作IDと案件IDの対応も追記だけにする。
+APP_APPEND_TABLES = (
+    "shared_config_revisions",
+    "decision_rules",
+    "ai_usage_requests",
+    "sample_case_operations",
+)
 # 未処理の提案と日別の件数は、消費・期限切れの削除のため DELETE も付ける。
 APP_DELETE_TABLES = ("shared_proposals", "ai_usage_counters")
 
@@ -145,7 +150,9 @@ def setup_app_role(
 
     構文はAWSの公式資料（Using database roles and IAM authentication）に従う。
     """
-    if not conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone():
+    if not conn.execute(
+        "SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)
+    ).fetchone():
         conn.execute(sql.SQL("CREATE ROLE {} WITH LOGIN").format(sql.Identifier(role)))
         print(f"DBロール {role}: 作成")
     else:
@@ -186,10 +193,16 @@ def main() -> int:
     role = os.environ.get("APP_DB_ROLE", "")
     iam_role_arn = os.environ.get("APP_IAM_ROLE_ARN", "")
     if not NAME.fullmatch(schema) or schema in ("public", "information_schema"):
-        print("DB_SCHEMA は専用スキーマの名前（小文字英字で始まる英数字と_）。", file=sys.stderr)
+        print(
+            "DB_SCHEMA は専用スキーマの名前（小文字英字で始まる英数字と_）。",
+            file=sys.stderr,
+        )
         return 2
     if bool(role) != bool(iam_role_arn):
-        print("APP_DB_ROLE と APP_IAM_ROLE_ARN は、両方指定するか、両方省く。", file=sys.stderr)
+        print(
+            "APP_DB_ROLE と APP_IAM_ROLE_ARN は、両方指定するか、両方省く。",
+            file=sys.stderr,
+        )
         return 2
     if role and (not NAME.fullmatch(role) or role == "admin"):
         print("APP_DB_ROLE は admin 以外の、小文字英字で始まる名前。", file=sys.stderr)

@@ -31,30 +31,33 @@ function useRemote<T>(load: () => Promise<T>, key: string): Remote<T> {
 
 /** サンプル案件の作成の状態と操作（useSampleCreation の戻り値）。 */
 export type SampleCreation = {
-  /** 作成に成功するたびに進む。一覧の取り直しの合図。 */
+  /** 作成APIが成功するたびに進む。一覧の取り直しの合図。 */
   version: number;
   creating: boolean;
   notice: string | null;
+  /** 通知に表示する案件ID。 */
+  noticeCaseId: string | null;
   error: string | null;
   create: () => void;
 };
 
 /**
- * サンプル案件の作成。1回の操作は依頼ID（UUID）で表す。成功したら次は新しい操作、失敗したら
- * （サーバーで作成済みかもしれないので）同じ依頼IDで再試行する。
- * 未完了の操作を画面の切り替え（一覧のアンマウント）で失わないよう、App が生きている間保持するフックにする。
- * ブラウザー全体の再読み込み・タブを閉じたあとは保たない（保存はしない）。
+ * 通信失敗時に同じ操作IDで再試行できるよう、Appの生存中は未完了の操作を保持する。
+ * 一覧を離れて戻っても引き継ぎ、成功後の次の作成には新しいIDを使う。
+ * ブラウザー全体の再読み込みやタブを閉じたあとは引き継がない。
  */
 export function useSampleCreation(): SampleCreation {
   const [version, setVersion] = useState(0);
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeCaseId, setNoticeCaseId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const operationId = useRef<string | null>(null);
   const create = async () => {
     operationId.current ??= proposalRequestId();
     setCreating(true);
     setNotice(null);
+    setNoticeCaseId(null);
     setError(null);
     try {
       const result = await createSampleCase(operationId.current);
@@ -64,6 +67,7 @@ export function useSampleCreation(): SampleCreation {
           ? `サンプル案件を1件作成しました（${result.caseId}）。`
           : `この操作の案件（${result.caseId}）は作成済みでした。新しく作成した案件はありません。`,
       );
+      setNoticeCaseId(result.caseId);
       setVersion((v) => v + 1);
     } catch (e) {
       setError(describeError(e));
@@ -71,7 +75,7 @@ export function useSampleCreation(): SampleCreation {
       setCreating(false);
     }
   };
-  return { version, creating, notice, error, create };
+  return { version, creating, notice, noticeCaseId, error, create };
 }
 
 /** 案件の一覧。version を変えると、取り直す（サンプル案件の作成後など）。 */

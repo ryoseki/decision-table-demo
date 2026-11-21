@@ -26,7 +26,7 @@ export default function CaseList({
 
   // サンプル案件の作成の状態は App が持つ（画面を切り替えても、未完了の操作を失わない）。
   // 成功したら version が進み、一覧を取り直す（ブラウザーの再読み込みは要らない）。
-  const { version, creating, notice: sampleNotice, error: sampleError, create: createSample } = sample;
+  const { version, creating, notice: sampleNotice, noticeCaseId, error: sampleError, create: createSample } = sample;
 
   const remote = useCaseList(version);
   const cases = useMemo(() => (remote.status === "ok" ? remote.data : []), [remote]);
@@ -55,7 +55,7 @@ export default function CaseList({
           </button>
           <p className="hint">押すたびに、架空の案件を1件追加します。案件は利用者全員で共有します。</p>
           {sampleNotice !== null && (
-            <p className="notice-ok" data-testid="sample-notice" aria-live="polite">{sampleNotice}</p>
+            <p className="notice-ok" data-testid="sample-notice" aria-live="polite" title={noticeCaseId ?? undefined}>{sampleNotice}</p>
           )}
           {sampleError !== null && (
             <div className="error sample-error" role="alert" data-testid="sample-error">
@@ -126,7 +126,7 @@ export default function CaseList({
             <tbody role="rowgroup">
               {filtered.map((c) => (
                 <tr key={c.caseId} className="case-row" role="row">
-                  <th scope="row" role="rowheader" className="case-id" data-label="案件">{c.caseId}</th>
+                  <th scope="row" role="rowheader" className="case-id" data-label="案件" title={c.caseId}>{c.caseId}</th>
                   <td role="cell" data-label="対象">user_id {c.userId}</td>
                   <td role="cell" data-label="申告内容">
                     <span className="case-summary">{c.summary}</span>

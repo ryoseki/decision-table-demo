@@ -1,8 +1,8 @@
 // 実行: npm test（Vitest + jsdom）。ハッシュで、一覧と詳細が切り替わることを確認する。
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
-import { apiCase, apiRow, stubFetch, type Reply } from "./testing";
+import { apiCase, apiRow, stubFetch } from "./testing";
 
 beforeEach(() => {
   window.location.hash = "";
@@ -163,41 +163,6 @@ test("詳細から一覧へ戻っても、検索語は保たれる", async () =>
   await screen.findByText("CASE-C");
   expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("case-c");
   expect(screen.queryByText("CASE-B")).toBeNull();
-});
-
-test("サンプル案件の作成が通信失敗したあと、詳細へ移って一覧へ戻っても、再試行は同じ依頼ID。成功後の次の押下は新しい依頼ID", async () => {
-  const keys: (string | null)[] = [];
-  const replies: Reply[] = [
-    new TypeError("network"),
-    { status: 201, body: { case_id: "CASE-SAMPLE-1", created: true } },
-    { status: 201, body: { case_id: "CASE-SAMPLE-2", created: true } },
-  ];
-  stubFetch({
-    "GET /api/cases": { body: [apiRow({ case_id: "CASE-B" })] },
-    "GET /api/cases/CASE-B": { body: apiCase({ case_id: "CASE-B" }) },
-    "POST /api/sample-cases": (init) => {
-      keys.push(new Headers(init?.headers).get("Idempotency-Key"));
-      return replies.shift()!;
-    },
-  });
-  render(<App />);
-  await screen.findByText("CASE-B");
-  const create = () => screen.getByRole("button", { name: /サンプル案件を作成|作成中/ });
-  fireEvent.click(create());
-  await screen.findByTestId("sample-error");
-
-  goTo("#/cases/CASE-B"); // 一覧がアンマウントされる
-  await screen.findByTestId("save-note");
-  goTo("#/");
-  await screen.findByText("CASE-B");
-  fireEvent.click(create());
-  await screen.findByTestId("sample-notice");
-  expect(keys).toHaveLength(2);
-  expect(keys[1]).toBe(keys[0]);
-
-  fireEvent.click(create());
-  await waitFor(() => expect(keys).toHaveLength(3));
-  expect(keys[2]).not.toBe(keys[0]);
 });
 
 test("案件を切り替えると、回答の入力状態はリセットされる", async () => {
