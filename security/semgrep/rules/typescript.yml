@@ -1,0 +1,94 @@
+# TypeScript・JavaScript（React・Playwright・Nodeスクリプト）向けのローカルルール。
+# 目的と限界は docs/semgrep.md を参照する。ルールを足す・変えるときは、
+# security/semgrep/fixtures/typescript に、検出する例（ruleid）と検出しない例（ok）を足す。
+rules:
+  - id: ts-react-dangerously-set-inner-html
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      dangerouslySetInnerHTML に、固定の文字列以外を渡している。利用者の入力や、APIの応答に由来する
+      文字列は、Reactの通常の描画（{value}）に任せる。HTMLとして描画する必要があれば、人に相談する。
+    patterns:
+      - pattern: |
+          <$E dangerouslySetInnerHTML={...} />
+      - pattern-not: |
+          <$E dangerouslySetInnerHTML={{__html: "..."}} />
+    metadata:
+      category: security
+      cwe: "CWE-79: Cross-site Scripting"
+
+  - id: ts-dom-html-sink
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      DOMへ、HTMLとして文字列を書き込んでいる（innerHTML・outerHTML・insertAdjacentHTML・
+      document.write）。文字列を表示するだけなら textContent を使う。固定の文字列だけのときは、
+      検出しない。
+    patterns:
+      - pattern-either:
+          - pattern: $E.innerHTML = $V
+          - pattern: $E.outerHTML = $V
+          - pattern: $E.insertAdjacentHTML($POS, $V)
+          - pattern: document.write($V)
+          - pattern: document.writeln($V)
+      - metavariable-regex:
+          metavariable: $V
+          regex: '^(?!\s*("[^"\\]*"|''[^''\\]*'')\s*$)'
+      - focus-metavariable: $V
+    metadata:
+      category: security
+      cwe: "CWE-79: Cross-site Scripting"
+
+  - id: ts-eval-dynamic-code
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      文字列をコードとして実行している（eval・new Function・文字列を渡す setTimeout／setInterval・
+      vm の run 系）。関数を渡す、決まった形式（JSON）として読むなどに置き換える。
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+      - pattern: Function(...)
+      - pattern: setTimeout("...", ...)
+      - pattern: setInterval("...", ...)
+      - pattern: setTimeout(`...`, ...)
+      - pattern: setInterval(`...`, ...)
+      - pattern: vm.runInNewContext(...)
+      - pattern: vm.runInThisContext(...)
+      - pattern: vm.runInContext(...)
+    metadata:
+      category: security
+      cwe: "CWE-95: Eval Injection"
+
+  - id: ts-child-process-shell
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Nodeで、シェルを通してコマンドを実行している（exec・execSync）。引数が変わる場合は、
+      execFile・spawn に、引数の配列で渡す。固定の文字列だけのときは、検出しない。
+    patterns:
+      - pattern-either:
+          # `import * as child_process` や require の形
+          - pattern: child_process.exec($CMD, ...)
+          - pattern: child_process.execSync($CMD, ...)
+          # `import { exec } from "node:child_process"` の形（別名なしの名前付きimport）。
+          # 固定した版では、指定子が "child_process" の別名（`import { exec as run }`）は、上の2行の
+          # パターンがSemgrepの別名の解決で検出する。"node:child_process" の別名は、解決されず検出しない。
+          - patterns:
+              - pattern-inside: |
+                  import {..., $FN, ...} from "$MOD"
+                  ...
+              - pattern: $FN($CMD, ...)
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: ^(exec|execSync)$
+              - metavariable-regex:
+                  metavariable: $MOD
+                  regex: ^(node:)?child_process$
+      - metavariable-regex:
+          metavariable: $CMD
+          regex: '^(?!\s*("[^"\\]*"|''[^''\\]*'')\s*$)'
+      - focus-metavariable: $CMD
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"

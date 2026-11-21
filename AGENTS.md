@@ -37,6 +37,8 @@
 - Codexは、関連するLinearのIssueと受入条件を読み取り、ユーザーの依頼と変更範囲をClaude Codeへの指示にまとめる。各セッションに `AGENTS.md` を読むよう明示し、守るべき既存の編集を伝える。作業結果はCodexアプリでユーザーに報告する。
 - WSLの対象作業コピーのルートで `env -u ANTHROPIC_API_KEY claude -p` を使い、Claudeのサブスクリプションで認証する。Codex側の承認とClaude Code側の権限を確認し、各セッションに必要な編集とコマンド実行だけを許可する。
 - ファイル作業が終わったら、同じ作業コピーで新しいClaude Codeセッションを起動する。レビュー担当には変更対象と受入条件を渡し、差分を照合して必要な修正とテストを行い、指摘、修正内容、テスト結果、未確認事項を報告するよう指示する。文書だけの変更は `git diff --check` と内容の整合性を確認する。
+- このレビュー担当には、Semgrep（`bash scripts/semgrep.sh`）と、Betterleaks（`bash scripts/scan-secrets.sh`）も実行させる。Semgrepの結果は、問題なし・検出あり・実行できない（未実行）・失敗の4区分で報告させ、実行できない・失敗を成功扱いにしない。検出は、すべて内容を読んで真偽を判断させる（`security/semgrep/triage.tsv` は参考の記録で、検出の表示や終了コードには影響しない）。版・ルール・対象・読み方は [docs/semgrep.md](docs/semgrep.md) を参照する。
+- テスト不足のレビュー（下の `scripts/review-tests.sh`）には、Semgrepの実行結果、検出の確認記録（triage）、検査の作業メモを渡さない。
 - 実装タスク（コードやテストの変更）では、上のレビューに加えて、`bash scripts/review-tests.sh` で、テスト不足のレビューを行う。レビュー担当には、実装した機能の詳細（Linearの課題のタイトル・説明・受入条件を、書かれている通りに転記したもの。`--feature-file` で渡す。必須）と、実装の内容（変更したファイルの一覧）を渡す。テストが通ったという報告、作者の自己評価、検証結果、作業メモは渡さない。シニアの目線で、フロントエンド・バックエンド・E2E の不足を導かせる。読み取り専用で、指摘は担当が対応する。詳細は [docs/testing-policy.md](docs/testing-policy.md)。
 - Claude Codeの起動や委譲した作業に失敗したら、Codexは失敗した段階と理由を報告する。
 

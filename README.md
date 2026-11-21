@@ -326,6 +326,18 @@ By default, the targets are Git-tracked files and untracked files that are not m
 
 It uses Go's standard regular expression engine and masks detected values. Validity checks against external services are disabled. Exit code `0` means no findings and `10` means findings. `staged` and `history` use a temporary directory for the Git scan. To scan the working tree from Windows, you can also use `pwsh -NoProfile -File scripts/Scan-Secrets.ps1`.
 
+## Static analysis with Semgrep
+
+In an Ubuntu terminal, run the following commands from the root of the clone. Docker and `python3` are required. The first run pulls a Semgrep container image pinned by version and digest; scans themselves run with no network, a read-only source mount, and local rules only.
+
+```bash
+bash scripts/semgrep.sh            # scan the Python and TypeScript sources
+bash scripts/semgrep.sh fixtures   # check the rules against fictional violation examples
+python3 -B -I -m unittest discover -s tests/semgrep
+```
+
+Exit code `0` means no findings, `10` findings, `20` unavailable (not run; never treat it as clean), and `30` failure (for example a file that cannot be parsed, or zero target files, which means nothing was scanned). The rules cover only a few dangerous patterns (SQL built from strings, shell commands, `eval`, unsafe deserialization, HTML injection in React and the DOM), so a clean result is not a statement that the app is secure. Targets, exclusions, the version choice, rule rationale, limits, and how the independent Claude Code review uses the results are in [docs/semgrep.md](docs/semgrep.md). Betterleaks above remains the secret scan.
+
 ## Verification records
 
 The preparation record of 2026-11-05 confirmed SHA256 verification of the distributed files, Codex startup on WSL with a ChatGPT login reference, and Symphony CLI loading. `pwsh -NoProfile -File scripts/Start-Symphony.ps1 -Check` exited with code 0. The CLI check was a preliminary check using the error for a nonexistent Workflow, and neither the Tracker nor the Agent was started.
