@@ -37,7 +37,7 @@
 - Codexは、関連するLinearのIssueと受入条件を読み取り、ユーザーの依頼と変更範囲をClaude Codeへの指示にまとめる。各セッションに `AGENTS.md` を読むよう明示し、守るべき既存の編集を伝える。作業結果はCodexアプリでユーザーに報告する。
 - WSLの対象作業コピーのルートで `env -u ANTHROPIC_API_KEY claude -p` を使い、Claudeのサブスクリプションで認証する。Codex側の承認とClaude Code側の権限を確認し、各セッションに必要な編集とコマンド実行だけを許可する。
 - ファイル作業が終わったら、同じ作業コピーで新しいClaude Codeセッションを起動する。レビュー担当には変更対象と受入条件を渡し、差分を照合して必要な修正とテストを行い、指摘、修正内容、テスト結果、未確認事項を報告するよう指示する。文書だけの変更は `git diff --check` と内容の整合性を確認する。
-- このレビュー担当には、Semgrep（`bash scripts/semgrep.sh`）と、Betterleaks（`bash scripts/scan-secrets.sh`）も実行させる。Semgrepは標準ルール（`p/default`）で、終了コード0（検出なし）・1（検出あり）・125／127（未実行）・その他（失敗）を区別して報告させ、未実行・失敗を成功扱いにしない。終了コードだけで問題なしとせず、出力の概要（検査したファイル、エラー）を読ませ、検出は内容を読んで判断させる。版・対象・限界は [docs/semgrep.md](docs/semgrep.md) を参照する。
+- このレビュー担当には、Semgrep（`docker compose run --rm semgrep`）と、Betterleaks（`bash scripts/scan-secrets.sh`）も実行させる。Semgrepは標準ルール（`p/default`）で、終了コード1は検出ありだけでなくDocker／Composeの失敗も意味しうるため、完了したスキャンの概要（検査したファイル数と言語ごとの件数）を確認させ、確認できない実行は未実行・失敗として報告させ、成功扱いにしない。終了コードだけで問題なしとせず、検出は内容を読んで判断させる。版・対象・限界は [docs/semgrep.md](docs/semgrep.md) を参照する。
 - テスト不足のレビュー（下の `scripts/review-tests.sh`）には、Semgrepの実行結果と検査の作業メモを渡さない。
 - 実装タスク（コードやテストの変更）では、上のレビューに加えて、`bash scripts/review-tests.sh` で、テスト不足のレビューを行う。レビュー担当には、実装した機能の詳細（Linearの課題のタイトル・説明・受入条件を、書かれている通りに転記したもの。`--feature-file` で渡す。必須）と、実装の内容（変更したファイルの一覧）を渡す。テストが通ったという報告、作者の自己評価、検証結果、作業メモは渡さない。シニアの目線で、フロントエンド・バックエンド・E2E の不足を導かせる。読み取り専用で、指摘は担当が対応する。詳細は [docs/testing-policy.md](docs/testing-policy.md)。
 - Claude Codeの起動や委譲した作業に失敗したら、Codexは失敗した段階と理由を報告する。

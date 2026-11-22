@@ -331,10 +331,10 @@ It uses Go's standard regular expression engine and masks detected values. Valid
 In an Ubuntu terminal, run the following command from the root of the clone. Docker is required, and so is network access, because the standard `p/default` rule set is fetched from the Semgrep registry on each run. The first run pulls a Semgrep container image pinned by version and digest. The source is mounted read-only and metrics are off.
 
 ```bash
-bash scripts/semgrep.sh            # scan the Python and TypeScript sources
+docker compose run --rm semgrep    # scan the Python and TypeScript sources
 ```
 
-The exit code is Semgrep's own: `0` means no findings, `1` findings, `125` or `127` Docker is unreachable or missing (not run; never treat it as clean), and any other code is a failure. Read the scan summary (files scanned, skipped, errors) before calling a run clean; a clean result is not a statement that the app is secure. Targets, exclusions, rule updates, limits, and how the independent Claude Code review uses the results are in [docs/semgrep.md](docs/semgrep.md). Betterleaks above remains the secret scan.
+The `semgrep` service is in the `tools` profile, so a plain `docker compose up` does not start it. Exit code `0` means no findings. Exit code `1` can mean findings **or** a Docker/Compose failure (for example, an unreachable daemon), so it is not proof of a scan. Only a run that printed a completed scan summary with file counts per language counts as a scan; an error, or no summary, is not clean. Read the summary (files scanned, skipped, errors) before calling a run clean; a clean result is not a statement that the app is secure. Targets, exclusions, rule updates, limits, and how the independent Claude Code review uses the results are in [docs/semgrep.md](docs/semgrep.md). Betterleaks above remains the secret scan.
 
 ## Verification records
 
