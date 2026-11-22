@@ -2,7 +2,8 @@
 
 新しい操作ごとに1件、操作IDから承認済みの架空例を選んで追加し、
 保存先が案件IDを採番する。
-A09にはモックと同じ規則の固定値を使い、取得失敗の例は確認待ちにする。
+A09にはモックと同じ規則の固定値（Yes／No）を使い、結果は登録しない。
+新しく作る案件は、どの例でも画面の状態が未審査になる。
 Bedrock・内部HTTPモックは呼ばず、AIの利用枠も消費しない。
 """
 
@@ -15,19 +16,14 @@ from app.domain import StoreBusy
 router = APIRouter(prefix="/api/sample-cases", tags=["sample-cases"])
 
 
-def _template(
-    summary: str,
-    user_id: str,
-    a09_answer: str | None,
-    result_code: str | None = None,
-) -> dict:
-    """a09_answer が None のときは、A09の取得に失敗した（確認待ちのまま）案件。"""
+def _template(summary: str, user_id: str, a09_answer: str) -> dict:
+    """a09_answer は "yes" か "no"。結果は常に未登録（result_code は None）。"""
     return {
         "summary": summary,
         "user": {"user_id": user_id},
         "inquiry": {"subject": "架空の問い合わせ", "body": f"{summary}（架空）"},
         "a09_answer": a09_answer,
-        "result_code": result_code,
+        "result_code": None,
     }
 
 
@@ -35,8 +31,8 @@ def _template(
 SAMPLE_TEMPLATES: tuple[dict, ...] = (
     _template("身に覚えのないログインの通知が届いた", "456", "yes"),
     _template("メールアドレス変更の通知に心当たりがない", "457", "no"),
-    _template("APIキー発行の通知に心当たりがない（取得に失敗）", "458", None),
-    _template("ログイン失敗の通知が夜間に何件も届いた", "460", "yes", "no_issue"),
+    _template("APIキー発行の通知に心当たりがない", "458", "yes"),
+    _template("ログイン失敗の通知が夜間に何件も届いた", "460", "yes"),
 )
 
 _OPERATION_KEY = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}")

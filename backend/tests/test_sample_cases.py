@@ -99,7 +99,8 @@ class SampleCasesContract(unittest.TestCase):
 
     def test_each_new_operation_creates_one_more_case(self):
         ids = []
-        for number in (1, 2):
+        # op_key(n) は n を型の数（4）で割った余りの型になる。4つの型を1回ずつ通す。
+        for number in range(len(sample_cases.SAMPLE_TEMPLATES)):
             key = op_key(number)
             status, body = self.create(key)
             self.assertEqual(status, 201, body)
@@ -109,8 +110,13 @@ class SampleCasesContract(unittest.TestCase):
             )
             self.assertRegex(body["case_id"], r"^CASE-[0-9A-F]{8}$")
             ids.append(body["case_id"])
-            self.assertEqual(len(self.listing()), number)  # 1操作で1件ずつ増える
-        self.assertNotEqual(ids[0], ids[1])
+            self.assertEqual(len(self.listing()), len(ids))  # 1操作で1件ずつ増える
+            _, view = send("GET", f"{self.server.base_url}/api/cases/{body['case_id']}")
+            # どの型でも未審査: 結果は未登録、A09は確認待ちではなくYes／No
+            self.assertIsNone(view["result"])
+            a09 = next(q for q in view["questions"] if q["question_code"] == "A09")
+            self.assertIn(a09["answer"], ("yes", "no"))
+        self.assertEqual(len(set(ids)), len(ids))
         self.assertEqual(self.mock_calls, [])  # HTTPモックは呼ばない
 
     def test_resending_the_same_operation_does_not_add_or_change_a_case(self):
@@ -118,9 +124,9 @@ class SampleCasesContract(unittest.TestCase):
         _, first = self.create(key)
         url = f"{self.server.base_url}/api/cases/{first['case_id']}"
         before = send("GET", url)[1]
-        self.assertEqual(before["result"]["result_code"], "no_issue")
+        self.assertIsNone(before["result"])  # 未審査のまま。登録済みの型は作らない
         status, body = self.create(key)
         self.assertEqual(status, 200, body)
         self.assertEqual(body, {"case_id": first["case_id"], "created": False})
         self.assertEqual(len(self.listing()), 1)
-        self.assertEqual(send("GET", url)[1], before)  # 保存済みの判定も変わらない
+        self.assertEqual(send("GET", url)[1], before)  # 保存済みの内容も変わらない

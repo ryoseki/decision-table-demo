@@ -1411,15 +1411,20 @@ class DbFlow(unittest.TestCase):
 
     def test_resending_one_operation_does_not_duplicate_or_change_the_case(self):
         server = self.sample_server()
-        key = self.op_key(3)  # 登録済みの結果（no_issue）を持つ型
+        key = self.op_key(3)  # 4つ目の型。ほかの型と同じく結果は未登録
         self.create_sample(server, key)
         before = self.sample_state()
         status, body = self.create_sample(server, key)
         self.assertEqual(
             (status, body), (200, {"case_id": self.case_id_of(key), "created": False})
         )
-        self.expect_sample_rows(1)
-        self.assertEqual(self.sample_state(), before)  # 保存済みの判定も変わらない
+        self.expect_sample_rows(1)  # 結果の行は未登録の枠として1件のまま
+        self.assertEqual(self.sample_state(), before)  # 保存済みの内容も変わらない
+        _, results, checks = before
+        self.assertEqual(len(results), 1)
+        self.assertIsNone(results[0][1])  # result_code は NULL（未審査）
+        self.assertEqual(len(checks), 1)
+        self.assertIn(checks[0][2], ("yes", "no"))  # A09は確認待ちではない
 
 
 if __name__ == "__main__":
