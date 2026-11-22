@@ -326,6 +326,16 @@ By default, the targets are Git-tracked files and untracked files that are not m
 
 It uses Go's standard regular expression engine and masks detected values. Validity checks against external services are disabled. Exit code `0` means no findings and `10` means findings. `staged` and `history` use a temporary directory for the Git scan. To scan the working tree from Windows, you can also use `pwsh -NoProfile -File scripts/Scan-Secrets.ps1`.
 
+## Static analysis with Semgrep
+
+In an Ubuntu terminal, run the following command from the root of the clone. Docker is required, and so is network access, because the standard `p/default` rule set is fetched from the Semgrep registry on each run. The first run pulls a Semgrep container image pinned by version and digest. The source is mounted read-only and metrics are off.
+
+```bash
+docker compose run --rm semgrep    # scan the Python and TypeScript sources
+```
+
+The `semgrep` service is in the `tools` profile, so a plain `docker compose up` does not start it. Exit code `0` means no findings. Exit code `1` can mean findings **or** a Docker/Compose failure (for example, an unreachable daemon), so it is not proof of a scan. Only a run that printed a completed scan summary with file counts per language counts as a scan; an error, or no summary, is not clean. Read the summary (files scanned, skipped, errors) before calling a run clean; a clean result is not a statement that the app is secure. Targets, exclusions, rule updates, limits, and how the independent Claude Code review uses the results are in [docs/semgrep.md](docs/semgrep.md). Betterleaks above remains the secret scan.
+
 ## Verification records
 
 The preparation record of 2026-11-05 confirmed SHA256 verification of the distributed files, Codex startup on WSL with a ChatGPT login reference, and Symphony CLI loading. `pwsh -NoProfile -File scripts/Start-Symphony.ps1 -Check` exited with code 0. The CLI check was a preliminary check using the error for a nonexistent Workflow, and neither the Tracker nor the Agent was started.

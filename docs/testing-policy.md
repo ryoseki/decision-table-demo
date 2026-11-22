@@ -55,8 +55,10 @@
 | バックエンドの書き方 | `ruff`（lint と整形の確認） | `docker compose run --rm --no-deps --build backend sh -c 'ruff check . && ruff format --check .'` |
 | バックエンドの依存の向き | `import-linter`（契約は `backend/pyproject.toml`。契約の名前に直し方を書いている） | `docker compose run --rm --no-deps --build backend lint-imports` |
 | フロントの書き方と依存の向き | ESLint（依存の向きは `no-restricted-imports`。メッセージに直し方を書いている） | `docker compose run --rm --no-deps --build frontend npm run lint` |
+| PythonとTypeScriptの危険な書き方 | Semgrep（標準ルール `p/default`。版は固定、ルールはレジストリから取得。範囲と限界は [docs/semgrep.md](semgrep.md)） | `docker compose run --rm semgrep` |
 
-- 依存の向きの検査は、CIでも実行する。
+- 依存の向きの検査は、CIでも実行する。Semgrepは、CIには載せていない。独立した新しいClaude Codeセッションのレビューが、WSLで実行して確認する（[AGENTS.md](../AGENTS.md)）。
+- Semgrepの終了コード1は、検出ありだけでなく、Docker／Composeの失敗（デーモンに接続できない、ネットワークを作れないなど）も意味しうる。完了したスキャンの概要（検査したファイル数と言語ごとの件数）がある実行だけをスキャンとして扱い、ない実行は未実行・失敗として報告し、成功扱いにしない。終了コードだけで問題なしとせず、出力の概要を読む。Semgrepの結果は、「テスト不足のレビュー」には渡さない。
 - 検査を緩める・無視する（契約や設定の変更）のは、理由を示して人に相談する。AIが黙って緩めない。
 - 新しい検査を足したら、違反を一時的に入れて、失敗することを確認する（決まり4）。
 
