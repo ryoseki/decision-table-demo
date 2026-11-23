@@ -35,19 +35,13 @@ The final determination of fraud and the handling of each case, the specificatio
 
 ## Current status
 
-As of 2026-11-07, the initial requirements, acceptance criteria, main technical stack, and initialization policy (technical plan) have been agreed. A React + Vite confirmation screen and a FastAPI health check have been initialized. Business features are not implemented. CI/CD and other topics will be detailed per assigned issue. The main stack is React + Vite (TypeScript), FastAPI, AWS Lambda, Aurora DSQL, and Docker Compose with PostgreSQL for local use. For details and open items, see "Initial technical stack" in the [requirements document](docs/requirements.md). Symphony configuration and startup scripts are provided.
-
-As of 2026-11-12, the intake, mock HTTP contract and storage design have been answered by the user and are recorded in [docs/intake-mock-contract-design.md](docs/intake-mock-contract-design.md). The user finally approved the DDL change described there, and it is reflected in the [table design](docs/decision-support-schema.md), the sample data, the DB verification script, the requirements document and the wireflow. The updated schema passed 55 of 55 checks on local PostgreSQL and, as reported by the user from CloudShell, 55 of 55 on Aurora DSQL in a temporary schema that was removed afterwards (Claude Code did not observe the DSQL run directly). DSQL-specific behavior such as OCC retries, size limits and concurrency, and the app, HTTP and AWS behavior remain unverified. See [database environment](docs/database-environment.md) for the records.
-
-Local checks performed during preparation, and the scope that remains unchecked, are summarized in the [verification records](#verification-records).
+The first release (questions A01–A12, review screen, intake and saving, administrator-AI prototype) runs locally with Docker Compose and PostgreSQL. The agreed requirements, acceptance examples and open items are in the [requirements document](docs/requirements.md); the table design and API contract are in [decision-support-schema.md](docs/decision-support-schema.md). What has and has not been verified on AWS (Aurora DSQL, Lambda, CloudFront, Bedrock) is in [aws-environment.md](docs/aws-environment.md) and [development-workflow.md](docs/development-workflow.md).
 
 ## Local app development (Docker Compose)
 
 On a fresh checkout, run the following at the repository root (where `compose.yaml` is located). Prepare Docker Engine and the Compose plugin, confirm that `docker version` can connect to the server, and confirm that `docker compose version` works. Network access is required to fetch images and dependencies. You do not need to install Node.js, Python, npm, or uv on the host, or to set app environment variables or credentials. The local development database (PostgreSQL) starts together with the app and also needs no credentials (see "Local database" below).
 
 ### Pinned configuration
-
-The initialization verification record used Docker 29.4.0 / Compose 5.1.2. These are not minimum supported versions.
 
 | Target | Pinned versions / definitions |
 | --- | --- |
@@ -100,33 +94,33 @@ bash scripts/seed-demo-cases.sh     # needs only curl; set API_BASE if the API i
 # then open http://localhost:5173/ and reload the page
 ```
 
-The "サンプル案件を作成" button adds one fictional case to the shared list on each click. Each new case has a 13-character ID such as `CASE-12AB34CD`. Retrying the same operation returns the existing case; the next click after success creates another. Stored data grows with each new operation. Public-environment and Aurora DSQL verification is pending. See [the agreed behavior](docs/requirements.md#共有サンプル案件の作成2026-11-20合意動作検証はローカルのみ) and [the deployment and verification steps](docs/development-workflow.md#共有サンプル案件の作成post-apisample-cases).
+The "サンプル案件を作成" button adds one fictional case to the shared list on each click. Each new case has a 13-character ID such as `CASE-12AB34CD`. Retrying the same operation returns the existing case; the next click after success creates another. Stored data grows with each new operation. Public-environment and Aurora DSQL verification is pending. See [the agreed behavior](docs/requirements.md#共有サンプル案件の作成) and [the deployment and verification steps](docs/development-workflow.md#共有サンプル案件の作成post-apisample-cases).
 
 Each run of the script adds new cases. To start over, run `docker compose down -v` (it deletes the development database) and `docker compose up -d`. A single case can also be created by hand with `POST /api/intake/cases` (see the API contract below); the first run of the list and the reopening of a case can be tried from the host through the Vite proxy, for example `curl http://localhost:5173/api/cases`.
 
-The result is saved by "判定する" (`PUT /api/cases/{id}/judgment`) and shown again when the case is reopened. Answer edits on the screen are not saved yet. The API contract is in [intake-mock-contract-design.md](docs/intake-mock-contract-design.md) (section 2.8).
+The result is saved by "判定する" (`PUT /api/cases/{id}/judgment`) and shown again when the case is reopened. The API contract is in [decision-support-schema.md](docs/decision-support-schema.md).
 
 ### Question management demo (mock, no database)
 
 The header link "設問管理" opens `#/admin/questions`, a first vertical slice of the administrator-AI prototype. An administrator types a natural-language request (for example "APIキーの失効履歴を確認する設問を追加して"), sees the full Before and After lists with the added row marked (background and a "追加" label), and answers "反映しますか？" with Yes or No. Only Yes changes the demo list.
 
-- **The AI is a mock by default.** A fixed rule returns a fictional proposal (question A13). Nothing connects to Bedrock or any real AI unless the server is explicitly configured for it (`AI_PROVIDER=bedrock` with an explicit `BEDROCK_REGION` and `BEDROCK_MODEL_ID`; credentials come from the standard AWS SDK chain and are never written to files). Every proposal shows which one produced it ("生成元: モック" or "生成元: Amazon Bedrock（実接続）"), and a connection failure, timeout or unusable output is shown as an error, never as a successful proposal and never silently replaced by the mock. The real connection has **not** been verified against Bedrock yet; setup, the differences from the mock, and cost notes are in [bedrock-connection.md](docs/bedrock-connection.md). The app still validates the output (format, the one allowed ID, duplicates, required fields) and rejects an invalid response with 422 without changing anything.
+- **The AI is a mock by default.** A fixed rule returns a fictional proposal (question A13). Nothing connects to Bedrock or any real AI unless the server is explicitly configured for it (`AI_PROVIDER=bedrock` with an explicit `BEDROCK_REGION` and `BEDROCK_MODEL_ID`; credentials come from the standard AWS SDK chain and are never written to files). Every proposal shows which one produced it ("生成元: モック" or "生成元: Amazon Bedrock（実接続）"), and a connection failure, timeout or unusable output is shown as an error, never as a successful proposal and never silently replaced by the mock. The real connection has **not** been verified against Bedrock yet; setup, the differences from the mock, and cost notes are in [aws-environment.md](docs/aws-environment.md). The app still validates the output (format, the one allowed ID, duplicates, required fields) and rejects an invalid response with 422 without changing anything.
 - **No database.** The demo list lives in the backend process memory. It survives a page reload but is reset to A01–A12 when the backend restarts. It is not persistent storage, and it does not touch the cases, their questions or answers, or the database. An unapproved preview is only held by the screen and is dismissed on reload.
 - **Not decided yet:** deleting questions, keeping or retiring past versions, physical deletion, and persistent storage.
 
-The endpoints, error statuses and layer boundaries are in [admin-question-proposal-demo.md](docs/admin-question-proposal-demo.md).
+The endpoints, error statuses and layer boundaries are in [admin-proposal-demo.md](docs/admin-proposal-demo.md).
 
-The header link "判定ルール管理" opens `#/admin/rules`, which works the same way (request, Before/After diff, Yes/No) but the target is decision rules, not questions; each screen shows which one it operates on. An add proposal is rejected (422, nothing changes) when a rule refers to a question that does not exist or is retired, uses an undefined result code, or duplicates an existing rule. The rule list is a separate in-memory demo list (R01–R03 at start): it does not change the rules the review screen uses, and the cases and database stay untouched. Design, the demo-only duplicate policy and what is still undecided are in [admin-rule-proposal-demo.md](docs/admin-rule-proposal-demo.md).
+The header link "判定ルール管理" opens `#/admin/rules`, which works the same way (request, Before/After diff, Yes/No) but the target is decision rules, not questions; each screen shows which one it operates on. An add proposal is rejected (422, nothing changes) when a rule refers to a question that does not exist or is retired, uses an undefined result code, or duplicates an existing rule. The rule list is a separate in-memory demo list (R01–R03 at start): it does not change the rules the review screen uses, and the cases and database stay untouched. Design, the demo-only duplicate policy and what is still undecided are in [admin-proposal-demo.md](docs/admin-proposal-demo.md).
 
 ### Local database
 
 `docker compose up -d` also starts a development PostgreSQL 16 (`db`). It uses trust authentication (no password), and **its port is not published to the host**; only containers in the same Compose project can connect. Do not add `ports:` to `db` in `compose.yaml`, because that would expose a passwordless database. `backend` saves to it when `DB_HOST` is set (the Compose file sets it), so saving and redisplaying a judgment work with plain `docker compose up`.
 
-- On the first start, `db-init` applies the DDL from `docs/decision-support-schema.md` and the fictional sample data (12 questions) from `docs/decision-support-sample.json`, and the 3 fictional decision rules R01–R03 from `docs/decision-support-demo-rules.json`. The screen gets the rules from `GET /api/rules` (the latest revision of each rule) and uses them for matching. If your development database was created before the rules were added (it has the old single sample rule), run `docker compose down -v` and start again. A rule may have conditions for only some of the questions: a question without a condition is shown as "問わない" and never counts as a mismatch. Rules with an unknown result code, a value other than yes/no, or an unknown question are shown as an error instead of being used silently.
+- On the first start, `db-init` applies the DDL from `docs/decision-support-schema.md` and the fictional sample data (12 questions) from `docs/decision-support-sample.json`, and the 3 fictional decision rules R01–R03 from `docs/decision-support-demo-rules.json`. The screen gets the rules from `GET /api/rules` (the latest revision of each rule) and uses them for matching. A rule may have conditions for only some of the questions: a question without a condition is shown as "問わない" and never counts as a mismatch. Rules with an unknown result code, a value other than yes/no, or an unknown question are shown as an error instead of being used silently.
 - Data is kept in the named volume `db_data`; `docker compose down` keeps it. Running `db-init` again adds missing tables while preserving existing data.
 - Changes to existing table definitions or initial data are not applied automatically. To load them into a fresh development database, run `docker compose down -v` and then `docker compose up -d`. `down -v` deletes all development data.
 - To open a SQL shell: `docker compose exec db psql -U demo_admin -d decision_demo`.
-- This is not Aurora DSQL. A success here does not show that the app works on Aurora DSQL (see [database environment](docs/database-environment.md)).
+- This is not Aurora DSQL. A success here does not show that the app works on Aurora DSQL (see [database environment](docs/aws-environment.md)).
 
 ### Tests and static checks inside containers
 
@@ -169,31 +163,7 @@ docker compose down -v     # also deletes the development database (re-created o
 
 This stops and removes the services and the Compose network. Built images remain. The HTTP mock for automatic answers runs inside `backend`. Deployment to AWS and real Aurora DSQL are not part of this startup procedure.
 
-### Verification status of this procedure
-
-On 2026-11-08 (Japan time), the entire procedure was run from a fresh checkout on Ubuntu 22.04.3 LTS (WSL 2, kernel 6.18 series) with Bash 5.1.16, in an environment that could connect to the Docker daemon. The Docker CLI and server engine were both 29.4.0, and Compose was 5.1.2. The items checked and results are as follows.
-
-- `docker compose config --quiet`: succeeded.
-- `docker compose build --no-cache`: both the frontend and backend images built successfully.
-- `docker compose up -d` and `docker compose ps`: both services started.
-- HTTP responses: `http://localhost:8000/health` returned HTTP 200 with JSON `{"status":"ok"}`. `http://localhost:5173/` returned HTTP 200.
-- Browser display: opened `http://localhost:5173/` in a headless browser and confirmed the heading "不正審査デモ" and the description "初期化の確認用の画面です。業務画面は未実装です。" rendered.
-- In-container checks: `npm run lint`, `npm run build`, `ruff check .`, `ruff format --check .`, and `uv pip check` all exited with code 0.
-- `docker compose down`: stopped and removed the services and the Compose network.
-
-On 2026-11-12 (Japan time), the Compose setup with the development database and the test commands were checked on the same kind of environment (Docker 29.4.0 / Compose 5.1.2). Checked: the API contract and backend unit tests (70 run, 16 skipped because they need the database, OK) and the frontend tests (Vitest, 35 run including 21 `.tsx` component tests, OK) with no database; `docker compose up -d --wait` starting all services with `db-init` applying the DDL and the sample data (12 questions, 1 rule); inside the `backend` container, intake (201), redisplay, saving a judgment (204), rejecting an undefined result code (422) and redisplay of the saved result; the dependency-direction checks (`lint-imports`: 3 contracts kept on 24 files; ESLint `no-restricted-imports`), each also confirmed to fail with a remediation message when a violation is temporarily introduced; data kept after `docker compose down` and `up` (the DDL was not applied again); data removed and re-initialized after `down -v`; `bash scripts/e2e.sh` (success); `bash scripts/backend-db-test.sh` (70 run, OK; includes the check of `db/init_dev.py`) and `bash scripts/db-verify.sh` (success). Not checked: opening `http://localhost:5173/` and `http://localhost:8000/health` from the host for the new setup (those host ports were in use, so the startup check used a temporary override without published host ports and called the API from inside the container), and the new CI steps (`lint-imports`, the backend unit tests, `npm test`) in GitHub Actions.
-
-On 2026-11-12 (Japan time), the screen was connected to the API (the first vertical slice: open a case, choose a result, save it, reopen it). Checked locally: the API contract tests including `GET /api/cases` (75 run, 17 skipped because they need the database, OK), the DB integration (75 run, OK), the frontend tests (Vitest, 72 run, OK; 42 of them are `.tsx` component and hook tests), lint, the build, the dependency-direction checks, and `bash scripts/e2e.sh` (6 tests, success: acceptance example 7 through the screen, the API and the database; the list; the not-found display; the mobile width). Each new kind of test was confirmed to fail when the code is broken temporarily (the double-submit guard, the handling of a failed save, the result in a list row, and a wrong result code in the E2E run). Not checked: operating the screen by hand in a browser, serving the built screen from FastAPI (`STATIC_DIR`, the same origin as the API) with the new API calls, the new test steps in GitHub Actions, and real Aurora DSQL. That the HTTP mock is not called again on redisplay is checked at the API integration level (real HTTP, counting the mock calls), not in the browser E2E.
-
-On 2026-11-14 (Japan time), the matching display was connected to the rules in the database (`GET /api/rules`). Checked locally: the API contract tests (84 run, 18 skipped because they need the database, OK), the DB integration (OK, including the latest-revision query), the frontend tests (101, OK), ruff, lint, type check, the dependency-direction checks, and `bash scripts/e2e.sh` (8 tests, success: acceptance examples 1–3 through the screen, the API and the database). The new tests were confirmed to fail when the code was broken temporarily (the latest-revision query, the rules passed to the matching, the handling of questions without a condition, the rule values in the development data). Not checked: operating the screen by hand in a browser, the new test steps in GitHub Actions, real Aurora DSQL, and rules with conditions for only some questions through the browser E2E (checked by unit tests only, because the development data has only R01–R03 with all 12 conditions).
-
-On 2026-11-14 (Japan time), "このルールを採用" was added. Only a normal (non-gray) rule row has the button; the adopted rule is a reference record and does not change the chosen result. If a correction turns the adopted row gray, the adoption is dropped. The result option that matches the adopted rule's result is marked ("採用ルールの結果"); it is only a mark and is never selected automatically. The screen sends `rule_id` and `rule_revision` (the revision it fetched) only when a rule is adopted, and the save returns 422 for a rule/revision that does not exist in `decision_rules` (the screen then shows the save error). Checked locally: acceptance examples 8–10 through the screen, the API and the database (`bash scripts/e2e.sh`, 9 tests), the API contract tests, the DB integration (including the rejected non-existent rule), the frontend tests, lint and ruff. Not checked: operating the screen by hand in a browser, GitHub Actions for this branch, real Aurora DSQL. The server does not check that the adopted rule is a normal row for the saved answers (only the screen enforces that).
-
-On 2026-11-12 (Japan time), the second vertical slice was added (pending answers and saving the changed answers). Checked locally: the frontend tests (Vitest, 85 run, OK; the screen sends only the answers that differ from the saved ones), the backend tests (76 run, 17 skipped because they need the database, OK), the DB integration (76 run, OK), lint, the build, the dependency-direction checks, and `bash scripts/e2e.sh` (7 tests, success: acceptance examples 4, 5 and 6 through the screen, the API and the database, using a case whose automatic answer fails on purpose with `demo_controls.fault_questions`, and example 7). The new tests were confirmed to fail when the code is broken temporarily (sending every answer, not updating the saved values after a save). Not checked: operating the screen by hand in a browser, the new test steps in GitHub Actions, real Aurora DSQL, and the warning when leaving with unsaved changes (agreed in the design, but not part of this slice).
-
-Browser display is checked at `http://localhost:5173/` as described. By default, Vite's dev server accepts connections only from `localhost`, `.localhost`, and IP addresses (default behavior of the official Vite `server.allowedHosts`, confirmed 2026-11-08). In this repository, `allowedHosts` in `frontend/vite.config.ts` additionally allows the Compose service name `frontend` for E2E. Access checks with other host names are outside the scope of this procedure.
-
-A separate verification record at initialization also reported success of each component on its own (frontend dependency install, lint, build, and DOM rendering; API dependency install, health check, and Ruff).
+By default, Vite's dev server accepts connections only from `localhost`, `.localhost`, and IP addresses (the default of the official Vite `server.allowedHosts`). In this repository, `allowedHosts` in `frontend/vite.config.ts` additionally allows the Compose service name `frontend` for E2E.
 
 ## Roles of documents and tools
 
@@ -293,9 +263,7 @@ The environment smoke tests (`e2e/tests/smoke.spec.ts`) check only the initial s
 
 On failure, open the log of the relevant job from the PR's checks. The E2E failure report and traces can be retrieved from the run's Artifacts (`e2e-report`, retained 14 days). Reruns are done from the Actions screen, and the record of the first failure is kept. `GITHUB_TOKEN` is read-only, and actions are pinned by commit SHA.
 
-Execution on actual GitHub Actions has been confirmed. In the PR that introduced CI, the three jobs `frontend`, `backend`, and `e2e` succeeded. To check failures, verification PRs that intentionally failed `backend` and `e2e` were used. It was confirmed that both jobs fail, and that rerunning a failed job fails again. The retrieved Artifacts contained the HTML report and traces.
-
-The candidates for checks required before merging are the three job names above (`frontend`, `backend`, `e2e`). Agreeing on which checks are required, registering them in branch protection, and actually blocking merges with required checks are all incomplete. They need permission checks and settings on the GitHub side, which remain for human judgment and action. PR review and merging are also awaiting human judgment.
+The required checks (`frontend`, `backend`, `e2e`) and the merge rules are in the [development workflow](docs/development-workflow.md).
 
 ## Deliverables and review
 
@@ -310,9 +278,7 @@ In review, find the per-issue working copy by issue number, and use the relative
 
 When starting work, Codex moves the issue from `Todo` to `In Progress` and updates the existing workpad if there is one. After recording results and questions in the same workpad, it moves the issue to `In Review`. `In Review` is excluded from automatic execution. If fixes are needed, the reviewer records the fixes and returns the issue to `Todo`.
 
-In the first integration verification, confirm in the logs or dashboard that only the target issue started. In the workpad, confirm the issue number and commit that Codex checked in the per-issue working copy, and whether it could search for and read the body of official OpenAI documents. After the issue moves to `In Review`, confirm that it is not run again in subsequent polls.
-
-Results in a per-issue working copy are not automatically reflected in the original working folder. The [development workflow](docs/development-workflow.md) proposes a flow in which Codex pushes a dedicated branch from the per-issue working copy and creates a PR on GitHub, and a human reviews the diff and CI results on GitHub and merges. Under the current procedure, before the introduction of that flow, save the results of the per-issue working copy before moving the issue to `Done`.
+Results in a per-issue working copy are not reflected in the original working folder automatically. Codex pushes a dedicated branch and creates a PR; a human reviews the diff and CI results on GitHub and merges (see the [development workflow](docs/development-workflow.md)).
 
 ## Scan for secrets with Betterleaks
 
@@ -336,15 +302,7 @@ In an Ubuntu terminal, run the following command from the root of the clone. Doc
 docker compose run --rm semgrep    # scan the Python and TypeScript sources
 ```
 
-The `semgrep` service is in the `tools` profile, so a plain `docker compose up` does not start it. Exit code `0` means no findings. Exit code `1` can mean findings **or** a Docker/Compose failure (for example, an unreachable daemon), so it is not proof of a scan. Only a run that printed a completed scan summary with file counts per language counts as a scan; an error, or no summary, is not clean. Read the summary (files scanned, skipped, errors) before calling a run clean; a clean result is not a statement that the app is secure. Targets, exclusions, rule updates, limits, and how the independent Claude Code review uses the results are in [docs/semgrep.md](docs/semgrep.md). Betterleaks above remains the secret scan.
-
-## Verification records
-
-The preparation record of 2026-11-05 confirmed SHA256 verification of the distributed files, Codex startup on WSL with a ChatGPT login reference, and Symphony CLI loading. `pwsh -NoProfile -File scripts/Start-Symphony.ps1 -Check` exited with code 0. The CLI check was a preliminary check using the error for a nonexistent Workflow, and neither the Tracker nor the Agent was started.
-
-The README review on the same day confirmed consistency among the Git diff, local references, and the descriptions in documents and scripts. The preparation and startup commands were not rerun. The actual connection to Linear, execution of real issues, and app behavior are unconfirmed.
-
-On 2026-11-06, `bash scripts/symphony.sh check` was run on Ubuntu, and startup of Codex's Linux sandbox was confirmed. Betterleaks scanned the original working tree and staged diffs inside the Linux sandbox, with zero findings. The original repository's history had no content to scan, so detection from history was confirmed in a temporary repository where a dummy value was committed. Restarting with the desktop WSL setting and the actual connection to Linear are unconfirmed.
+The `semgrep` service is in the `tools` profile, so a plain `docker compose up` does not start it. Exit code `0` means no findings. Exit code `1` can mean findings **or** a Docker/Compose failure (for example, an unreachable daemon), so it is not proof of a scan. Only a run that printed a completed scan summary with file counts per language counts as a scan; an error, or no summary, is not clean. Read the summary (files scanned, skipped, errors) before calling a run clean; a clean result is not a statement that the app is secure. Targets, exclusions, rule updates, limits, and how the independent Claude Code review uses the results are in [docs/testing-policy.md](docs/testing-policy.md). Betterleaks above remains the secret scan.
 
 ## Official documents referenced
 

@@ -1,6 +1,6 @@
 """受付とHTTPモックの検証。
 
-docs/intake-mock-contract-design.md 4.1・4.2のうち、DBを使わないもの。
+docs/decision-support-schema.md「API契約」のうち、DBを使わないもの。
 
 uvicornを実際に起動し、受付処理が実HTTPでモックを呼ぶ。案件・利用者・問い合わせは架空。
 DB保存（S5〜S15の保存部分）は対象外。

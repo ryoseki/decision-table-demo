@@ -1,4 +1,4 @@
-"""案件の再表示と［判定する］（架空）。docs/intake-mock-contract-design.md 2.6。
+"""案件の再表示と［判定する］（架空）。docs/decision-support-schema.md「API契約」。
 
 どちらの操作もHTTPモックを呼ばない（取得は受付時の1回だけ）。入力途中の自動保存はない。
 保存先がDBでない場合（開発用のメモリ保存）は503を返す。

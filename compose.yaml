@@ -67,7 +67,7 @@ services:
     command: ["python", "init_dev.py"]
     restart: "no"
   # Semgrep（標準ルール p/default）の静的解析。`docker compose run --rm semgrep` で明示したときだけ動く。
-  # profile のため、`docker compose up` には含まれない。手順と終了コードは docs/semgrep.md を参照する。
+  # profile のため、`docker compose up` には含まれない。手順と終了コードは docs/testing-policy.md を参照する。
   # 版はイメージのdigestで固定（Semgrep 1.184.0）。ルールは実行のたびにレジストリから取得するため、ネットワークは有効のまま。
   # ソースは読み取り専用。--config auto は、プロジェクトのURLを送るので使わない。
   semgrep:

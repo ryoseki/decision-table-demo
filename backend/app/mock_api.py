@@ -1,4 +1,4 @@
-"""自動回答のHTTPモック（架空）。docs/intake-mock-contract-design.md 2.2。
+"""自動回答のHTTPモック（架空）。docs/decision-support-schema.md「API契約」。
 
 実サービスのAPIではない。受付処理が実際にHTTPで呼ぶための置き場で、
 実サービス接続時に差し替える。補完用のモックは作らない（補完情報の概念を持たない）。

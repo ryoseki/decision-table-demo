@@ -1,4 +1,4 @@
-"""案件の受付（架空）。docs/intake-mock-contract-design.md 2.3。
+"""案件の受付（架空）。docs/decision-support-schema.md「API契約」。
 
 この範囲はHTTPモックの呼び出しまで。DB保存はCaseStoreの境界の向こう側で、
 実DBへの接続と保存は別Issue（保存の実装）の範囲。ここの既定の保存先はメモリ上の仮実装で、
