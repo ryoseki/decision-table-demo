@@ -4,6 +4,7 @@ import { useState } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 import CaseList, { type ListFilter } from "./CaseList";
 import { apiRow, stubFetch } from "./testing";
+import { useSampleCreation } from "./useApi";
 
 afterEach(() => {
   cleanup();
@@ -13,7 +14,8 @@ afterEach(() => {
 // 検索語と状態は App が持つため、同じ形で包む。
 function Harness() {
   const [filter, setFilter] = useState<ListFilter>({ query: "", status: "all" });
-  return <CaseList filter={filter} onFilterChange={setFilter} />;
+  const sample = useSampleCreation();
+  return <CaseList filter={filter} onFilterChange={setFilter} sample={sample} />;
 }
 
 const ROWS = [

@@ -41,6 +41,7 @@ TABLES = [
     "proposal_templates",
     "review_cases",
     "review_questions",
+    "sample_case_operations",
     "shared_config_revisions",
     "shared_proposals",
 ]
@@ -128,11 +129,13 @@ class DevInit(unittest.TestCase):
         self.assertEqual(self.snapshot(), first)  # テーブルも中身も変わらない
 
     def test_old_dev_db_gets_missing_tables_and_keeps_existing_data(self):
-        # DDL更新前に作った開発用DB（定型文などのテーブルがない）を模す。
+        # DDL更新前に作った開発用DB（定型文・処理済み提案・サンプル案件の操作の対応表が
+        # ない）を模す。
         new_tables = {
             "processed_shared_proposals",
             "proposal_templates",
             "proposal_template_migrations",
+            "sample_case_operations",
         }
         with _connect(self.schema) as conn:
             for statement in self.init_dev.extract_ddl():
@@ -163,13 +166,17 @@ class DevInit(unittest.TestCase):
         self.assertEqual(rules, before[2])
         self.assertEqual([q[2] for q in questions], ["利用者が編集した設問"])
         # 足したテーブルは空。初期の定型文は、アプリの起動時の移行で入れる。
-        with _connect(self.schema) as conn:
-            for table in sorted(new_tables):
-                count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-                self.assertEqual(count, 0, table)
+        self.assert_empty(new_tables)
 
         self.assertEqual(self.run_init()[0], 0)  # 2回目も何も変えない
         self.assertEqual(self.snapshot(), (tables, questions, rules))
+        self.assert_empty(new_tables)  # 足したテーブルも空のまま
+
+    def assert_empty(self, tables):
+        with _connect(self.schema) as conn:
+            for table in sorted(tables):
+                count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                self.assertEqual(count, 0, table)
 
 
 if __name__ == "__main__":

@@ -4,19 +4,31 @@ import { StatusBadge } from "./Badges";
 import { describeError } from "./api";
 import { caseStatuses, statusOf, type CaseStatus } from "./data/cases";
 import { detailHref } from "./route";
-import { useCaseList } from "./useApi";
+import { useCaseList, type SampleCreation } from "./useApi";
 
 const normalize = (s: string) => s.normalize("NFKC").toLowerCase();
 
 export type ListFilter = { query: string; status: CaseStatus | "all" };
 
 // 検索語と状態は App が持ち、詳細から戻っても保持する。
-export default function CaseList({ filter, onFilterChange }: { filter: ListFilter; onFilterChange: (f: ListFilter) => void }) {
+export default function CaseList({
+  filter,
+  onFilterChange,
+  sample,
+}: {
+  filter: ListFilter;
+  onFilterChange: (f: ListFilter) => void;
+  sample: SampleCreation;
+}) {
   const { query, status } = filter;
   const setQuery = (q: string) => onFilterChange({ ...filter, query: q });
   const setStatus = (s: CaseStatus | "all") => onFilterChange({ ...filter, status: s });
 
-  const remote = useCaseList();
+  // サンプル案件の作成の状態は App が持つ（画面を切り替えても、未完了の操作を失わない）。
+  // 成功したら version が進み、一覧を取り直す（ブラウザーの再読み込みは要らない）。
+  const { version, creating, notice: sampleNotice, noticeCaseId, error: sampleError, create: createSample } = sample;
+
+  const remote = useCaseList(version);
   const cases = useMemo(() => (remote.status === "ok" ? remote.data : []), [remote]);
 
   const filtered = useMemo(() => {
@@ -37,6 +49,22 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
       <div className="page-head">
         <h2 id="list-title" tabIndex={-1}>審査対象一覧</h2>
         <p className="lead">受領したアカウント乗っ取りの申告を確認します。</p>
+        <div className="sample-action">
+          <button type="button" className="btn" data-testid="create-samples" disabled={creating} aria-busy={creating} onClick={() => createSample()}>
+            {creating ? "作成中…" : "サンプル案件を作成"}
+          </button>
+          <p className="hint">押すたびに、架空の案件を1件追加します。案件は利用者全員で共有します。</p>
+          {sampleNotice !== null && (
+            <p className="notice-ok" data-testid="sample-notice" aria-live="polite" title={noticeCaseId ?? undefined}>{sampleNotice}</p>
+          )}
+          {sampleError !== null && (
+            <div className="error sample-error" role="alert" data-testid="sample-error">
+              <p className="empty-title">サンプル案件を作成できませんでした</p>
+              <p>{sampleError}</p>
+              <p>もう一度「サンプル案件を作成」を押して、再試行できます。同じ操作の再試行なので、案件は重複しません。</p>
+            </div>
+          )}
+        </div>
       </div>
 
       {remote.status === "loading" && (
@@ -98,7 +126,7 @@ export default function CaseList({ filter, onFilterChange }: { filter: ListFilte
             <tbody role="rowgroup">
               {filtered.map((c) => (
                 <tr key={c.caseId} className="case-row" role="row">
-                  <th scope="row" role="rowheader" className="case-id" data-label="案件">{c.caseId}</th>
+                  <th scope="row" role="rowheader" className="case-id" data-label="案件" title={c.caseId}>{c.caseId}</th>
                   <td role="cell" data-label="対象">user_id {c.userId}</td>
                   <td role="cell" data-label="申告内容">
                     <span className="case-summary">{c.summary}</span>

@@ -9,7 +9,7 @@
 | ドメイン | `domain`、`rule_matching`、`question_validation`、`rule_validation` | 定数・例外・ID生成・照合・設問案とルール案の検証。純粋で、DBにもHTTPにも依存しない | 標準ライブラリだけ（検査しているのは、`fastapi`・`starlette`・`pydantic`・`psycopg` と、アプリ内の他モジュールを取り込まないこと） |
 | 保存先の実装 | `db_store`（PostgreSQL・Aurora DSQL）、`db_retry`（衝突の再試行） | SQL、トランザクション、DSQLのIAMトークン接続（boto3）、40001の再試行 | `domain`、`psycopg`、`boto3` |
 | 設問案・ルール案の保存先・AIの生成 | `question_store`・`rule_store`（メモリ）、`question_proposer`・`rule_proposer`（モック）、`bedrock_proposer`（Amazon Bedrockの実接続） | デモの設問一覧・判定ルール一覧と提案の保存・承認、AIの応答の生成（既定はモック。設定で実接続）。DBなし | `domain`、`question_validation`・`rule_validation`（型）、`boto3`・`botocore`（`bedrock_proposer`だけ）、標準ライブラリ |
-| HTTP層 | `cases`、`intake`、`mock_api`、`question_admin`、`rule_admin`、`rules` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`rule_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`、`rule_admin` → `question_admin`） |
+| HTTP層 | `cases`、`intake`、`mock_api`、`question_admin`、`rule_admin`、`rules`、`sample_cases` | ルーター、入力の型と検査、HTTPのステータス | `domain`、`question_validation`、`rule_validation`、`fastapi`、`pydantic`、同じ層（`intake` → `mock_api`、`rule_admin` → `question_admin`） |
 | 組み立て | `main` | 保存先・AIの生成（モックか実接続。`bedrock_proposer.build_proposers`）を選び、ルーターをつなぐ | すべて |
 
 - 設問の廃止案（`docs/admin-question-proposal-demo.md`）: 廃止の参照・影響の判定は、純粋な関数（`question_validation` の `find_rule_references`・`find_case_impact`）で行い、ルールと案件は `question_admin` が `app.state.case_store` から読み取って渡す。廃止済みの設問は、`cases` が `app.state.question_store` の `retired_ids()` から読み取り、案件の応答に印を付ける（案件の保存データは変えない）。いずれも `app.main` が組み立てた保存先を、共通の形だけで呼ぶ。

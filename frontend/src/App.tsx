@@ -4,11 +4,13 @@ import CaseList, { type ListFilter } from "./CaseList";
 import QuestionAdmin from "./QuestionAdmin";
 import RuleAdmin from "./RuleAdmin";
 import { QUESTIONS_HREF, RULES_HREF } from "./route";
+import { useSampleCreation } from "./useApi";
 import { useRoute } from "./useRoute";
 
 export default function App() {
   const route = useRoute();
   const [filter, setFilter] = useState<ListFilter>({ query: "", status: "all" });
+  const sample = useSampleCreation(); // 一覧を離れても、未完了のサンプル作成の操作を保つ
   const mainRef = useRef<HTMLElement>(null);
   const first = useRef(true);
 
@@ -38,7 +40,7 @@ export default function App() {
         <span className="tag">画面案（未承認） ／ 架空データ</span>
       </header>
       <main ref={mainRef}>
-        {route.name === "list" && <CaseList filter={filter} onFilterChange={setFilter} />}
+        {route.name === "list" && <CaseList filter={filter} onFilterChange={setFilter} sample={sample} />}
         {route.name === "detail" && <CaseDetail key={route.caseId} caseId={route.caseId} />}
         {route.name === "questions" && <QuestionAdmin />}
         {route.name === "rules" && <RuleAdmin />}

@@ -12,6 +12,7 @@ import re
 import secrets
 import threading
 import unittest
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -50,6 +51,7 @@ from app.shared_db import (
 from app.template_store import PostgresProposalTemplates
 from app.usage_quota import DuplicateAiRequest, QuotaExceeded, QuotaLimits
 from tests.test_intake import _Server, case_payload, make_app, send
+from tests.test_sample_cases import make_sample_app
 
 DOCS = Path(os.environ.get("DB_DOCS_DIR", "/repo/docs"))
 # 通常のbackendコンテナにも DB_HOST があるため、専用の目印（RUN_DB_TESTS）で切り替える。
@@ -1933,6 +1935,111 @@ class DbFlow(unittest.TestCase):
             ),
         )
         self.assertEqual((status, self.mock_calls), (422, []))
+
+    # --- 共有のサンプル案件（POST /api/sample-cases。1回の操作で1件） -------------
+
+    SAMPLE_LIKE = "CASE-%"
+
+    def sample_server(self, store=None):
+        server = _Server(make_sample_app(store or self.store, self.mock_calls))
+        server.__enter__()
+        self.addCleanup(server.__exit__)
+        return server
+
+    @staticmethod
+    def op_key(number):
+        """number を4で割った余りの型になる、小文字のUUID（決まった入力）。"""
+        return str(uuid.UUID(int=(number << 64) | number))
+
+    def case_id_of(self, key):
+        rows = self.rows(
+            "SELECT case_id FROM sample_case_operations WHERE operation_key = %s",
+            (key,),
+        )
+        return rows[0][0] if rows else None
+
+    def create_sample(self, server, key):
+        return send(
+            "POST",
+            f"{server.base_url}/api/sample-cases",
+            {},
+            {"Idempotency-Key": key},
+        )
+
+    def sample_counts(self):
+        return {
+            table: self.rows(
+                f"SELECT count(*) FROM {table} WHERE case_id LIKE %s",
+                (self.SAMPLE_LIKE,),
+            )[0][0]
+            for table in (
+                "review_cases",
+                "case_questions",
+                "case_results",
+                "case_checks",
+            )
+        }
+
+    def sample_state(self):
+        return (
+            self.rows(
+                "SELECT case_id, summary, user_data, inquiry_data FROM review_cases"
+                " WHERE case_id LIKE 'CASE-%%' ORDER BY case_id"
+            ),
+            self.rows(
+                "SELECT case_id, result_code, rule_id, recorded_by, recorded_at"
+                " FROM case_results WHERE case_id LIKE 'CASE-%%'"
+                " ORDER BY case_id"
+            ),
+            self.rows(
+                "SELECT case_id, question_code, answer, automated_answer"
+                " FROM case_checks WHERE case_id LIKE 'CASE-%%'"
+                " ORDER BY case_id, question_code"
+            ),
+        )
+
+    def expect_sample_rows(self, count):
+        """共有サンプルが count 件で、1件ごとに設問12・結果1・確認1がそろう。"""
+        self.assertEqual(
+            self.sample_counts(),
+            {
+                "review_cases": count,
+                "case_questions": 12 * count,
+                "case_results": count,
+                "case_checks": count,
+            },
+        )
+
+    def test_a_new_operation_saves_one_case_that_can_be_opened(self):
+        server = self.sample_server()
+        key = self.op_key(0)
+        status, body = self.create_sample(server, key)
+        self.assertEqual(
+            (status, body), (201, {"case_id": self.case_id_of(key), "created": True})
+        )
+        self.assertRegex(body["case_id"], r"^CASE-[0-9A-F]{8}$")
+        self.expect_sample_rows(1)  # 案件1・設問12・結果1・確認1
+        status, view = send("GET", f"{server.base_url}/api/cases/{body['case_id']}")
+        self.assertEqual(status, 200, view)
+        self.assertEqual(len(view["questions"]), 12)
+        self.assertEqual(self.mock_calls, [])  # HTTPモックは呼ばない
+
+    def test_resending_one_operation_does_not_duplicate_or_change_the_case(self):
+        server = self.sample_server()
+        key = self.op_key(3)  # 4つ目の型。ほかの型と同じく結果は未登録
+        self.create_sample(server, key)
+        before = self.sample_state()
+        status, body = self.create_sample(server, key)
+        self.assertEqual(
+            (status, body), (200, {"case_id": self.case_id_of(key), "created": False})
+        )
+        self.expect_sample_rows(1)  # 結果の行は未登録の枠として1件のまま
+        self.assertEqual(self.sample_state(), before)  # 保存済みの内容も変わらない
+        _, results, checks = before
+        self.assertEqual(len(results), 1)
+        self.assertIsNone(results[0][1])  # result_code は NULL（未審査）
+        self.assertEqual(len(checks), 1)
+        self.assertIn(checks[0][2], ("yes", "no"))  # A09は確認待ちではない
 
 
 if __name__ == "__main__":

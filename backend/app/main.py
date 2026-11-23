@@ -19,6 +19,7 @@ from app import (
     rule_admin,
     rule_store,
     rules,
+    sample_cases,
     shared_db,
     template_admin,
     template_store,
@@ -104,6 +105,7 @@ app.include_router(rule_admin.router)
 app.include_router(mock_api.router)
 app.include_router(intake.router)
 app.include_router(cases.router)
+app.include_router(sample_cases.router)
 app.include_router(rules.router)
 
 _SHA_PATTERN = re.compile(r"[0-9a-f]{40}")

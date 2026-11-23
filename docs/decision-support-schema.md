@@ -21,6 +21,14 @@
 
 回答は案件と設問の組につき1件で、案件の判定結果の行（`case_results`。受付時に作る）の子として持ちます。案件に出す設問は`case_questions`で固定し、回答は`case_questions`にある設問に対してだけ保存できます。同一案件の同じ設問で複数の取引やキーを個別に記録する必要があるかはレビューで決めます。
 
+### サンプル作成操作と案件ID
+
+新しいサンプル案件のIDは `CASE-` と8桁の大文字の16進数を合わせた13文字です。画面が操作IDのUUIDを生成し、サーバーが案件IDを別に採番します。再送を識別するための `sample_case_operations` には、この2つのIDだけを一対一で保存します。同じ操作の再送には保存済みの案件IDを使うため、案件が重複しません。
+
+対応行と案件・設問コピー・回答・判定は同じトランザクションで確定します。案件IDが既存案件と衝突した場合は対応行もロールバックし、採番をやり直します。実装は `backend/app/db_store.py` にあります。
+
+既存DBへの追加DDL、アプリロールの権限、切り替え時の制約と実機確認の状況は[開発・配布の手順](development-workflow.md#共有サンプル案件の作成post-apisample-cases)を参照してください。
+
 ### 振り返りの方法
 
 オペレータが過去の判定を見返すときは、次の順にたどります。
@@ -41,7 +49,7 @@
 
 ## DDL案
 
-Aurora DSQLでの適用時は、各`CREATE TABLE`を依存順（親から子へ。`review_cases`・`review_questions`・`decision_rules`、`case_questions`、`case_results`、`case_checks`、`shared_config_revisions`、`shared_proposals`、`processed_shared_proposals`、`proposal_templates`、`proposal_template_migrations`、`ai_usage_requests`、`ai_usage_counters`の順）に1文ずつ確定します。DSQLは1トランザクションにつき1つのDDL文を許容し、DDLとデータ登録を別トランザクションに分けます。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)・[DDLのトランザクション仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-ddl.html)
+Aurora DSQLでの適用時は、各`CREATE TABLE`を依存順（親から子へ。`review_cases`・`review_questions`・`decision_rules`、`case_questions`、`case_results`、`case_checks`、`sample_case_operations`、`shared_config_revisions`、`shared_proposals`、`processed_shared_proposals`、`proposal_templates`、`proposal_template_migrations`、`ai_usage_requests`、`ai_usage_counters`の順）に1文ずつ確定します。DSQLは1トランザクションにつき1つのDDL文を許容し、DDLとデータ登録を別トランザクションに分けます。 [AWSのCREATE TABLE仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/create-table-syntax-support.html)・[DDLのトランザクション仕様](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-ddl.html)
 
 ```sql
 CREATE TABLE review_cases (
@@ -111,6 +119,11 @@ CREATE TABLE case_checks (
     automated_answer text CHECK (automated_answer IN ('yes', 'no')),
     PRIMARY KEY (case_id, question_code),
     FOREIGN KEY (case_id, question_code) REFERENCES case_questions (case_id, question_code)
+);
+
+CREATE TABLE sample_case_operations (
+    operation_key text PRIMARY KEY CHECK (trim(operation_key) <> ''),
+    case_id text NOT NULL UNIQUE CHECK (trim(case_id) <> '')
 );
 
 CREATE TABLE shared_config_revisions (

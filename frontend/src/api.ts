@@ -92,6 +92,28 @@ export async function listCases(): Promise<CaseListRow[]> {
   }));
 }
 
+/** caseId は操作IDに対応して保存された案件ID。created は今回作成した場合に true。 */
+export type SampleCaseResult = { caseId: string; created: boolean };
+
+/**
+ * 操作IDのUUIDを付けて共有サンプルを1件作成する。同じ操作IDの再送は既存案件を返す。
+ * 通信失敗や応答の読み取り失敗では作成済みの場合もあるため、呼び出し側は同じIDで再試行する。
+ */
+export async function createSampleCase(operationId: string): Promise<SampleCaseResult> {
+  const response = await request("/api/sample-cases", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": operationId },
+    body: "{}",
+  });
+  try {
+    const r = (await response.json()) as { case_id: unknown; created: unknown };
+    if (typeof r.case_id !== "string" || typeof r.created !== "boolean") throw new Error("形式が違う");
+    return { caseId: r.case_id, created: r.created };
+  } catch {
+    throw new ApiError(0, "サーバーの応答を読み取れませんでした");
+  }
+}
+
 type ApiCase = {
   case_id: string;
   summary: string;

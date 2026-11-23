@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { getCase, listCases, listRules, type CaseListRow } from "./api";
+import { useEffect, useRef, useState } from "react";
+import { createSampleCase, describeError, getCase, listCases, listRules, proposalRequestId, type CaseListRow } from "./api";
 import type { Rule } from "./matching";
 import type { ReviewCase } from "./data/cases";
 import { getDemoQuestions, type DemoQuestionList } from "./questionsApi";
@@ -29,8 +29,58 @@ function useRemote<T>(load: () => Promise<T>, key: string): Remote<T> {
   return state.key === key ? state.value : { status: "loading" };
 }
 
-export function useCaseList(): Remote<CaseListRow[]> {
-  return useRemote(listCases, "list");
+/** サンプル案件の作成の状態と操作（useSampleCreation の戻り値）。 */
+export type SampleCreation = {
+  /** 作成APIが成功するたびに進む。一覧の取り直しの合図。 */
+  version: number;
+  creating: boolean;
+  notice: string | null;
+  /** 通知に表示する案件ID。 */
+  noticeCaseId: string | null;
+  error: string | null;
+  create: () => void;
+};
+
+/**
+ * 通信失敗時に同じ操作IDで再試行できるよう、Appの生存中は未完了の操作を保持する。
+ * 一覧を離れて戻っても引き継ぎ、成功後の次の作成には新しいIDを使う。
+ * ブラウザー全体の再読み込みやタブを閉じたあとは引き継がない。
+ */
+export function useSampleCreation(): SampleCreation {
+  const [version, setVersion] = useState(0);
+  const [creating, setCreating] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [noticeCaseId, setNoticeCaseId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const operationId = useRef<string | null>(null);
+  const create = async () => {
+    operationId.current ??= proposalRequestId();
+    setCreating(true);
+    setNotice(null);
+    setNoticeCaseId(null);
+    setError(null);
+    try {
+      const result = await createSampleCase(operationId.current);
+      operationId.current = null; // 次の押下は、新しい操作
+      setNotice(
+        result.created
+          ? `サンプル案件を1件作成しました（${result.caseId}）。`
+          : `この操作の案件（${result.caseId}）は作成済みでした。新しく作成した案件はありません。`,
+      );
+      setNoticeCaseId(result.caseId);
+      setVersion((v) => v + 1);
+    } catch (e) {
+      setError(describeError(e));
+    } finally {
+      setCreating(false);
+    }
+  };
+  return { version, creating, notice, noticeCaseId, error, create };
+}
+
+/** 案件の一覧。version を変えると、取り直す（サンプル案件の作成後など）。 */
+export function useCaseList(version = 0): Remote<CaseListRow[]> {
+  return useRemote(listCases, `list:${version}`);
 }
 
 /** デモの設問一覧（設問管理）。version を変えると、取り直す。 */

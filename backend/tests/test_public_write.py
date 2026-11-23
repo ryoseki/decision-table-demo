@@ -600,6 +600,10 @@ class TestInternalMockThroughGuard(unittest.TestCase):
                 ("PUT", "/api/intake/cases"),
                 ("POST", "/mock/v1/auto-answers/A09/../A10"),
                 ("POST", "/api/admin/other"),
+                # 共有サンプル案件は、固定のPOST（下の実配線のテスト）以外を開けない
+                ("PUT", "/api/sample-cases"),
+                ("DELETE", "/api/sample-cases"),
+                ("POST", "/api/sample-cases/reset"),
             ):
                 with self.subTest(method=method, path=path):
                     status, _ = send(method, server.base_url + path, {}, edge)
@@ -615,3 +619,31 @@ class TestInternalMockThroughGuard(unittest.TestCase):
                 {"X-Demo-Viewer-Ip": "192.0.2.1"},
             )
         self.assertEqual(status, 405)
+
+
+class TestSampleCasesThroughMain(unittest.TestCase):
+    """実際の app.main（ルーターの配線と書き込みガード）で、共有サンプルの作成を通す。
+
+    保存先だけを、DBなしのテスト用に差し替える（SQLはDB統合テストの受け持ち）。
+    """
+
+    def setUp(self):
+        from app import main
+        from tests.test_sample_cases import SampleStore
+
+        self.main = main
+        self.store = SampleStore()
+        original = main.app.state.case_store
+        main.app.state.case_store = self.store
+        self.addCleanup(setattr, main.app.state, "case_store", original)
+
+    def test_the_real_app_registers_the_route_and_serves_it_through_the_guard(self):
+        from uuid import uuid4
+
+        with _Server(self.main.app) as server:
+            # 公開環境と同じく、エッジの印（接続元IP）と依頼IDが付いた要求
+            headers = {"X-Demo-Viewer-Ip": "192.0.2.1", "Idempotency-Key": str(uuid4())}
+            url = server.base_url + "/api/sample-cases"
+            status, body = send("POST", url, None, headers)
+            self.assertEqual((status, body["created"]), (201, True))
+        self.assertEqual(len(self.store.cases), 1)

@@ -166,6 +166,9 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
 .app-nav a { color: var(--header-text); font-weight: 700; }
 .proposal-form { display: grid; gap: 8px; margin: 16px 0; max-width: 640px; }
 .proposal-form textarea { font: inherit; padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; color: var(--text); resize: vertical; }
+.sample-action { margin-top: 12px; }
+.sample-action .hint { margin: 6px 0 0; }
+.sample-action .error { margin-top: 8px; padding: 12px 16px; }
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 .btn-secondary { background: #fff; color: var(--accent); }
 .notice-ok { margin: 8px 0; padding: 8px 12px; border-left: 4px solid var(--accent); background: var(--accent-soft); font-weight: 700; }

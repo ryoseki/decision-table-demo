@@ -1,6 +1,6 @@
 // 実行: npm test（Vitest）。APIの呼び出しを、fetch のスタブで確認する（サーバーに接続しない）。
 import { afterEach, expect, test, vi } from "vitest";
-import { ApiError, describeError, getCase, listCases, listRules, saveJudgment, signedBody } from "./api";
+import { ApiError, createSampleCase, describeError, getCase, listCases, listRules, saveJudgment, signedBody } from "./api";
 import { apiCase, apiRow, stubFetch } from "./testing";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -228,4 +228,23 @@ test("POST・PUT: 実際に送る日本語のJSON文字列のUTF-8バイト列�
   // 読み取り・本文なしには付けない
   expect(await signedBody({ method: "GET" })).toEqual({ method: "GET" });
   expect(await signedBody({ method: "POST" })).toEqual({ method: "POST" });
+});
+
+test("サンプル案件の作成: 依頼ID（Idempotency-Key）と本文つきのPOSTをOAC用の署名ヘッダー付きで送り、応答を画面の形にする", async () => {
+  const key = "11111111-2222-4333-8444-555555555555";
+  const spy = stubFetch({
+    "POST /api/sample-cases": { status: 201, body: { case_id: "CASE-SAMPLE-0123456789ABCDEF", created: true } },
+  });
+  const result = await createSampleCase(key);
+  expect(result).toEqual({ caseId: "CASE-SAMPLE-0123456789ABCDEF", created: true });
+  const init = spy.mock.calls[0][1] as RequestInit;
+  expect(init.method).toBe("POST");
+  expect(init.body).toBe("{}");
+  const headers = new Headers(init.headers);
+  expect(headers.get("content-type")).toBe("application/json");
+  expect(headers.get("idempotency-key")).toBe(key);
+  // 空のJSONオブジェクト "{}" のSHA-256
+  expect(headers.get("x-amz-content-sha256")).toBe("44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a");
+  stubFetch({ "POST /api/sample-cases": { status: 200, body: { case_id: "CASE-SAMPLE-0123456789ABCDEF", created: false } } });
+  expect(await createSampleCase(key)).toEqual({ caseId: "CASE-SAMPLE-0123456789ABCDEF", created: false });
 });
