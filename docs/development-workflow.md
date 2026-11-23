@@ -14,9 +14,57 @@ Codexが案件別コピーで専用ブランチを作り、変更・検証・PR�
 | マージ承認者（人） | PRの差分と最新コミットのCI結果を確認し、マージを判断する |
 | 配布承認者（人） | 配布対象のSHA、検証先、復旧手順を確認して承認する（唯一の人が起動し承認する運用。後述） |
 
+## Symphonyの準備と起動
+
+標準の開発環境はWindowsのWSL 2のUbuntuです。コマンドは、クローンのルートをUbuntuのシェルで開いて実行します。
+
+**環境**
+- デスクトップの設定で`Agent environment`を`Windows Subsystem for Linux`に切り替え、アプリを再起動する。再起動後に`uname -sr`でLinuxであることを確認する。統合ターミナルのシェルは別の設定。（[Windowsの公式ガイド](https://learn.chatgpt.com/docs/app/windows)）
+- Windows側でクローンした場合は、WSLから同じフォルダーを開く（`wslpath -a`でパスを変換できる）。Ubuntuに`bwrap`がなければ`sudo apt install bubblewrap`で入れる。
+
+**準備確認**（Symphony v0.0.3、Codex 0.166.0のLinux x86_64版）
+
+```powershell
+pwsh -File scripts/Install-SymphonyRuntime.ps1   # PowerShell 7と tar が必要。配布物のSHA256を検証して .tools/ へ展開する
+```
+
+```bash
+bash scripts/symphony.sh check   # git、sed、sha256sum、Codex CLIのログインが必要
+```
+
+ログインが必要なら、`chmod u+x .tools/codex/codex-x86_64-unknown-linux-musl`のあと、同じバイナリに`login`を渡してログインし、準備確認をやり直す。この確認は、配布バイナリ、Codexのログイン参照とLinuxサンドボックス、SymphonyのCLIの読み込みだけを見る。Linearへの実接続、Issueの実行、アプリの動作は別に確認する。Windows側のクローンでは`pwsh -File scripts/Start-Symphony.ps1 -Check`でも確認できる。
+
+**LinearとSymphonyの認証**
+- 対象のLinearプロジェクトを選び、実行するIssueの成果物・受入条件・依存関係を確認する。Linear操作は、まずプラグインを使う。
+- Symphony用のLinear Personal API keyを用意する。チャットに貼らず、起動時の非表示入力を使う。プラグインの認証と、ローカルのSymphonyのAPIキーは別。
+- 状態名が`Todo`・`In Progress`・`In Review`と違う場合は、`WORKFLOW.md`とチームの運用をそろえてから始める。
+- 起動には、元リポジトリのコミット済みのHEADが必要。案件別コピーは`git clone`で作るため、元のフォルダーの未コミットの変更・ステージ済みの差分は引き継がれない。
+- 実行条件を満たす他のIssueがないことを確認し、最初の統合検証のIssueにだけ`symphony-pilot`を付けて`Todo`にする。
+
+**起動と停止**
+
+```bash
+SYMPHONY_LINEAR_PROJECT_SLUG='<slugId>' bash scripts/symphony.sh start
+```
+
+- `<slugId>`は、プロジェクトURL（`/<workspace>/project/<name>-<slugId>/overview`）の、名前の後ろの12桁の16進数。`LINEAR_API_KEY`が環境にないときは、非表示入力を求める（設定ファイルには保存しない）。CodexはWSL側の認証ファイル（既定は`~/.codex/auth.json`）を`.symphony/codex-home/`から参照する。
+- Windows側のクローンでは`pwsh -File scripts/Start-Symphony.ps1 -ProjectUrl '<Linearプロジェクトの URL>'`でも起動できる（Windows側のCodex認証を参照する）。
+- 起動スクリプトが`.symphony/WORKFLOW.md`に実行設定を作る（元は、ルートの[WORKFLOW.md](../WORKFLOW.md)）。ダッシュボードは`http://localhost:4090`。`symphony-pilot`付きで`Todo`か`In Progress`のIssueが1件ずつ実行される。
+- 停止はCtrl+C。`max_turns: 5`は1回の実行内の連続ターンの上限で、総実行回数の上限ではない（実行対象の状態のままのIssueは再実行される）。
+
+**成果物の場所とレビュー**
+
+| 場所 | 内容 |
+| --- | --- |
+| `.symphony/workspaces/` | Issueごとの案件別コピー（変更した文書・コード） |
+| `.symphony/log/` | Symphonyの実行ログ |
+| Linearの`Symphony workpad`コメント | 計画、変更ファイルの相対パス、実施した検証、残る質問 |
+
+レビューでは、Issue番号で案件別コピーを探し、workpadの相対パスから差分を開き、検証結果と残る質問を受入条件と照合する。`In Review`は自動実行の対象外で、再実行されない。案件別コピーの結果は、元の作業フォルダーへ自動では反映されない（次節のとおり、専用ブランチをpushしてPRで取り込む）。
+
 ## 実行とレビュー待ち
 
-1. 人が前提を確認したIssueを、`symphony-pilot`付きの`Todo`にする。起動・停止は[README](../README.md#起動停止)に従う。
+1. 人が前提を確認したIssueを、`symphony-pilot`付きの`Todo`にする。起動・停止は上の「起動と停止」に従う。
 2. Codexは既存のworkpadを読んで`In Progress`にし、案件別コピー内で専用の`codex/`ブランチを使う。必要な検証後にpushし、PRを作る。
 3. 同じworkpadに、PRのURL、変更ファイルの相対パス、基点と成果のコミット、検証結果と未実施の確認を記録する。認証情報、絶対パス、端末固有の情報は書かない。
 4. GitHubに保存されたことを確認して`In Review`へ移す。必要な認証・権限がなければ、最後に成功した段階と再開条件を残して`In Review`へ渡す。修正が必要なら、人が指摘を記録して`Todo`へ戻す。
@@ -28,6 +76,16 @@ Codexが案件別コピーで専用ブランチを作り、変更・検証・PR�
 PRには、目的・変更点、対象Issueとworkpad、基点／成果／PRのSHA、確認コマンド・結果、未確認事項を書きます。内部リンクはPRとLinearに置き、公開文書には書きません。
 
 `main`は`protect-main`と`require-ci-main`のルールセットで保護され、必須チェックはReact + ViteのESLintとビルド、FastAPIのRuff lintと整形チェック、E2Eのスモークテストです。人が最新のPRコミットで全チェックの成功と差分を確認してからマージします。未実行・スキップ・保留は成功とみなしません。
+
+失敗時は、PRのチェックから該当ジョブのログを開く。E2Eの失敗レポートとトレースは、そのrunのArtifacts（`e2e-report`、14日保持）から取れる。再実行はActionsの画面から行い、初回の失敗の記録を残す。`GITHUB_TOKEN`は読み取り専用で、アクションはコミットSHAで固定している。
+
+`.github/workflows/ci.yml`は、PRの更新と`main`へのpushで、新規チェックアウトから依存を入れて次の3ジョブを実行します。
+
+| ジョブ | 内容 |
+| --- | --- |
+| `frontend` | `npm ci`、ESLint、ビルド（Node.js 26.13.0） |
+| `backend` | ハッシュ検証つきの依存導入、Ruffのlintと整形チェック（書き換えず合否だけ。Python 3.14.10） |
+| `e2e` | ローカルと同じ`bash scripts/e2e.sh` |
 
 失敗時の戻し先: 変更が原因なら人が`Todo`へ戻して同じPRを直す。テスト基盤・CI設定の問題なら子課題に記録して依存するPRを保留する（失敗チェックの無効化で通過扱いにしない）。一時的な基盤障害なら原因と再実行理由をPRに記録する。
 

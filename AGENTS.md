@@ -16,12 +16,12 @@
 ## 開発環境
 
 - WindowsではWSL 2のUbuntuを標準の開発環境とする。デスクトップの `Agent environment` を `Windows Subsystem for Linux` に切り替え、アプリを再起動する。切り替え後のエージェントから `uname -sr` を実行し、Linuxカーネルを確認する。
-- Git、Symphony、BetterleaksはWSLのシェルから実行する。クローン先のルートを開き、Symphonyを起動するときは利用者が選んだLinearプロジェクトのURLを使う。初回準備とWindowsからの起動手順は [README.md](README.md) を参照する。
+- Git、Symphony、BetterleaksはWSLのシェルから実行する。クローン先のルートを開き、Symphonyを起動するときは利用者が選んだLinearプロジェクトのURLを使う。初回準備とWindowsからの起動手順は [docs/development-workflow.md](docs/development-workflow.md#symphonyの準備と起動) を参照する。
 - Symphonyの準備確認は、配布バイナリを配置したクローン先のルートで `bash scripts/symphony.sh check` を実行する。案件別コピーには配布バイナリがない。準備確認とLinearへの実接続試験は区別する。
 
 ## 開発の進め方（層ごとのテストと完了の定義）
 
-詳細、層ごとの標準コマンド、着手時チェックの観点は [docs/testing-policy.md](docs/testing-policy.md)、起動手順は [README.md](README.md) を参照する。
+詳細、層ごとの標準コマンド、着手時チェックの観点は [docs/testing-policy.md](docs/testing-policy.md)、アプリの起動手順は [README.md](README.md) を参照する。
 
 - 機能は層ごとに確認する。順序は、API契約（DBなし）→ フロント単体（APIはモック）→ E2E（一連の流れ1本）→ インフラのつなぎ込み。前の段階が赤いままでは、次へ進まない。
 - 標準コマンドは、`docker compose run --rm --no-deps --build backend python -m unittest discover -s tests -t .`（API契約）と `docker compose run --rm --no-deps --build frontend npm test`（フロント単体）。`docker compose up` だけで、DB付きでアプリが動く。

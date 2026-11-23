@@ -19,6 +19,19 @@
 - フロントの単体テストは、Vitest（jsdom、Testing Library）で、`frontend/src` 配下の `*.test.ts` と `*.test.tsx` を自動で拾う。画面の部品（`.tsx`）は、描画して見える内容を確認する。Node.js標準のテスト機能は `.tsx`（JSX）を扱えないため、Vitestを採用した。依存は、公開から2週間以上経った版を、正確な版で固定する。
 - `docker compose` を使うコマンドは、リポジトリのルートで実行する。
 
+### E2Eの実行
+
+```bash
+bash scripts/e2e.sh                  # 通常の実行（成功するはず）
+bash scripts/e2e.sh --force-failure  # /health の期待値を変えて、意図的に失敗させる
+```
+
+専用のプロジェクト名（`decision-table-demo-e2e`。2つの作業コピーで同時に動かすときは`E2E_PROJECT`で変える）で、frontend（Vite）とbackend（FastAPI）をComposeで起動し、ヘルスチェックを待ってからPlaywright（`e2e/`）を実行する。終了後は、そのプロジェクトのコンテナとネットワークだけを削除する。ホストのポートは公開しないので、通常の開発環境（`docker compose up`）と同時に動かせる。成功は終了コード0。失敗の原因は`e2e/playwright-report/index.html`と`e2e/test-results/`のトレースで見る。CIも同じコマンドを呼ぶ。
+
+- `e2e/tests/smoke.spec.ts`は、初期画面の表示と`GET /health`だけを確認する環境のスモークテスト。業務のE2E（`review.spec.ts`、`question-admin.spec.ts`、`rule-admin.spec.ts`、`sample-cases.spec.ts`）は、画面・API・DBを通して確認し、結果はスモークとは別に記録する。実ブラウザが要らない挙動は、部品テスト（`frontend/src/*.test.tsx`）で確認する。
+- 設問の廃止のE2Eは、「参照がなく、回答を持つ設問」を持つ案件が必要だが、通常のデモデータにもアプリの経路にもない。E2Eの実行時だけ、`compose.e2e.yaml`の`e2e-fixture`サービス（`e2e/fixtures/seed_retirement_case.py`）が、E2E専用のDBに架空のデータを入れる。
+- `sample-cases.spec.ts`は、他のspecの案件の影響を受けないよう、E2E DB内の専用の空のスキーマを使う。
+
 ## DB統合テストの方針
 
 - ローカルのPostgreSQLで確認するのは、**Aurora DSQLでも成り立つこと**だけ。SQLの通過、制約、保存した値の再表示、基本のロールバックなど。
@@ -67,6 +80,18 @@ PythonとTypeScriptのソースを、標準ルール（`p/default`）で検査�
 - 対象は `backend`、`db`、`e2e`、`frontend`、`infra`、`scripts`、`tests` の `*.py`・`*.ts`・`*.tsx`。`docs/`、`.github/`、設定ファイルは対象外。Semgrepの既定の除外により、一部のテストコードが除外されうる。
 - **終了コードだけで「問題なし」と報告しない。** 終了コード1は、検出ありだけでなく、Docker／Composeの失敗も意味しうる。完了したスキャンの概要（`Scanning N files` の言語ごとの件数にPythonとTypeScriptが含まれる、エラーや `Parsed lines` の欠けがない）がある実行だけをスキャンとして扱い、ない実行は未実行・失敗として報告する。検出は、該当の行を読んで、対応が要る・既存・文脈しだい・誤検出に分ける。
 - 「検出なし」は安全を意味しない（標準ルールで、ファイルをまたぐ流れは追わない）。秘密情報の検査（`bash scripts/scan-secrets.sh`）は、Semgrepで置き換えず実行する。結果は「テスト不足のレビュー」には渡さない。
+
+### 秘密情報の検査（Betterleaks）
+
+Ubuntuのターミナルで、クローンのルートから実行する。初回は`curl`と`tar`でLinux v1.10.0の配布物のSHA256を検証し、`.tools/betterleaks/`に置く。
+
+```bash
+bash scripts/scan-secrets.sh           # Git管理下のファイルと、ignoreされていない未追跡ファイル
+bash scripts/scan-secrets.sh staged    # ステージ済みの差分
+bash scripts/scan-secrets.sh history   # Gitの履歴
+```
+
+`.tools/`と`.symphony/`は作業ツリーの検査から除く。検出値はマスクされ、外部サービスでの有効性の確認は無効。終了コード0は検出なし、10は検出あり。Windowsからは`pwsh -NoProfile -File scripts/Scan-Secrets.ps1`でも作業ツリーを検査できる。
 
 ## テスト不足のレビュー（実装タスク）
 
