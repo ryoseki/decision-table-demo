@@ -1,7 +1,7 @@
 # Amazon Bedrock の実接続を、手元で試すときだけ重ねる設定（人の確認用）。
 #   docker compose -f compose.yaml -f compose.bedrock.yaml up --build
 # E2E（scripts/e2e.sh）・CI・公開環境では使わない。既定（compose.yaml だけ）は、モックのまま。
-# 詳細は docs/bedrock-connection.md。
+# 詳細は docs/aws-environment.md。
 #
 # 課金の回避を防ぐため、frontend・backend のポートを、この端末の 127.0.0.1 だけに限る。
 # 基本の compose.yaml は、全ホスト（0.0.0.0）へ公開するため、`ports` を !override で置き換える

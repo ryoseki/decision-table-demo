@@ -43,7 +43,7 @@ class StoreBusy(Exception):
     """
 
 
-# --- 管理者AIの試作（設問の追加案）。docs/admin-question-proposal-demo.md ---
+# --- 管理者AIの試作（設問の追加案）。docs/admin-proposal-demo.md ---
 
 
 class InvalidProposal(Exception):
