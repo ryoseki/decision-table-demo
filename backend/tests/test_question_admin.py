@@ -48,7 +48,13 @@ class FakeProposer:
         return self.output
 
 
-def a13(text: str = "対象期間にAPIキーが失効されたか？", id_: str = "A13") -> dict:
+def a13(
+    text: str = (
+        "Was an API key revoked during the target period? / "
+        "対象期間にAPIキーが失効されたか？"
+    ),
+    id_: str = "A13",
+) -> dict:
     return {"operation": "add_question", "question": {"id": id_, "text": text}}
 
 
@@ -167,8 +173,18 @@ class TestInvalidModelOutput(unittest.TestCase):
         "IDの重複": a13(id_="A12"),
         "文言が空": a13(text="  "),
         "文言が文字列でない": a13(text=["x"]),
-        "文言の重複": a13(text="対象期間にAPIキーが新しく発行されたか？"),
-        "文言の重複（前後空白）": a13(text=" 対象期間にAPIキーが新しく発行されたか？ "),
+        "文言の重複": a13(
+            text=(
+                "Was an API key newly issued during the target period? / "
+                "対象期間にAPIキーが新しく発行されたか？"
+            )
+        ),
+        "文言の重複（前後空白）": a13(
+            text=(
+                " Was an API key newly issued during the target period? / "
+                "対象期間にAPIキーが新しく発行されたか？ "
+            )
+        ),
         "文言が長すぎる": a13(text="あ" * 201),
         "文言に制御文字": a13(text="対象期間\nにAPIキーが失効されたか？"),
     }

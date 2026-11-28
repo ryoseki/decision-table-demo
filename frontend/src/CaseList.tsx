@@ -47,68 +47,68 @@ export default function CaseList({
   return (
     <section aria-labelledby="list-title">
       <div className="page-head">
-        <h2 id="list-title" tabIndex={-1}>審査対象一覧</h2>
-        <p className="lead">受領したアカウント乗っ取りの申告を確認します。</p>
+        <h2 id="list-title" tabIndex={-1}>Cases to review</h2>
+        <p className="lead">Review the account issues reported by users.</p>
         <div className="sample-action">
           <button type="button" className="btn" data-testid="create-samples" disabled={creating} aria-busy={creating} onClick={() => createSample()}>
-            {creating ? "作成中…" : "サンプル案件を作成"}
+            {creating ? "Creating…" : "Create sample case"}
           </button>
-          <p className="hint">押すたびに、架空の案件を1件追加します。案件は利用者全員で共有します。</p>
+          <p className="hint">Each click adds one fictional case. Cases are shared by all users.</p>
           {sampleNotice !== null && (
             <p className="notice-ok" data-testid="sample-notice" aria-live="polite" title={noticeCaseId ?? undefined}>{sampleNotice}</p>
           )}
           {sampleError !== null && (
             <div className="error sample-error" role="alert" data-testid="sample-error">
-              <p className="empty-title">サンプル案件を作成できませんでした</p>
+              <p className="empty-title">Could not create the sample case</p>
               <p>{sampleError}</p>
-              <p>もう一度「サンプル案件を作成」を押して、再試行できます。同じ操作の再試行なので、案件は重複しません。</p>
+              <p>Press "Create sample case" again to retry. It retries the same operation, so the case will not be duplicated.</p>
             </div>
           )}
         </div>
       </div>
 
       {remote.status === "loading" && (
-        <p className="count" role="status" data-testid="list-loading">読み込み中…</p>
+        <p className="count" role="status" data-testid="list-loading">Loading…</p>
       )}
       {remote.status === "error" && (
         <div className="error" role="alert" data-testid="list-error">
-          <p className="empty-title">案件の一覧を取得できませんでした</p>
+          <p className="empty-title">Could not retrieve the case list</p>
           <p>{describeError(remote.error)}</p>
         </div>
       )}
       {remote.status === "ok" && (<>
       <div className="toolbar" role="search">
-        <label className="sr-only" htmlFor="case-search">案件ID・ユーザーID・申告内容で検索</label>
+        <label className="sr-only" htmlFor="case-search">Search by case ID, user ID, or reported issue</label>
         <input
           id="case-search"
           className="search"
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="案件ID・ユーザーID・申告内容"
+          placeholder="Case ID / user ID / reported issue"
         />
-        <label className="sr-only" htmlFor="case-status">状態</label>
+        <label className="sr-only" htmlFor="case-status">Status</label>
         <select
           id="case-status"
           value={status}
           onChange={(e) => setStatus(e.target.value as CaseStatus | "all")}
         >
-          <option value="all">すべての状態</option>
+          <option value="all">All statuses</option>
           {caseStatuses.map((s) => (
             <option key={s} value={s}>{s}</option>
           ))}
         </select>
         <p className="count" role="status">
-          {filtered.length}件を表示（全{cases.length}件）
+          Showing {filtered.length} of {cases.length} cases
         </p>
       </div>
 
       {filtered.length === 0 ? (
         <div className="empty" data-testid="empty-list">
-          <p className="empty-title">条件に合う案件がありません</p>
-          <p>検索語を変えるか、状態の絞り込みを解除してください。</p>
+          <p className="empty-title">No cases match the conditions</p>
+          <p>Change the search words or clear the status filter.</p>
           {filtering && (
-            <button type="button" className="btn" onClick={reset}>条件をクリア</button>
+            <button type="button" className="btn" onClick={reset}>Clear filters</button>
           )}
         </div>
       ) : (
@@ -116,26 +116,26 @@ export default function CaseList({
           <table className="case-table" role="table">
             <thead role="rowgroup">
               <tr role="row">
-                <th scope="col" role="columnheader">案件</th>
-                <th scope="col" role="columnheader">対象</th>
-                <th scope="col" role="columnheader">申告内容</th>
-                <th scope="col" role="columnheader">状態</th>
-                <th scope="col" role="columnheader">操作</th>
+                <th scope="col" role="columnheader">Case</th>
+                <th scope="col" role="columnheader">User</th>
+                <th scope="col" role="columnheader">Reported issue</th>
+                <th scope="col" role="columnheader">Status</th>
+                <th scope="col" role="columnheader">Action</th>
               </tr>
             </thead>
             <tbody role="rowgroup">
               {filtered.map((c) => (
                 <tr key={c.caseId} className="case-row" role="row">
-                  <th scope="row" role="rowheader" className="case-id" data-label="案件" title={c.caseId}>{c.caseId}</th>
-                  <td role="cell" data-label="対象">user_id {c.userId}</td>
-                  <td role="cell" data-label="申告内容">
+                  <th scope="row" role="rowheader" className="case-id" data-label="Case" title={c.caseId}>{c.caseId}</th>
+                  <td role="cell" data-label="User">user_id {c.userId}</td>
+                  <td role="cell" data-label="Reported issue">
                     <span className="case-summary">{c.summary}</span>
                     <AnswerCounts counts={c.counts} />
                   </td>
-                  <td role="cell" data-label="状態"><StatusBadge status={statusOf(c)} /></td>
+                  <td role="cell" data-label="Status"><StatusBadge status={statusOf(c)} /></td>
                   <td role="cell" className="op">
                     <a className="btn open" href={detailHref(c.caseId)}>
-                      審査を開く<span className="sr-only">（{c.caseId}）</span>
+                      Open review <span className="sr-only">({c.caseId})</span>
                     </a>
                   </td>
                 </tr>

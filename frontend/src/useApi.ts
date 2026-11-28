@@ -64,8 +64,8 @@ export function useSampleCreation(): SampleCreation {
       operationId.current = null; // 次の押下は、新しい操作
       setNotice(
         result.created
-          ? `サンプル案件を1件作成しました（${result.caseId}）。`
-          : `この操作の案件（${result.caseId}）は作成済みでした。新しく作成した案件はありません。`,
+          ? `Created one sample case (${result.caseId}).`
+          : `The case for this operation (${result.caseId}) had already been created. No new case was created.`,
       );
       setNoticeCaseId(result.caseId);
       setVersion((v) => v + 1);

@@ -93,7 +93,11 @@ class FakeClient:
 
 
 def add_question_json(
-    id_: str = "A13", text: str = "対象期間にAPIキーが失効されたか？"
+    id_: str = "A13",
+    text: str = (
+        "Was an API key revoked during the target period? / "
+        "対象期間にAPIキーが失効されたか？"
+    ),
 ):
     return json.dumps(
         {"operation": "add_question", "question": {"id": id_, "text": text}},
@@ -204,7 +208,7 @@ class TestSettings(unittest.TestCase):
                     bedrock_proposer.settings_from_env(
                         {**ENV, "BEDROCK_MAX_OUTPUT_TOKENS": bad}
                     )
-                self.assertIn("整数", str(caught.exception))
+                self.assertIn("integer", str(caught.exception))
         whole = bedrock_proposer.settings_from_env(
             {**ENV, "BEDROCK_MAX_OUTPUT_TOKENS": "256.0"}
         )
@@ -515,7 +519,7 @@ class TestQuestionApiWithBedrock(BedrockApiTestCase):
         self.assertEqual(self.decide("question", added["proposal_id"], "yes")[0], 200)
 
         client.response = reply(RETIRE_A13_JSON)
-        status, first = self.post("question-proposals", "設問A13を廃止して")
+        status, first = self.post("question-proposals", "Deactivate question A13")
         self.assertEqual(status, 201)
         self.assertEqual(first["kind"], "retire")
         self.assertEqual(first["source"], EXPECTED_SOURCE)
@@ -529,7 +533,7 @@ class TestQuestionApiWithBedrock(BedrockApiTestCase):
         self.assertIs(declined["mock"], False)
         self.assertNotIn("retired", declined["questions"][-1])
         # Yes: 廃止する（設問文は残る）。応答は実接続の生成元のまま。
-        _, second = self.post("question-proposals", "設問A13を廃止して")
+        _, second = self.post("question-proposals", "Deactivate question A13")
         self.assertEqual(second["source"], EXPECTED_SOURCE)
         status, applied = self.decide("question", second["proposal_id"], "yes")
         self.assertEqual((status, applied["applied"]), (200, True))
@@ -540,17 +544,25 @@ class TestQuestionApiWithBedrock(BedrockApiTestCase):
 
     def test_real_output_goes_through_the_same_validation(self) -> None:
         for output, expect in (
-            (add_question_json(id_="A05"), "重複"),  # 既存のID
+            (add_question_json(id_="A05"), "duplicate"),  # 既存のID
             (add_question_json(id_="A20"), "A13"),  # 追加できるのは次のID
             (
-                add_question_json(text="問い合わせにあったログインは成功したか？"),
-                "重複",
+                add_question_json(
+                    text=(
+                        "Did the login mentioned in the inquiry succeed? / "
+                        "問い合わせにあったログインは成功したか？"
+                    )
+                ),
+                "duplicate",
             ),
-            (add_question_json(text=""), "空"),
-            ('{"operation": "add_question", "question": {"id": "A13"}}', "形式"),
-            ('{"operation": "retire_question", "question_id": "A99"}', "存在しません"),
-            ('{"operation": "delete_everything"}', "形式"),
-            ('{"operation": "none", "question": {}}', "追加だけ"),
+            (add_question_json(text=""), "empty"),
+            ('{"operation": "add_question", "question": {"id": "A13"}}', "format"),
+            (
+                '{"operation": "retire_question", "question_id": "A99"}',
+                "does not exist",
+            ),
+            ('{"operation": "delete_everything"}', "format"),
+            ('{"operation": "none", "question": {}}', "only add"),
         ):
             with self.subTest(output=output):
                 self.make(FakeClient(reply(output)))
@@ -594,7 +606,7 @@ class TestQuestionApiWithBedrock(BedrockApiTestCase):
                 self.assertNotIn("proposal_id", body)
                 self.assertNotIn("source", body)
                 self.assertNotIn(SDK_MARKER, json.dumps(body, ensure_ascii=False))
-                self.assertNotIn("モック", body["detail"])  # モックの応答ではない
+                self.assertNotIn("mock", body["detail"])  # モックの応答ではない
                 self.assertEqual(len(client.calls), 1)  # 再試行しない
                 self.assertEqual(len(self.get("questions")["questions"]), 12)
 
@@ -621,7 +633,7 @@ class TestRuleApiWithBedrock(BedrockApiTestCase):
         self,
     ) -> None:
         self.make(FakeClient(reply(REMOVE_R03_JSON)))
-        status, first = self.post("rule-proposals", "ルールR03を削除して")
+        status, first = self.post("rule-proposals", "Remove rule R03")
         self.assertEqual(status, 201)
         self.assertEqual(first["kind"], "remove")
         self.assertEqual(first["source"], EXPECTED_SOURCE)
@@ -634,7 +646,7 @@ class TestRuleApiWithBedrock(BedrockApiTestCase):
         self.assertIs(declined["mock"], False)
         self.assertEqual(len(declined["rules"]), 3)
         # Yes: 削除する。応答は実接続の生成元のまま。
-        _, second = self.post("rule-proposals", "ルールR03を削除して")
+        _, second = self.post("rule-proposals", "Remove rule R03")
         self.assertEqual(second["source"], EXPECTED_SOURCE)
         status, applied = self.decide("rule", second["proposal_id"], "yes")
         self.assertEqual((status, applied["applied"]), (200, True))
@@ -645,13 +657,19 @@ class TestRuleApiWithBedrock(BedrockApiTestCase):
 
     def test_real_output_goes_through_the_same_validation(self) -> None:
         for output, expect in (
-            (add_rule_json({"A99": "yes"}), "設問A99は存在しません"),  # 参照する設問
-            (add_rule_json({"A09": "maybe"}), "yes か no"),
-            (add_rule_json({"A09": "yes"}, result="delete_account"), "結果コード"),
+            (
+                add_rule_json({"A99": "yes"}),
+                "Question A99 does not exist",
+            ),  # 参照する設問
+            (add_rule_json({"A09": "maybe"}), "yes or no"),
+            (add_rule_json({"A09": "yes"}, result="delete_account"), "result code"),
             (add_rule_json({"A09": "yes"}, id_="R09"), "R04"),  # 追加できるID
-            (add_rule_json({}), "条件"),
-            ('{"operation": "remove_rule", "rule_id": "R77"}', "存在しません"),
-            ('{"operation": "none", "rule": {}}', "追加・削除・条件の更新だけ"),
+            (add_rule_json({}), "conditions"),
+            ('{"operation": "remove_rule", "rule_id": "R77"}', "does not exist"),
+            (
+                '{"operation": "none", "rule": {}}',
+                "only add, remove, and condition updates",
+            ),
         ):
             with self.subTest(output=output):
                 self.make(FakeClient(reply(output)))
@@ -681,7 +699,7 @@ class TestRuleApiWithBedrock(BedrockApiTestCase):
         )
         status, body = self.post("rule-proposals", "同じルールを追加して")
         self.assertEqual(status, 422)
-        self.assertIn("重複", body["detail"])
+        self.assertIn("duplicate", body["detail"])
 
     def test_connection_failures_are_errors_and_leave_the_list_unchanged(self) -> None:
         for error, reason in TestFailureClassification.CASES:
@@ -745,7 +763,7 @@ class TestRuleApiWithBedrock(BedrockApiTestCase):
         before = self.get("rules")
         status, body = self.post("rule-proposals", "R04にA09がYesを追加して")
         self.assertEqual(status, 422)
-        self.assertIn("更新ではない案", body["detail"])
+        self.assertIn("is not an update", body["detail"])
         self.assertNotIn("proposal_id", body)
         self.assertEqual(self.get("rules"), before)
 
@@ -971,7 +989,7 @@ class TestMockSourceIsReported(unittest.TestCase):
                 {"prompt": "追加"},
             )
         self.assertEqual(status, 502)
-        self.assertIn("モック", body["detail"])
+        self.assertIn("mock", body["detail"])
 
 
 if __name__ == "__main__":

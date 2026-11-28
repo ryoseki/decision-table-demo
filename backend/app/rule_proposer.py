@@ -10,13 +10,18 @@ from typing import Any
 
 from app.domain import InvalidProposal
 from app.question_validation import DemoQuestion
-from app.rule_validation import DemoRule, read_update_intent
+from app.rule_validation import DemoRule, mentions_addition, read_update_intent
 
 _RESULT_KEYWORDS = (
     ("アカウント削除", "account_deletion"),
+    ("account deletion", "account_deletion"),
     ("一時凍結", "account_suspension"),
+    ("account suspension", "account_suspension"),
+    ("suspension", "account_suspension"),
     ("問題なし", "no_issue"),
+    ("no issue", "no_issue"),
     ("注意", "caution"),
+    ("caution", "caution"),
 )
 
 
@@ -39,14 +44,22 @@ class MockRuleProposer:
         - それ以外: 操作のない出力（検証で拒否される）。
         """
         none = {"operation": "none", "rule": {}}
-        if "ルール" not in prompt and not re.search(r"R[0-9]{2,}", prompt):
+        if (
+            "ルール" not in prompt
+            and not re.search(r"\brules?\b", prompt, re.IGNORECASE)
+            and not re.search(r"R[0-9]{2,}", prompt)
+        ):
             return none
         # 結果の名前（アカウント削除）は、削除の操作と見なさない。
         # 名前を除いた文で、操作を判断する。
         operation_text = prompt
         for word, _ in _RESULT_KEYWORDS:
-            operation_text = operation_text.replace(word, "")
-        if "削除" in operation_text:
+            operation_text = re.sub(
+                re.escape(word), "", operation_text, flags=re.IGNORECASE
+            )
+        if "削除" in operation_text or re.search(
+            r"\b(?:delete|remove)\b", operation_text, re.IGNORECASE
+        ):
             found = re.search(r"R[0-9]{2,}", prompt)
             if found:
                 return {"operation": "remove_rule", "rule_id": found.group()}
@@ -54,7 +67,9 @@ class MockRuleProposer:
         conditions = {
             question_id: answer.lower()
             for question_id, answer in re.findall(
-                r"(A[0-9]{2})が(Yes|No)", prompt, flags=re.IGNORECASE
+                r"(A[0-9]{2})(?:が|\s+is\s+|\s*=\s*)(Yes|No)",
+                prompt,
+                flags=re.IGNORECASE,
             )
         }
         # 更新と読めるかは、検証と同じ読み取り（read_update_intent）で決める。
@@ -68,9 +83,10 @@ class MockRuleProposer:
                 "rule_id": intent.rule_ids[0],
                 "add_conditions": intent.conditions,
             }
-        if "追加" in prompt and conditions:
+        if mentions_addition(prompt) and conditions:
             result_code = next(
-                (code for word, code in _RESULT_KEYWORDS if word in prompt), "caution"
+                (code for word, code in _RESULT_KEYWORDS if word in prompt.lower()),
+                "caution",
             )
             return {
                 "operation": "add_rule",

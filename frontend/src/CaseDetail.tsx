@@ -15,7 +15,7 @@ function openState(answers: AnswerMap, rules: readonly Rule[]): Record<string, b
 }
 
 const backLink = (
-  <a className="back" href="#/"><span aria-hidden="true">←</span> 一覧へ戻る</a>
+  <a className="back" href="#/"><span aria-hidden="true">←</span> Back to list</a>
 );
 
 export default function CaseDetail({ caseId }: { caseId: string }) {
@@ -26,7 +26,7 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
     return (
       <section aria-busy="true">
         {backLink}
-        <p role="status" data-testid="case-loading">案件を読み込み中…</p>
+        <p role="status" data-testid="case-loading">Loading case…</p>
       </section>
     );
   }
@@ -35,9 +35,9 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
       <section aria-labelledby="err-title">
         {backLink}
         <div className="error" role="alert" data-testid="case-error">
-          <h2 id="err-title" tabIndex={-1}>案件を取得できませんでした</h2>
+          <h2 id="err-title" tabIndex={-1}>Could not retrieve the case</h2>
           <p>{describeError(remote.error)}</p>
-          <a className="btn" href="#/">一覧へ戻る</a>
+          <a className="btn" href="#/">Back to list</a>
         </div>
       </section>
     );
@@ -45,11 +45,11 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
   if (remote.status === "error") {
     return (
       <section aria-labelledby="err-title">
-        <a className="back" href="#/"><span aria-hidden="true">←</span> 一覧へ戻る</a>
+        <a className="back" href="#/"><span aria-hidden="true">←</span> Back to list</a>
         <div className="error" role="alert" data-testid="case-not-found">
-          <h2 id="err-title" tabIndex={-1}>案件を表示できません</h2>
-          <p>案件ID「{caseId}」の案件が見つかりませんでした。一覧から案件を選び直してください。</p>
-          <a className="btn" href="#/">一覧へ戻る</a>
+          <h2 id="err-title" tabIndex={-1}>Cannot display the case</h2>
+          <p>No case with case ID "{caseId}" was found. Choose a case from the list again.</p>
+          <a className="btn" href="#/">Back to list</a>
         </div>
       </section>
     );
@@ -59,9 +59,9 @@ export default function CaseDetail({ caseId }: { caseId: string }) {
       <section aria-labelledby="err-title">
         {backLink}
         <div className="error" role="alert" data-testid="rules-error">
-          <h2 id="err-title" tabIndex={-1}>照合に使うルールを取得できませんでした</h2>
+          <h2 id="err-title" tabIndex={-1}>Could not retrieve the rules used for matching</h2>
           <p>{describeError(rulesRemote.error)}</p>
-          <a className="btn" href="#/">一覧へ戻る</a>
+          <a className="btn" href="#/">Back to list</a>
         </div>
       </section>
     );
@@ -171,35 +171,35 @@ export function Review({
 
   return (
     <section aria-labelledby="detail-title">
-      <a className="back" href="#/"><span aria-hidden="true">←</span> 一覧へ戻る</a>
+      <a className="back" href="#/"><span aria-hidden="true">←</span> Back to list</a>
 
       <div className="detail-head">
         <div>
-          <h2 id="detail-title" tabIndex={-1}>{c.summary}<span className="sr-only">（{c.caseId}）</span></h2>
-          <p className="sub-row">{c.caseId} ／ user_id {c.userId}</p>
+          <h2 id="detail-title" tabIndex={-1}>{c.summary} <span className="sr-only">({c.caseId})</span></h2>
+          <p className="sub-row">{c.caseId} / user_id {c.userId}</p>
         </div>
         <div className="detail-status">
           <StatusBadge status={status} />
-          {saved !== "" && <span className="result">登録済みの結果: {saved}</span>}
+          {saved !== "" && <span className="result">Registered result: {saved}</span>}
         </div>
       </div>
 
       <div className="inquiry">
-        <h3>申告内容</h3>
+        <h3>Reported issue</h3>
         <p>{c.inquiry}</p>
       </div>
 
       <p className="note note-top" data-testid="save-note">
         {locked
-          ? "この案件は判定を登録済みです。保存済みの設問文・回答・結果を確認できます（閲覧のみ。回答の変更や再保存はできません）。"
-          : "結果と、変更した回答は、［判定する］で保存されます。［判定する］を押さずに離れると、変更は保存されません（開き直すと、最後に保存した値に戻ります）。登録は1回だけで、登録後は変更できません。"}
+          ? "A judgment has already been registered for this case. You can view the saved question text, answers, and result (read-only; answers cannot be changed or saved again)."
+          : "The result and any changed answers are saved with [Submit judgment]. If you leave without pressing [Submit judgment], your changes are not saved (reopening restores the last saved values). Registration happens only once and cannot be changed afterward."}
       </p>
 
       <div className="columns">
         <section className="pane" aria-labelledby="q-title">
           <div className="pane-head">
-            <h3 id="q-title">設問と回答</h3>
-            <span role="status" data-testid="progress">{answeredCount}／{activeQuestions.length}問 入力済み</span>
+            <h3 id="q-title">Questions and answers</h3>
+            <span role="status" data-testid="progress">{answeredCount} of {activeQuestions.length} answered</span>
           </div>
           <div className="pane-counts"><AnswerCounts counts={counts} /></div>
           <ol className="question-list">
@@ -212,10 +212,10 @@ export function Review({
                   <strong className="q-id">{q.id}</strong>
                   <span className="q-text">
                     {q.prompt}
-                    {auto && <span className="origin"><span className="sr-only"> </span>自動</span>}
-                    {a === "pending" && <span className="badge ans-pending"><span aria-hidden="true">▲ </span>確認待ち</span>}
-                    {a === undefined && <span className="sr-only"> 未回答</span>}
-                    {optional && <span className="sr-only">（照合結果を絞り込むための回答は省略できます）</span>}
+                    {auto && <span className="origin"><span className="sr-only"> </span>Auto</span>}
+                    {a === "pending" && <span className="badge ans-pending"><span aria-hidden="true">▲ </span>Pending</span>}
+                    {a === undefined && <span className="sr-only"> Unanswered</span>}
+                    {optional && <span className="sr-only"> (An answer to narrow the matching results can be skipped)</span>}
                   </span>
                   <div className="answers" role="group" aria-label={`${q.id} ${q.prompt}`}>
                     <button type="button" aria-pressed={a === "yes"} disabled={frozen} onClick={() => choose(q.id, "yes")}>Yes</button>
@@ -223,8 +223,8 @@ export function Review({
                   </div>
                   {a === "pending" && (
                     <p className="warn">
-                      {c.pendingReasons?.[q.id] ?? "資料を確認できていません。"}
-                      Yes・Noのどちらにも数えません。資料で確認できたらYes／Noを選んでください。
+                      {c.pendingReasons?.[q.id] ?? "The materials could not be confirmed."}
+                      It is counted as neither Yes nor No. Once you have confirmed it from the materials, choose Yes or No.
                     </p>
                   )}
                 </li>
@@ -233,18 +233,18 @@ export function Review({
           </ol>
           {retired.length > 0 && (
             <section className="retired-questions" aria-labelledby="retired-title" data-testid="retired-questions">
-              <h4 id="retired-title">廃止済みの設問（保存済みの内容）</h4>
+              <h4 id="retired-title">Deactivated questions (saved content)</h4>
               <p className="hint" data-testid="retired-note">
                 {locked
-                  ? "登録時の結果と、保存済みの設問文・回答を表示しています。廃止した設問には、新たに回答できません。"
-                  : "最新のルールで照合します。廃止した設問は、新たな回答の対象外です。保存済みの設問文と回答は、このまま確認できます。"}
+                  ? "Showing the result at registration and the saved question text and answers. Deactivated questions cannot be answered anew."
+                  : "Matching uses the latest rules. Deactivated questions are no longer open to new answers. You can still view the saved question text and answers."}
               </p>
               <ul>
                 {retired.map((r) => (
                   <li key={r.id} data-testid={`retired-${r.id}`}>
                     <strong className="q-id">{r.id}</strong> {r.prompt}
-                    <span className="badge retired-label">廃止済み</span>
-                    <span className="retired-answer" data-testid={`retired-answer-${r.id}`}> 保存済みの回答: {answerLabel(r.answer)}</span>
+                    <span className="badge retired-label">Deactivated</span>
+                    <span className="retired-answer" data-testid={`retired-answer-${r.id}`}> Saved answer: {answerLabel(r.answer)}</span>
                   </li>
                 ))}
               </ul>
@@ -254,8 +254,8 @@ export function Review({
 
         <section className="pane" aria-labelledby="r-title">
           <div className="pane-head">
-            <h3 id="r-title">照合結果</h3>
-            <span role="status" data-testid="rule-count">照合 {matchingCount}／{rows.length}件</span>
+            <h3 id="r-title">Matching results</h3>
+            <span role="status" data-testid="rule-count">{matchingCount} of {rows.length} rules match</span>
           </div>
           <div className="rule-list">
             {rows.map((row) => {
@@ -274,28 +274,28 @@ export function Review({
               >
                 <summary>
                   <strong>{rule.id}</strong>{rule.result}
-                  {isAdopted(rule) && !gray && <span className="adopted-badge" data-testid={`adopted-${rule.id}`}>採用中</span>}
-                  {gray && <span className="sr-only">（入力済みの回答と異なる条件があります）</span>}
+                  {isAdopted(rule) && !gray && <span className="adopted-badge" data-testid={`adopted-${rule.id}`}>Adopted</span>}
+                  {gray && <span className="sr-only"> (Some conditions differ from the answers entered)</span>}
                 </summary>
                 <dl className="conditions">
                   {questions.map((q) => (
                     <div key={q.id} className={states[q.id] === "match" ? "matched" : undefined} data-testid={`cond-${rule.id}-${q.id}`}>
                       <dt>{q.id}</dt>
-                      <dd>{states[q.id] === "any" ? "問わない" : rule.expected[q.id] === "yes" ? "Yes" : "No"}{states[q.id] === "match" && <span className="sr-only">（入力済みの回答と一致）</span>}</dd>
+                      <dd>{states[q.id] === "any" ? "Not required" : rule.expected[q.id] === "yes" ? "Yes" : "No"}{states[q.id] === "match" && <span className="sr-only"> (matches the answer entered)</span>}</dd>
                     </div>
                   ))}
                   {Object.entries(rule.expected).filter(([id]) => !questions.some((q) => q.id === id))
                     .map(([id, expected]) => (
                       <div key={id} data-testid={`cond-${rule.id}-${id}`}>
                         <dt>{id}</dt>
-                        <dd>{expected === "yes" ? "Yes" : "No"}（この案件には設問なし）</dd>
+                        <dd>{expected === "yes" ? "Yes" : "No"} (no such question in this case)</dd>
                       </div>
                     ))}
                 </dl>
                 {!gray && !locked && (
                   <div className="rule-actions">
                     <button type="button" className="btn ghost" data-testid={`adopt-${rule.id}`} onClick={() => toggleAdopt(row)}>
-                      {isAdopted(rule) ? "採用を外す" : "このルールを採用"}
+                      {isAdopted(rule) ? "Unadopt this rule" : "Adopt this rule"}
                     </button>
                   </div>
                 )}
@@ -306,9 +306,9 @@ export function Review({
         </section>
       </div>
 
-      <form className="decision" aria-label="判定結果登録" onSubmit={submit}>
+      <form className="decision" aria-label="Submit judgment" onSubmit={submit}>
         <fieldset>
-          <legend>判定結果</legend>
+          <legend>Judgment result</legend>
           <div className="outcomes">
             {RESULTS.map((r) => {
               // 採用ルールの結果に印を付ける。選ぶ結果は変えない（採用は参考の記録）。
@@ -324,7 +324,7 @@ export function Review({
                     />
                     {r}
                   </label>
-                  {hinted && <span className="outcome-hint" id="outcome-hint" data-testid="outcome-hint">採用ルールの結果</span>}
+                  {hinted && <span className="outcome-hint" id="outcome-hint" data-testid="outcome-hint">Result of the adopted rule</span>}
                 </div>
               );
             })}
@@ -332,30 +332,30 @@ export function Review({
         </fieldset>
         {locked ? (
           <p className="note note-inline" data-testid="readonly-note">
-            判定は登録済みのため、［判定する］は使えません。結果と回答は、閲覧のみです。
+            The judgment is already registered, so [Submit judgment] is unavailable. The result and answers are read-only.
           </p>
         ) : (
-          <button className="btn action" type="submit" disabled={saving || alreadyRecorded}>{saving ? "保存中…" : "判定する"}</button>
+          <button className="btn action" type="submit" disabled={saving || alreadyRecorded}>{saving ? "Saving…" : "Submit judgment"}</button>
         )}
-        {justSaved !== "" && <p className="saved" role="status" data-testid="registered">保存しました。登録結果: {justSaved}</p>}
+        {justSaved !== "" && <p className="saved" role="status" data-testid="registered">Saved. Registered result: {justSaved}</p>}
         {saveError !== "" && alreadyRecorded && (
           <p className="error-inline" role="alert" data-testid="save-error">
-            この案件は、すでに判定が登録されているため、保存できませんでした（{saveError}）。一覧から開き直して、保存済みの内容を確認してください。
+            This case could not be saved because a judgment has already been registered. Reopen it from the list to check the saved content.
           </p>
         )}
-        {saveError !== "" && !alreadyRecorded && <p className="error-inline" role="alert" data-testid="save-error">保存できませんでした。{saveError}。もう一度［判定する］を押してください。</p>}
+        {saveError !== "" && !alreadyRecorded && <p className="error-inline" role="alert" data-testid="save-error">Could not save. {saveError}. Press [Submit judgment] again.</p>}
         <p className="note note-inline" data-testid="adopted-note">
           {effectiveAdopted === null
-            ? "採用ルール: なし（参考の記録。結果を選んだだけでは記録されません）"
-            : `採用ルール: ${effectiveAdopted.ruleId}（版 ${effectiveAdopted.revision}）。参考の記録で、選んだ結果は変わりません。`}
+            ? "Adopted rule: none (a reference record only; choosing a result does not create one)"
+            : `Adopted rule: ${effectiveAdopted.ruleId} (revision ${effectiveAdopted.revision}). This is a reference record only and does not change the chosen result.`}
         </p>
         <p className="note note-inline">
-          結果は照合にかかわらず、未回答・確認待ちが残っていても選べます。［判定する］は結果を保存します。実際の処置は行いません（未実装）。
+          You can choose a result regardless of matching, even if unanswered or pending questions remain. [Submit judgment] saves the result. No actual action is taken (not implemented).
         </p>
       </form>
 
       <p className="note">
-        「自動」は表示用の架空データの印で、自動回答の対象設問を確定するものではありません。R01〜R03は受入例用の架空の組み合わせで、業務上の認定ルールではありません。
+        "Auto" is a marker on fictional display data and does not fix which questions are answered automatically. R01–R03 are fictional combinations for acceptance examples, not business determination rules.
       </p>
     </section>
   );

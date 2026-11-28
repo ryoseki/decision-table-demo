@@ -3,10 +3,10 @@
 import type { ResultName } from "./data/cases";
 
 export const RESULT_CODE_BY_NAME: Record<ResultName, string> = {
-  アカウント削除: "account_deletion",
-  アカウント一時凍結: "account_suspension",
-  注意: "caution",
-  問題なし: "no_issue",
+  "Account deletion": "account_deletion",
+  "Account suspension": "account_suspension",
+  Caution: "caution",
+  "No issue": "no_issue",
 };
 
 const NAME_BY_CODE = new Map<string, ResultName>(
@@ -16,6 +16,6 @@ const NAME_BY_CODE = new Map<string, ResultName>(
 /** 結果コードから表示名を返す。定義にないコードは、例外にする（黙って別の結果に見せない）。 */
 export function resultNameOf(code: string): ResultName {
   const name = NAME_BY_CODE.get(code);
-  if (name === undefined) throw new Error(`定義にない結果コードです: ${code}`);
+  if (name === undefined) throw new Error(`Unknown result code: ${code}`);
   return name;
 }

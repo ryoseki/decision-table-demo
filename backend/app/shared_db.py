@@ -150,7 +150,9 @@ def _insert_config(
     if inserted.rowcount != 1:
         # 同じ版を、同時の操作が先に確定した（主キーの衝突）。一意制約のエラー（500）に
         # せず、DSQLの衝突（40001）と同じに扱う。全体を戻し、最新の版から再試行する。
-        raise psycopg.errors.SerializationFailure("共有設定の版が同時に追加された")
+        raise psycopg.errors.SerializationFailure(
+            "A shared configuration revision was added concurrently"
+        )
 
 
 def _latest(conn: psycopg.Connection) -> SharedConfig:
@@ -174,7 +176,9 @@ def _latest(conn: psycopg.Connection) -> SharedConfig:
         )
         row = conn.execute(_SELECT_LATEST).fetchone()
         if row is None:
-            raise RuntimeError("共有設定の初期の版を作れませんでした")
+            raise RuntimeError(
+                "Could not create the initial shared configuration revision"
+            )
     return _config_of(row)
 
 
@@ -217,7 +221,7 @@ class SharedConfigDb:
                     "DELETE FROM shared_proposals WHERE created_at < %s", (cutoff,)
                 )
         except Exception:  # noqa: BLE001
-            logger.warning("古い提案の削除に失敗しました（次の機会に再試行）")
+            logger.warning("Failed to delete old proposals (will retry next time)")
 
     @with_occ_retry
     def pending(
@@ -448,7 +452,9 @@ class SharedConfigDb:
                 (target_revision,),
             ).fetchone()
             if row is None:
-                raise LookupError(f"共有設定の版 {target_revision} はありません")
+                raise LookupError(
+                    f"Shared configuration revision {target_revision} does not exist"
+                )
             target = _config_of(row)
             current = _latest(conn)
             active = {r.rule_id for r in target.rules}
@@ -677,7 +683,9 @@ class PostgresAiQuota:
                     (today - timedelta(days=RETENTION_DAYS),),
                 )
         except Exception:  # noqa: BLE001
-            logger.warning("古い利用枠の行の削除に失敗しました（次の機会に再試行）")
+            logger.warning(
+                "Failed to delete old usage quota rows (will retry next time)"
+            )
 
     def used(self, key: str) -> tuple[int, int]:
         """(この接続元の今日の件数, 全体の今日の件数)。テストと運用の確認用。"""
@@ -711,7 +719,7 @@ def _limit(env: Mapping[str, str], name: str, default: int) -> int:
     try:
         return int(text)
     except ValueError:
-        raise QuotaConfigError(f"{name} は整数で指定してください") from None
+        raise QuotaConfigError(f"{name} must be specified as an integer") from None
 
 
 def build_ai_quota(
@@ -729,14 +737,15 @@ def build_ai_quota(
         return None
     if connect is None:
         raise QuotaConfigError(
-            "Bedrockの実接続には、共有の利用枠を管理するDBが必要です"
-            "（DB_HOST または DSQL_ENDPOINT）"
+            "A live Bedrock connection requires a database that manages the shared "
+            "usage quota "
+            "(DB_HOST or DSQL_ENDPOINT)"
         )
     secret = env.get(QUOTA_KEY_ENV, "").encode("utf-8")
     if len(secret) < MIN_SECRET_BYTES:
         raise QuotaConfigError(
-            f"{QUOTA_KEY_ENV} に、{MIN_SECRET_BYTES}バイト以上の"
-            "秘密の値を設定してください"
+            f"Set {QUOTA_KEY_ENV} to a secret value of at least "
+            f"{MIN_SECRET_BYTES} bytes"
         )
     try:
         limits = QuotaLimits(

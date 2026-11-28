@@ -30,6 +30,31 @@
 
 ログイン履歴が成功で、本人が「自分はログインしていない」と答えた場合はA01とA02がともにYesです。本人の回答が「覚えていない」場合は、A01がYesでA02は確認待ちです。APIキーの設問は、問い合わせや履歴に対象のキーが出てくる案件で使います。
 
+## アプリの英語表記（用語）
+
+アプリの画面・APIメッセージ・初期データは英語。設問（設問文、資料と確認する欄、Yes／Noの条件）は「English / 日本語」の併記にする。画面とAPIで同じものは同じ語で呼ぶ。新しい文言を足すときは、下の表に合わせ、表にない語を足したらここへ追記する。
+
+| 日本語 | 英語 | 備考 |
+| --- | --- | --- |
+| 確認待ち | Pending | 未回答は Unanswered と区別する |
+| 取得エラー（案件の状態） | Pending data | 「Fetch error」は使わない（アプリの故障に読めるため） |
+| 判定する（ボタン） | Submit judgment | 「Judge」は使わない |
+| 問わない（ルールの条件） | Not required | 「Any」は使わない |
+| 資料を確認できていません | could not be confirmed | 「have not been checked」は使わない（誰も見ていない意味になる） |
+| 採用ルール | adopted rule | |
+| 廃止（設問） | deactivate（状態は Deactivated、差分のバッジは Deactivating） | 保存済みの回答は残るので delete と区別する。「retire」は使わない（依頼文の入力は受け付ける） |
+| 削除（ルール） | remove（バッジは Removed） | ルールは実際に削除する |
+| 版 | revision | |
+| 申告内容 | Reported issue | 「Report」は使わない |
+| 問い合わせ（本文） | inquiry | |
+| 一覧の「対象」列 | User | 中身は user_id |
+| 管理画面の操作の対象 | Editing: Questions / Editing: Judgment rules | |
+| 差分のバッジ | Added / Removed / Updated / Deactivating | |
+| 差分の確認画面の見出し | Proposed change: add rule など（not applied yet） | |
+| 定型文（AIを経由しない依頼） | Saved request | 「Template」は使わない |
+| 一覧の件数 | Showing 3 of 7 cases / 3 of 5 rules match | |
+| 一時凍結 | Account suspension | 「一時」は訳に含めない（決定） |
+
 ## 審査に使うデータの範囲
 
 案件概要、主対象のuser（`user_id`のみ）、問い合わせinquiry（`subject`と`body`、どちらも必須）を受け取ります。他のユーザーIDを参照する場合も、主対象の判定に使う関連情報として扱いますが、その参照方法は未決です。設問ごとの自動Yes／No（モックAPI）は、初版では設問A09だけに使います。補完情報という概念は持たず、補完用のモックも作りません。実サービスのAPI接続は後続です（詳細は[データベースとAPIの設計](decision-support-schema.md)）。

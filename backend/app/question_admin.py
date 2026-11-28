@@ -95,7 +95,7 @@ class ProposalRequest(BaseModel):
     def normalize_prompt(cls, value: Any) -> Any:
         if isinstance(value, str):
             if not value.strip():
-                raise ValueError("依頼を入力してください")
+                raise ValueError("Enter a request")
             return value.strip(" ")
         return value
 
@@ -163,7 +163,11 @@ def _case_side(request: Request):  # noqa: ANN202
     ):
         raise HTTPException(
             status_code=503,
-            detail="廃止の確認に必要な、ルールと案件の保存先がありません",
+            detail=(
+                "The database for rules and cases needed to check the "
+                "deactivation is not "
+                "available"
+            ),
         )
     return store
 
@@ -229,13 +233,15 @@ def _retirement_body(
 
 _QUOTA_DETAILS = {
     "ip": (
-        "この接続元からの、今日（日本時間）のAI提案の回数の上限に達しました。"
-        "日本時間の午前0時以降に、もう一度お試しください。"
-        "同じIPアドレスの利用者は、回数を共有します。共有データは変わっていません"
+        "The limit on AI proposals from this IP address for today (Japan time) "
+        "has been reached. "
+        "Please try again after midnight Japan time. "
+        "Users on the same IP address share the count. The shared data has not changed"
     ),
     "global": (
-        "デモ全体の、今日（日本時間）のAI提案の回数の上限に達しました。"
-        "日本時間の午前0時以降に、もう一度お試しください。共有データは変わっていません"
+        "The limit on AI proposals for the whole demo for today (Japan time) has been "
+        "reached. "
+        "Please try again after midnight Japan time. The shared data has not changed"
     ),
 }
 
@@ -251,7 +257,10 @@ def reserve_ai_call(request: Request, proposer: Any) -> None:
     quota = getattr(request.app.state, "ai_quota", None)
     if quota is None:
         raise HTTPException(
-            status_code=503, detail="AI提案の利用枠の管理先がありません"
+            status_code=503,
+            detail=(
+                "The database that manages the AI proposal usage quota is not available"
+            ),
         )
     try:
         addresses = request.headers.getlist(VIEWER_IP_HEADER)
@@ -266,19 +275,26 @@ def reserve_ai_call(request: Request, proposer: Any) -> None:
     except ViewerAddressUnavailable:
         raise HTTPException(
             status_code=400,
-            detail="接続元を確認できないため、AI提案を作れません。共有データは変わっていません",
+            detail=(
+                "The IP address could not be determined, so an AI proposal cannot be "
+                "created. The shared data has not changed"
+            ),
         ) from None
     try:
         keys = request.headers.getlist("Idempotency-Key")
         if len(keys) != 1 or not re.fullmatch(
             r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", keys[0]
         ):
-            raise HTTPException(status_code=400, detail="有効な依頼IDが必要です")
+            raise HTTPException(
+                status_code=400, detail="A valid request ID is required"
+            )
         quota.reserve(key, keys[0])
     except DuplicateAiRequest:
         raise HTTPException(
             status_code=409,
-            detail="この依頼は送信済みです。AIの呼び出しは繰り返しません",
+            detail=(
+                "This request has already been sent. The AI call will not be repeated"
+            ),
         ) from None
     except QuotaExceeded as error:
         raise HTTPException(
@@ -295,10 +311,7 @@ def install_handlers(application: FastAPI) -> None:
     @application.exception_handler(StoreBusy)
     def _store_busy(_request: Request, _error: StoreBusy) -> JSONResponse:
         return JSONResponse(
-            {
-                "detail": "保存先が混み合っています。"
-                "しばらくしてから、もう一度お試しください"
-            },
+            {"detail": "The database is busy. Please try again in a while"},
             status_code=503,
             headers={"Retry-After": "1"},
         )
@@ -335,20 +348,18 @@ def notice(request: Request, proposer_name: str) -> dict[str, Any]:
 # 生成を得られなかった原因ごとの、利用者に出す固定の文言。
 # SDKの文言・AIの出力は出さない。
 _UNAVAILABLE_DETAILS = {
-    "timeout": "AIの応答がタイムアウトしました",
-    "network": "AIのサービスに接続できませんでした",
+    "timeout": "The AI response timed out",
+    "network": "Could not connect to the AI service",
     "credentials": (
-        "AIのサービスの資格情報を使えません（サーバーの設定を確認してください）"
+        "The AI service credentials cannot be used (check the server configuration)"
     ),
     "access": (
-        "AIのサービスへのアクセスが許可されていません"
-        "（権限とモデルの利用設定を確認してください）"
+        "Access to the AI service is not permitted "
+        "(check the permissions and model access settings)"
     ),
-    "throttled": (
-        "AIのサービスが混み合っています。しばらくしてから、もう一度試してください"
-    ),
-    "config": "AIのサービスの接続設定（リージョン・モデル）が合っていません",
-    "service": "AIのサービス側でエラーが起きました",
+    "throttled": ("The AI service is busy. Please try again in a while"),
+    "config": "The AI service connection settings (region and model) do not match",
+    "service": "An error occurred on the AI service side",
 }
 
 
@@ -364,9 +375,9 @@ def unavailable_error(
     detail = _UNAVAILABLE_DETAILS.get(reason)
     if detail is None:
         detail = (
-            "AIの応答を得られませんでした（モック）"
+            "Could not get an AI response (mock)"
             if source.kind == "mock"
-            else "AIの応答を得られませんでした"
+            else "Could not get an AI response"
         )
     return HTTPException(status_code=status, detail=detail)
 
@@ -456,19 +467,22 @@ def _decide(
         raise HTTPException(
             status_code=409,
             detail=(
-                f"設問{error.question_id}は、現行の判定ルール"
-                f"（{'、'.join(error.references)}）が参照しているため、廃止できません。"
-                "設問の一覧は変わっていません"
+                f"Question {error.question_id} cannot be deactivated because "
+                "the current judgment rules "
+                f"({', '.join(error.references)}) reference it. "
+                "The question list has not changed"
             ),
         ) from None
     except ProposalNotFound:
         raise HTTPException(
-            status_code=404, detail="提案がありません（未知、または処理済みです）"
+            status_code=404, detail="Proposal not found (unknown or already processed)"
         ) from None
     except ProposalConflict:
         raise HTTPException(
             status_code=409,
-            detail="設問の一覧が提案の後に変わったため、反映しませんでした",
+            detail=(
+                "The question list changed after the proposal, so nothing was applied"
+            ),
         ) from None
     return {
         "applied": True,

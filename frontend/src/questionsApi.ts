@@ -40,17 +40,17 @@ export type Decision = "yes" | "no";
 export type DecisionResult = DemoQuestionList & { applied: boolean };
 
 // 一覧を変えない操作（取得・提案の作成）の通信エラー。
-const NETWORK_UNCHANGED = "サーバーに接続できませんでした。デモの設問一覧は変わっていません。";
+const NETWORK_UNCHANGED = "Could not connect to the server. The demo question list has not changed.";
 // 決定（Yes／No）の通信エラー。要求がサーバーに届いたか分からないので、反映の有無を言い切らない。
 const NETWORK_UNKNOWN =
-  "サーバーに接続できませんでした。反映されたかどうかを確認できていません。もう一度送るか、一覧を再読み込みして確認してください。";
+  "Could not connect to the server. It is unknown whether the change was applied. Send it again or reload the list to check.";
 
 export async function call(
   path: string,
   init?: RequestInit,
   networkMessage = NETWORK_UNCHANGED,
-  subject = "デモの設問一覧",
-  proposalName = "追加案",
+  subject = "The demo question list",
+  proposalName = "add proposal",
 ): Promise<unknown> {
   let response: Response;
   try {
@@ -72,23 +72,23 @@ export async function call(
 }
 
 function errorMessage(status: number, detail: string, subject: string, proposalName: string): string {
-  const suffix = detail === "" ? "" : `（${detail}）`;
+  const suffix = detail === "" ? "" : ` (${detail})`;
   switch (status) {
     case 422:
-      return `AIの応答が検証で拒否されました${suffix}。${subject}は変わっていません。`;
+      return `The AI response was rejected by validation${suffix}. ${subject} has not changed.`;
     case 504:
-      return `AIの応答がタイムアウトしました${suffix}。${subject}は変わっていません。時間をおいて、もう一度試してください。`;
+      return `The AI response timed out${suffix}. ${subject} has not changed. Please try again after a while.`;
     case 502:
-      return `AIの応答を得られませんでした${suffix}。${subject}は変わっていません。`;
+      return `Could not get an AI response${suffix}. ${subject} has not changed.`;
     case 429:
-      return detail || "今日のAI提案の利用上限に達しました。";
+      return detail || "Today's AI proposal usage limit has been reached.";
     case 409:
-      if (detail.includes("この依頼は送信済みです")) return detail;
-      return `${detail || `${subject}が変わっていたため、反映しませんでした`}。最新の一覧を表示しています。`;
+      if (detail.includes("This request has already been sent")) return detail;
+      return `${detail || `${subject} had changed, so nothing was applied`}. Showing the latest list.`;
     case 404:
-      return `${detail || "提案がありません"}。もう一度、${proposalName}を作ってください。`;
+      return proposalName === "" ? `${detail || "Not found"}.` : `${detail || "Proposal not found"}. Please create the ${proposalName} again.`;
     default:
-      return `サーバーがエラーを返しました（HTTP ${status}）。${subject}は変わっていない可能性があります。`;
+      return `The server returned an error (HTTP ${status}). ${subject} may not have changed.`;
   }
 }
 

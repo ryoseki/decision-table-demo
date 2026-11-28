@@ -5,12 +5,12 @@ import { cases, statusOf, tally } from "./data/cases";
 const counts = (over: Partial<ReturnType<typeof tally>> = {}) => ({ yes: 0, no: 0, pending: 0, unanswered: 12, ...over });
 
 test("状態: 結果があれば登録済み（確認待ちがあっても）", () => {
-  expect(statusOf({ result: "注意", counts: counts({ pending: 1 }) })).toBe("登録済み");
+  expect(statusOf({ result: "Caution", counts: counts({ pending: 1 }) })).toBe("Registered");
 });
 
 test("状態: 結果がなく、確認待ちがあれば取得エラー。なければ未審査", () => {
-  expect(statusOf({ counts: counts({ pending: 1, unanswered: 11 }) })).toBe("取得エラー");
-  expect(statusOf({ counts: counts({ yes: 2, no: 1, unanswered: 9 }) })).toBe("未審査");
+  expect(statusOf({ counts: counts({ pending: 1, unanswered: 11 }) })).toBe("Pending data");
+  expect(statusOf({ counts: counts({ yes: 2, no: 1, unanswered: 9 }) })).toBe("Not reviewed");
 });
 
 test("集計: Yes・No・確認待ち・未回答を数え、合計は設問数（12）になる", () => {

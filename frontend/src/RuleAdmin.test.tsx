@@ -14,7 +14,7 @@ const baseRules = [
 ];
 const added = rule("R04", "caution", { A09: "yes", A10: "no" });
 const afterRules = [...baseRules, added];
-const PROMPT = "設問A09がYes、設問A10がNoのとき注意とするルールを追加して";
+const PROMPT = "Add a rule that gives Caution when A09 is Yes and A10 is No";
 
 const listBody = (rules = baseRules, revision = 1) => ({ revision, rules, mock: true, persistence: "memory", source: { kind: "mock" } });
 const addBody = { proposal_id: "p1", kind: "add", base_revision: 1, before: baseRules, after: afterRules, added, mock: true, source: { kind: "mock" } };
@@ -37,24 +37,24 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const current = () => screen.getByRole("region", { name: "現行のデモの判定ルール一覧" });
+const current = () => screen.getByRole("region", { name: "Current demo rule list" });
 const rowsOf = (region: HTMLElement) => within(region).getAllByRole("row").length - 1; // 見出しの行を除く
 
 async function createProposal(prompt = PROMPT) {
   await screen.findByText("R03");
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: prompt } });
-  fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: prompt } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
 }
 
 test("操作の対象が判定ルールであることと、モック・保存の範囲・審査画面に影響しないことを出す", async () => {
   render(<RuleAdmin />);
-  expect(screen.getByRole("heading", { name: "判定ルール管理（デモ）" })).toBeTruthy();
-  expect(screen.getByTestId("target").textContent).toBe("操作の対象: 判定ルール");
+  expect(screen.getByRole("heading", { name: "Rule admin (demo)" })).toBeTruthy();
+  expect(screen.getByTestId("target").textContent).toBe("Editing: Judgment rules");
   await screen.findByText("R03"); // 生成元は、一覧の応答で分かる
   const note = screen.getByTestId("mock-note").textContent ?? "";
-  expect(note).toContain("モックです");
-  expect(note).toContain("再起動すると初期状態に戻ります");
-  expect(note).toContain("審査画面で照合に使うルール、案件、データベースは変わりません");
+  expect(note).toContain("This is a mock");
+  expect(note).toContain("returns to its initial state when the backend restarts");
+  expect(note).toContain("The rules used for matching on the review screen, the cases, and the database do not change");
   await screen.findByText("R03");
 });
 
@@ -62,9 +62,9 @@ test("現行のデモのルール一覧を、ルールID・版・結果の表示
   render(<RuleAdmin />);
   await screen.findByText("R03");
   expect(rowsOf(current())).toBe(3);
-  const r1 = within(current()).getByTestId("現行のデモの判定ルール一覧-R01");
-  expect(r1.textContent).toContain("注意");
-  expect(within(current()).getByTestId("現行のデモの判定ルール一覧-R03").textContent).toContain("アカウント一時凍結");
+  const r1 = within(current()).getByTestId("Current demo rule list-R01");
+  expect(r1.textContent).toContain("Caution");
+  expect(within(current()).getByTestId("Current demo rule list-R03").textContent).toContain("Account suspension");
   expect(screen.queryByTestId("proposal")).toBeNull();
 });
 
@@ -76,11 +76,11 @@ const dash = (n: number) => Array<string>(n).fill("-");
 test("現行の一覧は、ルール・版・結果の後にA01〜A12を固定の12列で並べ、条件をYes／No、条件なしを - で出す", async () => {
   render(<RuleAdmin />);
   await screen.findByText("R03");
-  expect(headers(current())).toEqual(["ルール", "版", "結果", ...FIXED]);
-  const row = (id: string) => within(current()).getByTestId(`現行のデモの判定ルール一覧-${id}`);
-  expect(cells(row("R01"))).toEqual(["1", "注意", "Yes", "No", ...dash(10)]);
-  expect(cells(row("R02"))).toEqual(["1", "問題なし", "-", "-", "Yes", ...dash(9)]);
-  expect(cells(row("R03"))).toEqual(["1", "アカウント一時凍結", "-", "-", "-", "No", ...dash(8)]);
+  expect(headers(current())).toEqual(["Rule", "Revision", "Result", ...FIXED]);
+  const row = (id: string) => within(current()).getByTestId(`Current demo rule list-${id}`);
+  expect(cells(row("R01"))).toEqual(["1", "Caution", "Yes", "No", ...dash(10)]);
+  expect(cells(row("R02"))).toEqual(["1", "No issue", "-", "-", "Yes", ...dash(9)]);
+  expect(cells(row("R03"))).toEqual(["1", "Account suspension", "-", "-", "-", "No", ...dash(8)]);
   // Yes／Noは操作できないラベル（ボタンではない）。条件なしの - はラベルにしない。
   const tds = row("R01").querySelectorAll("td");
   expect(tds[2].querySelector(".answer-chip.answer-yes")?.textContent).toBe("Yes");
@@ -88,7 +88,7 @@ test("現行の一覧は、ルール・版・結果の後にA01〜A12を固定�
   expect(tds[4].querySelector(".answer-chip")).toBeNull();
   expect(within(row("R01")).queryAllByRole("button")).toHaveLength(0);
   // 横スクロールは、フォーカスできる現行表のラッパーの中だけ。
-  const wrap = within(current()).getByRole("group", { name: "現行のデモの判定ルール一覧の表（横にスクロールできます）" });
+  const wrap = within(current()).getByRole("group", { name: "Current demo rule list table (scrolls horizontally)" });
   expect(wrap.getAttribute("tabindex")).toBe("0");
   expect(wrap.querySelector("table")).not.toBeNull();
 });
@@ -98,28 +98,28 @@ test("A13以降の条件を持つルールがあるときだけ、A12の後ろ�
   stubFetch({ "GET /api/admin/rules": { body: listBody(rules) } });
   render(<RuleAdmin />);
   await screen.findByText("R02");
-  expect(headers(current())).toEqual(["ルール", "版", "結果", ...FIXED, "A13", "A100"]);
-  const row = (id: string) => within(current()).getByTestId(`現行のデモの判定ルール一覧-${id}`);
-  expect(cells(row("R01"))).toEqual(["1", "注意", "-", "No", ...dash(10), "Yes", "-"]);
-  expect(cells(row("R02"))).toEqual(["1", "問題なし", ...dash(12), "No", "No"]);
+  expect(headers(current())).toEqual(["Rule", "Revision", "Result", ...FIXED, "A13", "A100"]);
+  const row = (id: string) => within(current()).getByTestId(`Current demo rule list-${id}`);
+  expect(cells(row("R01"))).toEqual(["1", "Caution", "-", "No", ...dash(10), "Yes", "-"]);
+  expect(cells(row("R02"))).toEqual(["1", "No issue", ...dash(12), "No", "No"]);
 });
 
 test("Before／Afterの表は、これまでどおり1列の条件（設問＝回答）で出す", async () => {
   stubFetch({ ...baseRoutes(), "POST /api/admin/rule-proposals": { status: 201, body: addBody } });
   render(<RuleAdmin />);
   await createProposal();
-  const after = await screen.findByRole("region", { name: "After（反映した場合）" });
-  expect(headers(after)).toEqual(["ルール", "版", "結果", "条件（設問＝回答）"]);
+  const after = await screen.findByRole("region", { name: "After (if applied)" });
+  expect(headers(after)).toEqual(["Rule", "Revision", "Result", "Conditions (question=answer)"]);
 });
 
 test("依頼が空のあいだは、［案を作る］を押せない", async () => {
   render(<RuleAdmin />);
   await screen.findByText("R03");
-  const button = screen.getByRole("button", { name: "案を作る" }) as HTMLButtonElement;
+  const button = screen.getByRole("button", { name: "Create proposal" }) as HTMLButtonElement;
   expect(button.disabled).toBe(true);
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "  " } });
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "  " } });
   expect(button.disabled).toBe(true);
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: PROMPT } });
   expect(button.disabled).toBe(false);
 });
 
@@ -129,18 +129,18 @@ test("追加案: Before／Afterの全一覧を出し、追加行を「追加」�
   await createProposal();
   const proposal = await screen.findByTestId("proposal");
 
-  expect(within(proposal).getByRole("heading", { name: /判定ルールの追加案の確認/ })).toBeTruthy();
-  const before = within(proposal).getByRole("region", { name: "Before（現行）" });
-  const after = within(proposal).getByRole("region", { name: "After（反映した場合）" });
+  expect(within(proposal).getByRole("heading", { name: /Proposed change: add rule/ })).toBeTruthy();
+  const before = within(proposal).getByRole("region", { name: "Before (current)" });
+  const after = within(proposal).getByRole("region", { name: "After (if applied)" });
   expect(rowsOf(before)).toBe(3);
   expect(rowsOf(after)).toBe(4);
-  const row = within(after).getByTestId("After（反映した場合）-R04");
+  const row = within(after).getByTestId("After (if applied)-R04");
   expect(row.className).toContain("row-added");
-  expect(within(row).getByText("追加")).toBeTruthy();
+  expect(within(row).getByText("Added")).toBeTruthy();
   expect(row.textContent).toContain("A09=Yes");
   expect(row.textContent).toContain("A10=No");
-  expect(within(after).getByTestId("After（反映した場合）-R03").className).not.toContain("row-added");
-  expect(screen.getByText("反映しますか？")).toBeTruthy();
+  expect(within(after).getByTestId("After (if applied)-R03").className).not.toContain("row-added");
+  expect(screen.getByText("Apply this change?")).toBeTruthy();
 
   expect(rowsOf(current())).toBe(3);
   expect(within(current()).queryByText("R04")).toBeNull();
@@ -153,15 +153,15 @@ test("追加案: Before／Afterの全一覧を出し、追加行を「追加」�
 test("削除案: 削除するルールをBeforeで「削除」ラベルと背景で示し、Afterには出ない。現行の一覧は変わらない", async () => {
   stubFetch({ ...baseRoutes(), "POST /api/admin/rule-proposals": { status: 201, body: removeBody } });
   render(<RuleAdmin />);
-  await createProposal("ルールR03を削除して");
+  await createProposal("Remove rule R03");
   const proposal = await screen.findByTestId("proposal");
 
-  expect(within(proposal).getByRole("heading", { name: /判定ルールの削除案の確認/ })).toBeTruthy();
-  const before = within(proposal).getByRole("region", { name: "Before（現行）" });
-  const after = within(proposal).getByRole("region", { name: "After（反映した場合）" });
-  const row = within(before).getByTestId("Before（現行）-R03");
+  expect(within(proposal).getByRole("heading", { name: /Proposed change: remove rule/ })).toBeTruthy();
+  const before = within(proposal).getByRole("region", { name: "Before (current)" });
+  const after = within(proposal).getByRole("region", { name: "After (if applied)" });
+  const row = within(before).getByTestId("Before (current)-R03");
   expect(row.className).toContain("row-retired");
-  expect(within(row).getByText("削除")).toBeTruthy();
+  expect(within(row).getByText("Removed")).toBeTruthy();
   expect(within(after).queryByText("R03")).toBeNull();
   expect(rowsOf(after)).toBe(2);
   expect(rowsOf(current())).toBe(3);
@@ -179,9 +179,9 @@ test("Yes: 決定にyesを送り、反映の表示と最新の一覧（追加し
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
 
   await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
-  expect(screen.getByTestId("proposal-notice").textContent).toBe("デモの判定ルール一覧に反映しました（ルールR04を追加）");
+  expect(screen.getByTestId("proposal-notice").textContent).toBe("Applied to the demo rule list (rule R04 added)");
   expect(rowsOf(current())).toBe(4);
-  expect(within(current()).getByTestId("現行のデモの判定ルール一覧-R04")).toBeTruthy();
+  expect(within(current()).getByTestId("Current demo rule list-R04")).toBeTruthy();
   const decision = spy.mock.calls.find(([url]) => String(url).endsWith("/decision"));
   expect(JSON.parse(String(decision?.[1]?.body))).toEqual({ decision: "yes" });
 });
@@ -198,8 +198,8 @@ test("No: 現行の一覧は変わらず、プレビューを閉じる。決定�
   fireEvent.click(screen.getByRole("button", { name: "No" }));
 
   await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
-  expect(screen.getByTestId("proposal-notice").textContent).toContain("この追加案は反映していません");
-  expect(screen.queryByText(/に反映しました/)).toBeNull();
+  expect(screen.getByTestId("proposal-notice").textContent).toContain("This add proposal was not applied");
+  expect(screen.queryByText(/Applied to/)).toBeNull();
   expect(rowsOf(current())).toBe(3);
   const decision = spy.mock.calls.find(([url]) => String(url).endsWith("/decision"));
   expect(JSON.parse(String(decision?.[1]?.body))).toEqual({ decision: "no" });
@@ -208,14 +208,14 @@ test("No: 現行の一覧は変わらず、プレビューを閉じる。決定�
 test("検証エラー（422）: 理由を出し、プレビューは出さず、現行の一覧は変わらない", async () => {
   stubFetch({
     ...baseRoutes(),
-    "POST /api/admin/rule-proposals": { status: 422, body: { detail: "設問A99は存在しません（ルールは参照できません）" } },
+    "POST /api/admin/rule-proposals": { status: 422, body: { detail: "Question A99 does not exist (a rule cannot reference nonexistent or deactivated questions)" } },
   });
   render(<RuleAdmin />);
-  await createProposal("設問A99がYesのとき注意とするルールを追加して");
+  await createProposal("Add a rule that gives Caution when A99 is Yes");
   const error = await screen.findByTestId("proposal-error");
-  expect(error.textContent).toContain("検証で拒否されました");
-  expect(error.textContent).toContain("設問A99は存在しません");
-  expect(error.textContent).toContain("判定ルールの一覧は変わっていません");
+  expect(error.textContent).toContain("rejected by validation");
+  expect(error.textContent).toContain("Question A99 does not exist");
+  expect(error.textContent).toContain("The judgment rule list has not changed");
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(rowsOf(current())).toBe(3);
 });
@@ -223,20 +223,20 @@ test("検証エラー（422）: 理由を出し、プレビューは出さず、
 test("検証エラー（重複）: 重複するルールの理由を、そのまま出す", async () => {
   stubFetch({
     ...baseRoutes(),
-    "POST /api/admin/rule-proposals": { status: 422, body: { detail: "条件と結果が同じルールR01が既に存在します（重複）" } },
+    "POST /api/admin/rule-proposals": { status: 422, body: { detail: "条件と結果が同じRule R01 already exists (duplicate)" } },
   });
   render(<RuleAdmin />);
   await createProposal();
-  expect((await screen.findByTestId("proposal-error")).textContent).toContain("ルールR01が既に存在します（重複）");
+  expect((await screen.findByTestId("proposal-error")).textContent).toContain("Rule R01 already exists (duplicate)");
 });
 
 test("AIの応答を得られない（502）: 成功に見せず、一覧は変わっていないと伝える", async () => {
-  stubFetch({ ...baseRoutes(), "POST /api/admin/rule-proposals": { status: 502, body: { detail: "AIの応答を得られませんでした（モック）" } } });
+  stubFetch({ ...baseRoutes(), "POST /api/admin/rule-proposals": { status: 502, body: { detail: "Could not get an AI response (mock)" } } });
   render(<RuleAdmin />);
   await createProposal();
   const text = (await screen.findByTestId("proposal-error")).textContent ?? "";
-  expect(text).toContain("AIの応答を得られませんでした");
-  expect(text).toContain("判定ルールの一覧は変わっていません");
+  expect(text).toContain("Could not get an AI response");
+  expect(text).toContain("The judgment rule list has not changed");
   expect(screen.queryByTestId("proposal-notice")).toBeNull();
 });
 
@@ -248,7 +248,7 @@ test("競合（409）: 反映しなかったと伝え、プレビューを閉じ
       return { body: listCalls === 1 ? listBody() : listBody([...baseRules, rule("R04", "no_issue", { A05: "yes" })], 2) };
     },
     "POST /api/admin/rule-proposals": { status: 201, body: addBody },
-    "POST /api/admin/rule-proposals/p1/decision": { status: 409, body: { detail: "判定ルールの一覧が提案の後に変わったため、反映しませんでした" } },
+    "POST /api/admin/rule-proposals/p1/decision": { status: 409, body: { detail: "判定ルールの一覧が提案の後に変わったため、nothing was applied" } },
   });
   render(<RuleAdmin />);
   await createProposal();
@@ -256,8 +256,8 @@ test("競合（409）: 反映しなかったと伝え、プレビューを閉じ
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
 
   const error = await screen.findByTestId("proposal-error");
-  expect(error.textContent).toContain("反映しませんでした");
-  expect(error.textContent).toContain("最新の一覧を表示しています");
+  expect(error.textContent).toContain("nothing was applied");
+  expect(error.textContent).toContain("Showing the latest list");
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(screen.queryByTestId("proposal-notice")).toBeNull();
   await waitFor(() => expect(rowsOf(current())).toBe(4)); // 最新（他の人が追加したR04）
@@ -274,8 +274,8 @@ test("決定の通信エラーは、反映の有無を言い切らない。プ�
   await screen.findByTestId("proposal");
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
   const text = (await screen.findByTestId("proposal-error")).textContent ?? "";
-  expect(text).toContain("確認できていません");
-  expect(text).not.toContain("変わっていません");
+  expect(text).toContain("It is unknown whether");
+  expect(text).not.toContain("has not changed");
   expect(screen.getByTestId("proposal")).toBeTruthy();
 });
 
@@ -294,7 +294,7 @@ test("決定の送信中は、Yes・Noを押せず、二重に送らない", asy
           release = resolve;
         });
       }
-      throw new Error(`想定外のリクエスト: ${key}`);
+      throw new Error(`Unexpected request: ${key}`);
     }),
   );
   render(<RuleAdmin />);
@@ -316,7 +316,7 @@ test("決定の送信中は、Yes・Noを押せず、二重に送らない", asy
 test("一覧を取得できないときは、エラーを出す", async () => {
   stubFetch({ "GET /api/admin/rules": { status: 500, body: {} } });
   render(<RuleAdmin />);
-  expect((await screen.findByTestId("list-error")).textContent).toContain("デモの判定ルール一覧を取得できませんでした");
+  expect((await screen.findByTestId("list-error")).textContent).toContain("Could not retrieve the demo rule list");
 });
 
 test("未知・使用済み（404）: 反映していないと伝え、プレビューを閉じて、最新の一覧を取り直す", async () => {
@@ -327,14 +327,14 @@ test("未知・使用済み（404）: 反映していないと伝え、プレビ
       return { body: listCalls === 1 ? listBody() : listBody([...baseRules, rule("R04", "no_issue", { A05: "yes" })], 2) };
     },
     "POST /api/admin/rule-proposals": { status: 201, body: addBody },
-    "POST /api/admin/rule-proposals/p1/decision": { status: 404, body: { detail: "提案がありません（未知、または処理済みです）" } },
+    "POST /api/admin/rule-proposals/p1/decision": { status: 404, body: { detail: "Proposal not found（未知、または処理済みです）" } },
   });
   render(<RuleAdmin />);
   await createProposal();
   await screen.findByTestId("proposal");
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
 
-  expect((await screen.findByTestId("proposal-error")).textContent).toContain("提案がありません");
+  expect((await screen.findByTestId("proposal-error")).textContent).toContain("Proposal not found");
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(screen.queryByTestId("proposal-notice")).toBeNull();
   await waitFor(() => expect(rowsOf(current())).toBe(4));
@@ -350,12 +350,12 @@ test("削除案のYes: 削除の表示と、最新の一覧（削除後の件数
     "POST /api/admin/rule-proposals/p2/decision": { body: { applied: true, ...listBody(baseRules.slice(0, 2), 2) } },
   });
   render(<RuleAdmin />);
-  await createProposal("ルールR03を削除して");
+  await createProposal("Remove rule R03");
   await screen.findByTestId("proposal");
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
 
   await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
-  expect(screen.getByTestId("proposal-notice").textContent).toBe("デモの判定ルール一覧に反映しました（ルールR03を削除）");
+  expect(screen.getByTestId("proposal-notice").textContent).toBe("Applied to the demo rule list (rule R03 removed)");
   expect(rowsOf(current())).toBe(2);
   expect(within(current()).queryByText("R03")).toBeNull();
   const decision = spy.mock.calls.find(([url]) => String(url).endsWith("/decision"));
@@ -369,20 +369,20 @@ test("削除案のNo: 「この削除案は反映していません」と出し�
     "POST /api/admin/rule-proposals/p2/decision": { body: { applied: false, ...listBody() } },
   });
   render(<RuleAdmin />);
-  await createProposal("ルールR03を削除して");
+  await createProposal("Remove rule R03");
   await screen.findByTestId("proposal");
   fireEvent.click(screen.getByRole("button", { name: "No" }));
 
   await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
-  expect(screen.getByTestId("proposal-notice").textContent).toContain("この削除案は反映していません");
-  expect(screen.queryByText(/に反映しました/)).toBeNull();
+  expect(screen.getByTestId("proposal-notice").textContent).toContain("This remove proposal was not applied");
+  expect(screen.queryByText(/Applied to/)).toBeNull();
   expect(rowsOf(current())).toBe(3);
   expect(within(current()).getByText("R03")).toBeTruthy();
 });
 
 test.each([
-  [404, "提案がありません（未知、または処理済みです）", "提案がありません"],
-  [409, "判定ルールの一覧が提案の後に変わったため、反映しませんでした", "最新の一覧を表示しています"],
+  [404, "Proposal not found（未知、または処理済みです）", "Proposal not found"],
+  [409, "判定ルールの一覧が提案の後に変わったため、nothing was applied", "Showing the latest list"],
 ])("削除案のYesが%i: 反映したとは言わず、プレビューを閉じて最新の一覧を取り直す。「追加案」とは案内しない", async (status, detail, expected) => {
   let listCalls = 0;
   stubFetch({
@@ -394,17 +394,17 @@ test.each([
     "POST /api/admin/rule-proposals/p2/decision": { status, body: { detail } },
   });
   render(<RuleAdmin />);
-  await createProposal("ルールR03を削除して");
+  await createProposal("Remove rule R03");
   await screen.findByTestId("proposal");
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
 
   const text = (await screen.findByTestId("proposal-error")).textContent ?? "";
   expect(text).toContain(expected);
-  expect(text).not.toContain("追加案");
-  if (status === 404) expect(text).toContain("もう一度、案を作ってください");
+  expect(text).not.toContain("add proposal");
+  if (status === 404) expect(text).toContain("Please create the proposal again");
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(screen.queryByTestId("proposal-notice")).toBeNull();
-  expect(screen.queryByText(/に反映しました/)).toBeNull();
+  expect(screen.queryByText(/Applied to/)).toBeNull();
   await waitFor(() => expect(rowsOf(current())).toBe(2));
   expect(listCalls).toBe(2);
 });
@@ -423,15 +423,15 @@ test("案の作成中は、［案を作る］を押せず、1回しか送らな�
           release = resolve;
         });
       }
-      throw new Error(`想定外のリクエスト: ${key}`);
+      throw new Error(`Unexpected request: ${key}`);
     }),
   );
   render(<RuleAdmin />);
   await createProposal();
-  const button = screen.getByRole("button", { name: "案を作る" }) as HTMLButtonElement;
+  const button = screen.getByRole("button", { name: "Create proposal" }) as HTMLButtonElement;
   await waitFor(() => expect(button.disabled).toBe(true));
   fireEvent.click(button);
-  fireEvent.submit(screen.getByLabelText("変更の依頼（自然文）").closest("form") as HTMLFormElement);
+  fireEvent.submit(screen.getByLabelText("Change request (plain language)").closest("form") as HTMLFormElement);
   expect(createCalls).toHaveLength(1);
   release(new Response(JSON.stringify(addBody), { status: 201 }));
   await screen.findByTestId("proposal");
@@ -445,16 +445,16 @@ test("2案目の作成が検証エラー（422）になると、画面上の前�
     ...baseRoutes(),
     "POST /api/admin/rule-proposals": () => {
       posts += 1;
-      return posts === 1 ? { status: 201, body: addBody } : { status: 422, body: { detail: "設問A99は存在しません（ルールは参照できません）" } };
+      return posts === 1 ? { status: 201, body: addBody } : { status: 422, body: { detail: "Question A99 does not exist (a rule cannot reference nonexistent or deactivated questions)" } };
     },
   });
   render(<RuleAdmin />);
   await createProposal();
   await screen.findByTestId("proposal");
 
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "設問A99がYesのとき注意とするルールを追加して" } });
-  fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
-  expect((await screen.findByTestId("proposal-error")).textContent).toContain("設問A99は存在しません");
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "Add a rule that gives Caution when A99 is Yes" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
+  expect((await screen.findByTestId("proposal-error")).textContent).toContain("Question A99 does not exist");
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(screen.queryByRole("button", { name: "Yes" })).toBeNull();
   expect(rowsOf(current())).toBe(3);
@@ -467,16 +467,16 @@ test("ルールが0件の一覧は、見出しと0件を出し、エラーにし
     "POST /api/admin/rule-proposals": { status: 201, body: { ...addBody, before: [], after: [added] } },
   });
   render(<RuleAdmin />);
-  const region = await screen.findByRole("region", { name: "現行のデモの判定ルール一覧" });
-  expect(within(region).getByText("0件")).toBeTruthy();
+  const region = await screen.findByRole("region", { name: "Current demo rule list" });
+  expect(within(region).getByText("0 rules")).toBeTruthy();
   expect(rowsOf(region)).toBe(0);
   expect(screen.queryByTestId("list-error")).toBeNull();
 
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
-  fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: PROMPT } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
   const proposal = await screen.findByTestId("proposal");
-  expect(rowsOf(within(proposal).getByRole("region", { name: "Before（現行）" }))).toBe(0);
-  expect(rowsOf(within(proposal).getByRole("region", { name: "After（反映した場合）" }))).toBe(1);
+  expect(rowsOf(within(proposal).getByRole("region", { name: "Before (current)" }))).toBe(0);
+  expect(rowsOf(within(proposal).getByRole("region", { name: "After (if applied)" }))).toBe(1);
 });
 
 
@@ -492,15 +492,15 @@ test("接続できない・503は同じ依頼ID、502・504・429は新しい依
     });
     render(<RuleAdmin />);
     await screen.findByText("R01");
-    fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: PROMPT } });
-    fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+    fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: PROMPT } });
+    fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
     await screen.findByRole("alert");
-    fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
     await waitFor(() => expect(keys).toHaveLength(2));
     cleanup();
     return keys;
   };
-  for (const reply of [new Error("offline"), { status: 503, body: { detail: "混み合っています" } }]) {
+  for (const reply of [new Error("offline"), { status: 503, body: { detail: "busy" } }]) {
     const keys = await run(reply);
     expect(keys[1]).toBe(keys[0]);
   }
@@ -522,27 +522,27 @@ test("定型案: 生成元を示し、Noでは再提案せず、「AIで再提�
     "POST /api/admin/rule-proposals/p2/decision": { body: { ...listBody(), applied: false } },
   });
   render(<RuleAdmin />);
-  await createProposal("ルールR03を削除して");
+  await createProposal("Remove rule R03");
   await screen.findByTestId("proposal");
   expect(screen.getByTestId("source-badge").getAttribute("data-source")).toBe("template");
   fireEvent.click(screen.getByRole("button", { name: "No", exact: true }));
-  const retry = await screen.findByRole("button", { name: "AIで再提案" });
-  expect(sent).toEqual([{ prompt: "ルールR03を削除して" }]); // Noだけでは、再提案の要求を送らない
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "入力欄を書き換えた" } });
+  const retry = await screen.findByRole("button", { name: "Re-propose with AI" });
+  expect(sent).toEqual([{ prompt: "Remove rule R03" }]); // Noだけでは、再提案の要求を送らない
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "入力欄を書き換えた" } });
   fireEvent.click(retry);
   await screen.findByTestId("proposal");
-  expect(sent).toEqual([{ prompt: "ルールR03を削除して" }, { prompt: "ルールR03を削除して", force_ai: true }]);
+  expect(sent).toEqual([{ prompt: "Remove rule R03" }, { prompt: "Remove rule R03", force_ai: true }]);
   expect(screen.getByTestId("source-badge").getAttribute("data-source")).toBe("bedrock");
-  expect(screen.queryByRole("button", { name: "AIで再提案" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Re-propose with AI" })).toBeNull();
 });
 
-const TEMPLATE_HEADING = "AIを経由せずに反映する変更の依頼(完全一致)";
-const TEMPLATE_NOTE = "意図と異なる変更案が出る場合は、該当する依頼を削除してください。";
+const TEMPLATE_HEADING = "Saved requests (exact match, no AI call)";
+const TEMPLATE_NOTE = "If an unintended change proposal appears, delete the matching request.";
 
 test("定型文の一覧は初期状態で閉じ、指定の見出しと案内を出す。登録の操作はない", async () => {
   stubFetch({
     "GET /api/admin/rules": { body: { ...listBody(), template_reuse: true } },
-    "GET /api/admin/proposal-templates/rule": { body: { prompts: ["ルールR03を削除して"] } },
+    "GET /api/admin/proposal-templates/rule": { body: { prompts: ["Remove rule R03"] } },
   });
   render(<RuleAdmin />);
   const summary = await screen.findByText(TEMPLATE_HEADING);
@@ -550,7 +550,7 @@ test("定型文の一覧は初期状態で閉じ、指定の見出しと案内�
   expect(summary.tagName).toBe("SUMMARY");
   expect(details.open).toBe(false);
   expect(within(details).getByText(TEMPLATE_NOTE).closest("small")).not.toBeNull();
-  await screen.findByRole("button", { name: "ルールR03を削除してを定型文から削除" });
+  await screen.findByRole("button", { name: "Delete Remove rule R03 from saved requests" });
   expect(screen.queryByRole("button", { name: "再利用に登録" })).toBeNull();
 });
 
@@ -571,7 +571,7 @@ test("Bedrock案のYesで、自動登録された定型文の一覧を取得し�
   await screen.findByTestId("proposal");
   await waitFor(() => expect(templateReads).toBe(1));
   fireEvent.click(screen.getByRole("button", { name: "Yes", exact: true }));
-  await screen.findByRole("button", { name: PROMPT + "を定型文から削除" });
+  await screen.findByRole("button", { name: `Delete ${PROMPT} from saved requests` });
   expect(templateReads).toBe(2);
   expect(spy.mock.calls.some(([url, init]) => url === templatePath && init?.method === "POST")).toBe(false);
 });
@@ -589,5 +589,5 @@ test("Noを選んだBedrock案では、定型文の一覧を取得し直さず�
   fireEvent.click(screen.getByRole("button", { name: "No", exact: true }));
   await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
   expect(spy.mock.calls.filter(([url]) => url === "/api/admin/proposal-templates/rule")).toHaveLength(1);
-  expect(screen.queryByRole("button", { name: "AIで再提案" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Re-propose with AI" })).toBeNull();
 });

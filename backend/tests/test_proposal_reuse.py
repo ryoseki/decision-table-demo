@@ -477,7 +477,7 @@ class TestInitialTemplatesAndNegatives(unittest.TestCase):
         app = admin_app(rule_admin, initial_reuse(), RULE_ADD)
         with _Server(app) as server:
             base = server.base_url + "/api/admin/rule-proposals"
-            status, body = post(base, "ルールR03を削除して")
+            status, body = post(base, "Remove rule R03")
             self.assertEqual(status, 201, body)
             self.assertEqual(body["source"], {"kind": "template"})
             self.assertEqual(body["removed"]["rule_id"], "R03")
@@ -492,7 +492,7 @@ class TestInitialTemplatesAndNegatives(unittest.TestCase):
         with _Server(app) as server:
             base = server.base_url + "/api/admin/question-proposals"
             # A13がない状態でも、Bedrockへ渡さず、操作できない理由を返す。
-            status, body = post(base, "設問A13を廃止して")
+            status, body = post(base, "Deactivate question A13")
             self.assertEqual(status, 422, body)
             self.assertIn("A13", body["detail"])
             self.assertEqual(app.state.question_proposer.calls, 0)
@@ -501,7 +501,7 @@ class TestInitialTemplatesAndNegatives(unittest.TestCase):
             self.assertEqual((status, added["source"]["kind"]), (201, "bedrock"))
             decide = base + "/" + added["proposal_id"] + "/decision"
             self.assertEqual(send("POST", decide, {"decision": "yes"})[0], 200)
-            status, body = post(base, "設問A13を廃止して")
+            status, body = post(base, "Deactivate question A13")
             self.assertEqual(status, 201, body)
             self.assertEqual(body["source"], {"kind": "template"})
             self.assertEqual(body["retired"]["id"], "A13")
@@ -521,7 +521,7 @@ class TestInitialTemplatesAndNegatives(unittest.TestCase):
                     "設問A13を廃止して。",
                     "設問a13を廃止して",
                     "　設問A13を廃止して",
-                    "ルールR03を削除して",  # 別の対象の定型文
+                    "Remove rule R03",  # 別の対象の定型文
                 ],
                 A13_ADD,
             ),
@@ -534,7 +534,7 @@ class TestInitialTemplatesAndNegatives(unittest.TestCase):
                     "ルールR03からA04の条件を外して",
                     "ルールR03を削除して。",
                     "ルールr03を削除して",
-                    "設問A13を廃止して",  # 別の対象の定型文
+                    "Deactivate question A13",  # 別の対象の定型文
                 ],
                 RULE_ADD,
             ),
@@ -559,11 +559,11 @@ class TestInitialTemplatesAndNegatives(unittest.TestCase):
         yes = {"decision": "yes"}
         with _Server(app) as server:
             base = server.base_url + "/api/admin/rule-proposals"
-            _, first = post(base, "ルールR03を削除して")
+            _, first = post(base, "Remove rule R03")
             decide = base + "/" + first["proposal_id"] + "/decision"
             self.assertEqual(send("POST", decide, yes)[0], 200)
             revision = app.state.rule_store.snapshot()[0]
-            status, body = post(base, "ルールR03を削除して")
+            status, body = post(base, "Remove rule R03")
             self.assertEqual(status, 422, body)
             self.assertIn("R03", body["detail"])
             self.assertEqual(app.state.rule_store.snapshot()[0], revision)
@@ -632,13 +632,13 @@ class TestInitialTemplatesAndNegatives(unittest.TestCase):
         app = admin_app(rule_admin, initial_reuse(), RULE_ADD)
         with _Server(app) as server:
             base = server.base_url + "/api/admin/rule-proposals"
-            _, body = post(base, "ルールR03を削除して")
+            _, body = post(base, "Remove rule R03")
             before = app.state.rule_store.snapshot()
             decide = base + "/" + body["proposal_id"] + "/decision"
             self.assertEqual(send("POST", decide, {"decision": "no"})[0], 200)
             self.assertEqual(app.state.rule_store.snapshot(), before)
             self.assertEqual(app.state.rule_proposer.calls, 0)
-            status, again = post(base, "ルールR03を削除して", force_ai=True)
+            status, again = post(base, "Remove rule R03", force_ai=True)
             self.assertEqual(status, 201, again)
             self.assertEqual(again["source"], {"kind": "bedrock"})
         self.assertEqual(app.state.rule_proposer.calls, 1)

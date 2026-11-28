@@ -64,16 +64,16 @@ def _validate_retirement(
 ) -> ValidatedRetirement:
     if set(raw) != {"operation", "question_id"}:
         raise InvalidProposal(
-            "AIの出力の形式が不正です（operation と question_id が必要）"
+            "The AI output format is invalid (operation and question_id are required)"
         )
     question_id = raw["question_id"]
     if not isinstance(question_id, str) or not _ID_PATTERN.fullmatch(question_id):
-        raise InvalidProposal("設問IDの形式が不正です（例: A13）")
+        raise InvalidProposal("The question ID format is invalid (example: A13)")
     target = next((q for q in current if q.id == question_id), None)
     if target is None:
-        raise InvalidProposal(f"設問ID {question_id} は存在しません")
+        raise InvalidProposal(f"Question {question_id} does not exist")
     if target.retired:
-        raise InvalidProposal(f"設問ID {question_id} は既に廃止済みです")
+        raise InvalidProposal(f"Question {question_id} is already deactivated")
     return ValidatedRetirement(base_revision, current, target)
 
 
@@ -129,28 +129,37 @@ def validate_model_output(
         return _validate_retirement(raw, current, base_revision)
     if not isinstance(raw, dict) or set(raw) != {"operation", "question"}:
         raise InvalidProposal(
-            "AIの出力の形式が不正です（operation と question が必要）"
+            "The AI output format is invalid (operation and question are required)"
         )
     if raw["operation"] != OPERATION_ADD:
-        raise InvalidProposal("AIの出力の操作が不正です（追加だけ扱えます）")
+        raise InvalidProposal(
+            "The AI output operation is invalid (only add is supported)"
+        )
     question = raw["question"]
     if not isinstance(question, dict) or set(question) != {"id", "text"}:
-        raise InvalidProposal("追加する設問の形式が不正です（id と text が必要）")
+        raise InvalidProposal(
+            "The question to add has an invalid format (id and text are required)"
+        )
     question_id, text = question["id"], question["text"]
     if not isinstance(question_id, str) or not _ID_PATTERN.fullmatch(question_id):
-        raise InvalidProposal("設問IDの形式が不正です（例: A13）")
+        raise InvalidProposal("The question ID format is invalid (example: A13)")
     if not isinstance(text, str) or text.strip() == "":
-        raise InvalidProposal("設問の文言が空です")
+        raise InvalidProposal("The question text is empty")
     text = text.strip()
     if len(text) > MAX_TEXT_LENGTH or any(ord(c) < 32 for c in text):
-        raise InvalidProposal("設問の文言が長すぎるか、制御文字を含みます")
+        raise InvalidProposal(
+            "The question text is too long or contains control characters"
+        )
     if any(q.id == question_id for q in current):
-        raise InvalidProposal(f"設問ID {question_id} は既に存在します（重複）")
+        raise InvalidProposal(f"Question {question_id} already exists (duplicate)")
     if any(q.text == text for q in current):
-        raise InvalidProposal("同じ文言の設問が既に存在します（重複）")
+        raise InvalidProposal(
+            "A question with the same text already exists (duplicate)"
+        )
     expected = next_question_id(current)
     if question_id != expected:
         raise InvalidProposal(
-            f"追加できる設問IDは {expected} だけです（提案は {question_id}）"
+            f"The only question ID that can be added is {expected} (the proposal used "
+            f"{question_id})"
         )
     return ValidatedProposal(base_revision, current, DemoQuestion(question_id, text))

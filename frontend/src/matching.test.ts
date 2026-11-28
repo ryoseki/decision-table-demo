@@ -16,7 +16,7 @@ test("受入例2: A01をNoに訂正 → R01・R02はグレー、R03は通常", (
 
 test("受入例3: A01=Yes,A03=No → 全行グレー。それでも4種すべて選べる", () => {
   assert.deepEqual(grays({ A01: "yes", A03: "no" }), ["R01:gray", "R02:gray", "R03:gray"]);
-  assert.deepEqual([...RESULTS], ["アカウント削除", "アカウント一時凍結", "注意", "問題なし"]);
+  assert.deepEqual([...RESULTS], ["Account deletion", "Account suspension", "Caution", "No issue"]);
 });
 
 test("未回答・確認待ちだけでは食い違いにならない", () => {
@@ -59,7 +59,7 @@ test("左側の不要判定: 他が同じでYes・Noの結果が同じなら不�
 });
 
 test("条件のない設問は「問わない」: どの回答でも食い違いにせず、条件のある設問だけで決まる", () => {
-  const partial = [{ id: "P1", result: "注意" as const, expected: { A03: "no" as const, A09: "yes" as const } }];
+  const partial = [{ id: "P1", result: "Caution" as const, expected: { A03: "no" as const, A09: "yes" as const } }];
   const row = (a: AnswerMap) => matchRules(a, partial)[0];
   assert.equal(row({}).states.A01, "any");
   assert.equal(row({ A01: "yes", A02: "no", A12: "pending" }).gray, false); // 問わない設問は無関係
@@ -70,12 +70,12 @@ test("条件のない設問は「問わない」: どの回答でも食い違い
 
 test("左側の不要判定: 条件のない設問は、Yes・Noの両方に当てはまるものとして扱う", () => {
   // A12 に条件がないルールだけ → A12 の答えで結果は変わらない → 不要。
-  const same = [{ id: "P1", result: "注意" as const, expected: { A01: "yes" as const } }];
+  const same = [{ id: "P1", result: "Caution" as const, expected: { A01: "yes" as const } }];
   assert.equal(canSkipQuestion("A12", {}, same), true);
   // A12=Yes のルールと、A12 に条件のないルール（結果が違う）→ No側にだけ、結果Aがある → 不要でない。
   const differ = [
-    { id: "P1", result: "注意" as const, expected: { A01: "yes" as const, A12: "yes" as const } },
-    { id: "P2", result: "問題なし" as const, expected: { A01: "yes" as const } },
+    { id: "P1", result: "Caution" as const, expected: { A01: "yes" as const, A12: "yes" as const } },
+    { id: "P2", result: "No issue" as const, expected: { A01: "yes" as const } },
   ];
   assert.equal(canSkipQuestion("A12", {}, differ), false);
 });

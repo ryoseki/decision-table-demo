@@ -11,7 +11,7 @@ export const QUESTION_IDS: readonly QuestionId[] = [
 
 /** 定義済みの判定結果（重い順）。照合結果にかかわらず、すべて選べる。 */
 export const RESULTS: readonly ResultName[] = [
-  "アカウント削除", "アカウント一時凍結", "注意", "問題なし",
+  "Account deletion", "Account suspension", "Caution", "No issue",
 ];
 
 export type Expected = "yes" | "no";

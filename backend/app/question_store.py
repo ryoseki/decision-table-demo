@@ -31,18 +31,66 @@ MAX_PENDING_PROPOSALS = 50
 
 # 初期のデモ一覧。docs/requirements.md の設問A01〜A12（架空）の文言。
 _INITIAL = (
-    ("A01", "問い合わせにあったログインは成功したか？"),
-    ("A02", "本人は「自分が行ったログインではない」と回答したか？"),
-    ("A03", "対象期間に登録メールアドレスが変更されたか？"),
-    ("A04", "本人は「自分が行ったメールアドレス変更ではない」と回答したか？"),
-    ("A05", "対象期間にパスワードが変更されたか？"),
-    ("A06", "本人は「自分が行ったパスワード変更ではない」と回答したか？"),
-    ("A07", "対象期間にクレジットが消費されたか？"),
-    ("A08", "本人は「その利用に心当たりがない」と回答したか？"),
-    ("A09", "対象期間にAPIキーが新しく発行されたか？"),
-    ("A10", "本人は「そのAPIキーは自分が発行したものではない」と回答したか？"),
-    ("A11", "対象のAPIキーで成功した呼び出しがあったか？"),
-    ("A12", "本人は「そのAPI利用に心当たりがない」と回答したか？"),
+    (
+        "A01",
+        "Did the login mentioned in the inquiry succeed? / "
+        "問い合わせにあったログインは成功したか？",
+    ),
+    (
+        "A02",
+        "Did the user answer that they did not perform the login? / "
+        "本人は「自分が行ったログインではない」と回答したか？",
+    ),
+    (
+        "A03",
+        "Was the registered email address changed during the target period? / "
+        "対象期間に登録メールアドレスが変更されたか？",
+    ),
+    (
+        "A04",
+        "Did the user answer that they did not make the email address change? / "
+        "本人は「自分が行ったメールアドレス変更ではない」と回答したか？",
+    ),
+    (
+        "A05",
+        "Was the password changed during the target period? / "
+        "対象期間にパスワードが変更されたか？",
+    ),
+    (
+        "A06",
+        "Did the user answer that they did not make the password change? / "
+        "本人は「自分が行ったパスワード変更ではない」と回答したか？",
+    ),
+    (
+        "A07",
+        "Were credits consumed during the target period? / "
+        "対象期間にクレジットが消費されたか？",
+    ),
+    (
+        "A08",
+        "Did the user answer that they do not recognize that usage? / "
+        "本人は「その利用に心当たりがない」と回答したか？",
+    ),
+    (
+        "A09",
+        "Was an API key newly issued during the target period? / "
+        "対象期間にAPIキーが新しく発行されたか？",
+    ),
+    (
+        "A10",
+        "Did the user answer that they did not issue that API key? / "
+        "本人は「そのAPIキーは自分が発行したものではない」と回答したか？",
+    ),
+    (
+        "A11",
+        "Were there successful calls with the target API key? / "
+        "対象のAPIキーで成功した呼び出しがあったか？",
+    ),
+    (
+        "A12",
+        "Did the user answer that they do not recognize that API usage? / "
+        "本人は「そのAPI利用に心当たりがない」と回答したか？",
+    ),
 )
 
 
@@ -109,7 +157,9 @@ class InMemoryQuestionStore:
             if isinstance(proposal, ValidatedRetirement):
                 if references_of is None:
                     # 参照の確認なしに廃止しない（呼び出し側の誤り）。
-                    raise ValueError("廃止の承認には references_of が必要です")
+                    raise ValueError(
+                        "references_of is required to approve a deactivation"
+                    )
                 # 確認できない一時障害はここで例外になる。提案は残す（再試行可）。
                 references = references_of(proposal.target.id)
             del self._proposals[proposal_id]

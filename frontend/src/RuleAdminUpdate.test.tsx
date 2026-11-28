@@ -17,7 +17,7 @@ const baseRules = [
   r04Before,
 ];
 const updatedRules = [...baseRules.slice(0, 3), r04After];
-const PROMPT = "R04にA09がYesを追加して";
+const PROMPT = "Add condition A09=Yes to R04";
 
 const listBody = (rules = baseRules, revision = 2) => ({ revision, rules, mock: true, persistence: "memory", source: { kind: "mock" } });
 const updateBody = {
@@ -44,21 +44,21 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const current = () => screen.getByRole("region", { name: "現行のデモの判定ルール一覧" });
+const current = () => screen.getByRole("region", { name: "Current demo rule list" });
 const rowsOf = (region: HTMLElement) => within(region).getAllByRole("row").length - 1; // 見出しの行を除く
 const cells = (row: HTMLElement) => within(row).getAllByRole("cell").map((c) => c.textContent);
-const currentRow = (id: string) => within(current()).getByTestId(`現行のデモの判定ルール一覧-${id}`);
+const currentRow = (id: string) => within(current()).getByTestId(`Current demo rule list-${id}`);
 
 async function requestUpdate(prompt = PROMPT) {
   await screen.findByText("R04");
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: prompt } });
-  fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: prompt } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
 }
 
 test("更新の依頼の例を、依頼欄の近くに出す", async () => {
   render(<RuleAdmin />);
   await screen.findByText("R04");
-  expect(screen.getByText(/R04にA09がYesを追加して/)).toBeTruthy();
+  expect(screen.getByText(/Add condition A09=Yes to R04/)).toBeTruthy();
 });
 
 test("更新案: R04を対象に、追加する条件A09=Yesを差分で示す。R05は出ず、現行の一覧は変わらない", async () => {
@@ -67,22 +67,22 @@ test("更新案: R04を対象に、追加する条件A09=Yesを差分で示す�
   await requestUpdate();
   const proposal = await screen.findByTestId("proposal");
 
-  expect(within(proposal).getByRole("heading", { name: /判定ルールの更新案の確認（まだ反映していません）/ })).toBeTruthy();
+  expect(within(proposal).getByRole("heading", { name: /Proposed change: update rule \(not applied yet\)/ })).toBeTruthy();
   const summary = within(proposal).getByTestId("update-summary").textContent ?? "";
-  expect(summary).toContain("更新の対象: ルールR04");
-  expect(summary).toContain("追加する条件: A09=Yes");
+  expect(summary).toContain("Rule to update: R04");
+  expect(summary).toContain("Conditions to add: A09=Yes");
 
-  const before = within(proposal).getByRole("region", { name: "Before（現行）" });
-  const after = within(proposal).getByRole("region", { name: "After（反映した場合）" });
+  const before = within(proposal).getByRole("region", { name: "Before (current)" });
+  const after = within(proposal).getByRole("region", { name: "After (if applied)" });
   expect(rowsOf(before)).toBe(4);
   expect(rowsOf(after)).toBe(4); // ルールは増えない
   expect(within(after).queryByText("R05")).toBeNull();
 
-  const beforeRow = within(before).getByTestId("Before（現行）-R04");
-  const afterRow = within(after).getByTestId("After（反映した場合）-R04");
+  const beforeRow = within(before).getByTestId("Before (current)-R04");
+  const afterRow = within(after).getByTestId("After (if applied)-R04");
   for (const row of [beforeRow, afterRow]) {
     expect(row.className).toContain("row-updated");
-    expect(within(row).getByText("更新")).toBeTruthy();
+    expect(within(row).getByText("Updated")).toBeTruthy();
     expect(row.className).not.toContain("row-added");
   }
   // Before: 既存の条件だけ。After: 既存の条件（A10=No）を保ち、A09=Yesが「追加」と分かる。結果と版は変えない列を並べて見せる。
@@ -92,13 +92,13 @@ test("更新案: R04を対象に、追加する条件A09=Yesを差分で示す�
   const added = afterRow.querySelectorAll("[data-added='true']");
   expect(added).toHaveLength(1);
   expect(added[0].textContent).toContain("A09=Yes");
-  expect(added[0].textContent).toContain("（追加）");
-  expect(afterRow.textContent).toContain("注意");
+  expect(added[0].textContent).toContain(" (added)");
+  expect(afterRow.textContent).toContain("Caution");
   expect(afterRow.querySelector("[data-added='true']")?.textContent).not.toContain("A10");
   // 他のルールは更新の対象として示さない。
-  expect(within(after).getByTestId("After（反映した場合）-R03").className).not.toContain("row-updated");
-  expect(within(after).getByTestId("After（反映した場合）-R03").querySelector("[data-added]")).toBeNull();
-  expect(screen.getByText("反映しますか？")).toBeTruthy();
+  expect(within(after).getByTestId("After (if applied)-R03").className).not.toContain("row-updated");
+  expect(within(after).getByTestId("After (if applied)-R03").querySelector("[data-added]")).toBeNull();
+  expect(screen.getByText("Apply this change?")).toBeTruthy();
 
   // 現行の一覧は変わらない。決定も送っていない。
   expect(rowsOf(current())).toBe(4);
@@ -120,14 +120,14 @@ test("Yes: 決定にyesを送り、R04だけに条件が追加された一覧を
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
 
   await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
-  expect(screen.getByTestId("proposal-notice").textContent).toBe("デモの判定ルール一覧に反映しました（ルールR04の条件を更新）");
+  expect(screen.getByTestId("proposal-notice").textContent).toBe("Applied to the demo rule list (rule R04 conditions updated)");
   expect(rowsOf(current())).toBe(4);
   expect(within(current()).queryByText("R05")).toBeNull();
   // R04: 版2、A09=Yes（追加）とA10=No（既存）。結果は変わらない。
-  expect(cells(currentRow("R04"))).toEqual(["2", "注意", ...Array<string>(8).fill("-"), "Yes", "No", "-", "-"]);
+  expect(cells(currentRow("R04"))).toEqual(["2", "Caution", ...Array<string>(8).fill("-"), "Yes", "No", "-", "-"]);
   // 他のルールは変わらない（版1のまま）。
-  expect(cells(currentRow("R01"))).toEqual(["1", "注意", "Yes", "No", ...Array<string>(10).fill("-")]);
-  expect(cells(currentRow("R03"))).toEqual(["1", "アカウント一時凍結", "-", "-", "-", "No", ...Array<string>(8).fill("-")]);
+  expect(cells(currentRow("R01"))).toEqual(["1", "Caution", "Yes", "No", ...Array<string>(10).fill("-")]);
+  expect(cells(currentRow("R03"))).toEqual(["1", "Account suspension", "-", "-", "-", "No", ...Array<string>(8).fill("-")]);
   const decision = spy.mock.calls.find(([url]) => String(url).endsWith("/decision"));
   expect(JSON.parse(String(decision?.[1]?.body))).toEqual({ decision: "yes" });
 });
@@ -144,28 +144,28 @@ test("No: 承認済みの一覧（R04は元の条件）のまま。決定にno�
   fireEvent.click(screen.getByRole("button", { name: "No" }));
 
   await waitFor(() => expect(screen.queryByTestId("proposal")).toBeNull());
-  expect(screen.getByTestId("proposal-notice").textContent).toContain("この更新案は反映していません");
-  expect(screen.queryByText(/に反映しました/)).toBeNull();
+  expect(screen.getByTestId("proposal-notice").textContent).toContain("This update proposal was not applied");
+  expect(screen.queryByText(/Applied to/)).toBeNull();
   expect(rowsOf(current())).toBe(4);
-  expect(cells(currentRow("R04"))).toEqual(["1", "注意", ...Array<string>(9).fill("-"), "No", "-", "-"]);
+  expect(cells(currentRow("R04"))).toEqual(["1", "Caution", ...Array<string>(9).fill("-"), "No", "-", "-"]);
   const decision = spy.mock.calls.find(([url]) => String(url).endsWith("/decision"));
   expect(JSON.parse(String(decision?.[1]?.body))).toEqual({ decision: "no" });
 });
 
 test.each([
-  ["対象のルールがない", "ルールID R09 は存在しません"],
-  ["設問がない", "設問A99は存在しません（ルールは参照できません）"],
-  ["指定が曖昧", "依頼に複数のルール（R01、R04）があり、更新の対象が曖昧です。1つのルールを指定してください"],
-  ["同じ条件を追加済み", "ルールR04には、設問A09=yesの条件が追加済みです（重複）"],
-  ["新規作成として返された", "ルールR04の条件を更新する依頼ですが、更新ではない案が返りました。新しいルールの追加などには置き換えず、反映できません"],
+  ["対象のルールがない", "Rule ID R09 does not exist"],
+  ["設問がない", "Question A99 does not exist (a rule cannot reference nonexistent or deactivated questions)"],
+  ["指定が曖昧", "The request mentions multiple rules (R01, R04), so the update target is ambiguous. Specify one rule"],
+  ["同じ条件を追加済み", "Rule R04 already has the condition A09=yes (duplicate)"],
+  ["新規作成として返された", "This request updates the conditions of rule R04, but the proposal returned is not an update. It is not replaced by adding a new rule or similar, so it cannot be applied"],
 ])("拒否（422・%s）: 理由を出し、プレビューは出さず、現行の一覧は変わらない", async (_name, detail) => {
   stubFetch({ ...baseRoutes(), [PROPOSALS]: { status: 422, body: { detail } } });
   render(<RuleAdmin />);
   await requestUpdate();
   const error = await screen.findByTestId("proposal-error");
-  expect(error.textContent).toContain("検証で拒否されました");
+  expect(error.textContent).toContain("rejected by validation");
   expect(error.textContent).toContain(detail);
-  expect(error.textContent).toContain("判定ルールの一覧は変わっていません");
+  expect(error.textContent).toContain("The judgment rule list has not changed");
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(screen.queryByTestId("proposal-notice")).toBeNull();
   expect(rowsOf(current())).toBe(4);
@@ -180,7 +180,7 @@ test("版の競合（409）: 反映しなかったと伝え、プレビューを
       return { body: listCalls === 1 ? listBody() : listBody(updatedRules, 3) };
     },
     [PROPOSALS]: { status: 201, body: updateBody },
-    [DECISION]: { status: 409, body: { detail: "判定ルールの一覧が提案の後に変わったため、反映しませんでした" } },
+    [DECISION]: { status: 409, body: { detail: "判定ルールの一覧が提案の後に変わったため、nothing was applied" } },
   });
   render(<RuleAdmin />);
   await requestUpdate();
@@ -188,8 +188,8 @@ test("版の競合（409）: 反映しなかったと伝え、プレビューを
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
 
   const error = await screen.findByTestId("proposal-error");
-  expect(error.textContent).toContain("反映しませんでした");
-  expect(error.textContent).toContain("最新の一覧を表示しています");
+  expect(error.textContent).toContain("nothing was applied");
+  expect(error.textContent).toContain("Showing the latest list");
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(screen.queryByTestId("proposal-notice")).toBeNull();
   await waitFor(() => expect(cells(currentRow("R04"))[0]).toBe("2")); // 最新のR04（版2）
@@ -204,8 +204,8 @@ test.each([
   render(<RuleAdmin />);
   await requestUpdate();
   const error = await screen.findByTestId("proposal-error");
-  expect(error.textContent).toContain("対象のルールまたは追加する条件を読み取れませんでした");
-  expect(error.textContent).toContain("判定ルールの一覧は変わっていません");
+  expect(error.textContent).toContain("Could not read the target rule or the conditions to add");
+  expect(error.textContent).toContain("The judgment rule list has not changed");
   expect(screen.queryByTestId("proposal")).toBeNull();
   expect(screen.queryByTestId("proposal-notice")).toBeNull();
   expect(screen.queryByRole("button", { name: "Yes" })).toBeNull(); // 反映の操作を出さない
@@ -229,15 +229,15 @@ test("定型の更新案: Noでは再提案せず、「AIで再提案」が元�
   await screen.findByTestId("proposal");
   expect(screen.getByTestId("source-badge").getAttribute("data-source")).toBe("template");
   fireEvent.click(screen.getByRole("button", { name: "No", exact: true }));
-  const retry = await screen.findByRole("button", { name: "AIで再提案" });
+  const retry = await screen.findByRole("button", { name: "Re-propose with AI" });
   expect(sent).toEqual([{ prompt: PROMPT }]); // Noだけでは、再提案の要求を送らない
   expect(cells(currentRow("R04"))[0]).toBe("1"); // 承認済みの一覧は元のまま
   fireEvent.click(retry);
   const proposal = await screen.findByTestId("proposal");
   expect(sent).toEqual([{ prompt: PROMPT }, { prompt: PROMPT, force_ai: true }]);
   expect(screen.getByTestId("source-badge").getAttribute("data-source")).toBe("bedrock");
-  expect(within(proposal).getByTestId("update-summary").textContent).toContain("更新の対象: ルールR04"); // 再提案も更新案
-  expect(screen.queryByRole("button", { name: "AIで再提案" })).toBeNull();
+  expect(within(proposal).getByTestId("update-summary").textContent).toContain("Rule to update: R04"); // 再提案も更新案
+  expect(screen.queryByRole("button", { name: "Re-propose with AI" })).toBeNull();
 });
 
 test("追加案・削除案の見出しと通知は、これまでどおり（更新案の文言に変わらない）", async () => {
@@ -249,7 +249,7 @@ test("追加案・削除案の見出しと通知は、これまでどおり（�
   render(<RuleAdmin />);
   await requestUpdate("設問A09がYesのとき注意とするルールを追加して");
   const proposal = await screen.findByTestId("proposal");
-  expect(within(proposal).getByRole("heading", { name: /判定ルールの追加案の確認/ })).toBeTruthy();
+  expect(within(proposal).getByRole("heading", { name: /Proposed change: add rule/ })).toBeTruthy();
   expect(within(proposal).queryByTestId("update-summary")).toBeNull();
   expect(proposal.querySelector(".row-updated")).toBeNull();
 });

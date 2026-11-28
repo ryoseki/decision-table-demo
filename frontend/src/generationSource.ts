@@ -15,8 +15,8 @@ export function toSource(raw: unknown): GenerationSource {
     const { model_id: modelId, region } = raw as { model_id?: unknown; region?: unknown };
     return {
       kind: "bedrock",
-      modelId: typeof modelId === "string" && modelId !== "" ? modelId : "不明",
-      region: typeof region === "string" && region !== "" ? region : "不明",
+      modelId: typeof modelId === "string" && modelId !== "" ? modelId : "unknown",
+      region: typeof region === "string" && region !== "" ? region : "unknown",
     };
   }
   return { kind: "mock" };

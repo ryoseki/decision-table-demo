@@ -223,24 +223,31 @@ def _decide(
             store.reject(proposal_id)
             raise HTTPException(
                 status_code=409,
-                detail="設問の一覧が提案の後に変わったため、反映しませんでした。"
-                "判定ルールの一覧は変わっていません",
+                detail=(
+                    "The question list changed after the proposal, so nothing was "
+                    "applied. The judgment rule list has not changed"
+                ),
             )
         revision, rules = store.approve(proposal_id)
     except ProposalNotFound:
         raise HTTPException(
-            status_code=404, detail="提案がありません（未知、または処理済みです）"
+            status_code=404, detail="Proposal not found (unknown or already processed)"
         ) from None
     except QuestionBaseChanged:
         raise HTTPException(
             status_code=409,
-            detail="設問の一覧が提案の後に変わったため、反映しませんでした。"
-            "判定ルールの一覧は変わっていません",
+            detail=(
+                "The question list changed after the proposal, so nothing was "
+                "applied. The judgment rule list has not changed"
+            ),
         ) from None
     except ProposalConflict:
         raise HTTPException(
             status_code=409,
-            detail="判定ルールの一覧が提案の後に変わったため、反映しませんでした",
+            detail=(
+                "The judgment rule list changed after the proposal, so nothing was "
+                "applied"
+            ),
         ) from None
     return {
         "applied": True,

@@ -10,11 +10,11 @@ afterEach(() => {
 });
 
 const PATH = "/api/admin/proposal-templates/rule";
-const deleteButton = (prompt: string) => screen.findByRole("button", { name: `${prompt}を定型文から削除` });
+const deleteButton = (prompt: string) => screen.findByRole("button", { name: `Delete ${prompt} from saved requests` });
 
 test("見出しと案内の文言は、指定のまま。初期状態は閉じていて、見出しの直下に小さく案内する", async () => {
-  expect(TEMPLATE_HEADING).toBe("AIを経由せずに反映する変更の依頼(完全一致)");
-  expect(TEMPLATE_NOTE).toBe("意図と異なる変更案が出る場合は、該当する依頼を削除してください。");
+  expect(TEMPLATE_HEADING).toBe("Saved requests (exact match, no AI call)");
+  expect(TEMPLATE_NOTE).toBe("If an unintended change proposal appears, delete the matching request.");
   stubFetch({ ["GET " + PATH]: { body: { prompts: [] } } });
   const { container } = render(<TemplatePanel target="rule" refreshKey={0} />);
   const details = container.querySelector("details")!;
@@ -26,11 +26,11 @@ test("見出しと案内の文言は、指定のまま。初期状態は閉じ�
 });
 
 test("対象ごとの定型文一覧を出す。登録の操作は一覧にない", async () => {
-  const spy = stubFetch({ ["GET " + PATH]: { body: { prompts: ["ルールR03を削除して", "別の言い回し"] } } });
+  const spy = stubFetch({ ["GET " + PATH]: { body: { prompts: ["Remove rule R03", "別の言い回し"] } } });
   render(<TemplatePanel target="rule" refreshKey={0} />);
-  await deleteButton("ルールR03を削除して");
+  await deleteButton("Remove rule R03");
   expect(screen.getByText("別の言い回し", { exact: false })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /登録/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /register/ })).toBeNull();
   expect(spy.mock.calls.map(([url]) => url)).toEqual([PATH]);
 });
 
@@ -74,8 +74,8 @@ test("削除に失敗したら、エラーを出し、その定型文を一覧�
   fireEvent.click(await deleteButton("残すべき依頼"));
   const message = (await screen.findByRole("alert")).textContent ?? "";
   expect(message).toContain("HTTP 500");
-  expect(message).toContain("変更の依頼の一覧");
-  expect(message).not.toContain("設問"); // 判定ルールの画面でも使うため
+  expect(message).toContain("saved requests");
+  expect(message).not.toContain("Question"); // 判定ルールの画面でも使うため
   expect(screen.getByText("残すべき依頼", { exact: false })).toBeTruthy();
 });
 
@@ -84,8 +84,8 @@ test("一覧を取得できないときは、エラーを出し、削除ボタ�
   render(<TemplatePanel target="rule" refreshKey={0} />);
   const message = (await screen.findByRole("alert")).textContent ?? "";
   expect(message).toContain("HTTP 500");
-  expect(message).not.toContain("設問");
-  expect(screen.queryByRole("button", { name: /を定型文から削除/ })).toBeNull();
+  expect(message).not.toContain("Question");
+  expect(screen.queryByRole("button", { name: /Delete/ })).toBeNull();
 });
 
 test("通信できないときは、削除の有無を言い切らず、設問一覧とは書かない", async () => {
@@ -96,8 +96,8 @@ test("通信できないときは、削除の有無を言い切らず、設問�
   render(<TemplatePanel target="rule" refreshKey={0} />);
   fireEvent.click(await deleteButton("依頼"));
   const message = (await screen.findByRole("alert")).textContent ?? "";
-  expect(message).toContain("確認できていません");
-  expect(message).not.toContain("設問");
+  expect(message).toContain("It is unknown whether");
+  expect(message).not.toContain("Question");
 });
 
 test("送信中は、同じ操作を二重に送らない", async () => {
@@ -124,6 +124,6 @@ test("送信中は、同じ操作を二重に送らない", async () => {
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(true));
   fireEvent.click(button);
   release();
-  await waitFor(() => expect(screen.queryByRole("button", { name: "依頼を定型文から削除" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Delete request from saved requests" })).toBeNull());
   expect(removes).toBe(1);
 });

@@ -32,7 +32,7 @@ from tests.test_question_retirement import RetirementStore
 
 ADD_PROMPT = "設問A09がYes、設問A10がNoのとき注意とするルールを追加して"
 UNKNOWN_QUESTION_PROMPT = "設問A99がYesのとき注意とするルールを追加して"
-REMOVE_PROMPT = "ルールR03を削除して"
+REMOVE_PROMPT = "Remove rule R03"
 INITIAL_IDS = ["R01", "R02", "R03"]
 
 
@@ -95,47 +95,58 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(proposal.after, (*self.CURRENT, proposal.added))
 
     def test_rejects_a_condition_on_a_question_that_does_not_exist(self) -> None:
-        self.rejected(add_output({"A99": "yes"}, id_="R03"), "設問A99は存在しません")
+        self.rejected(
+            add_output({"A99": "yes"}, id_="R03"), "Question A99 does not exist"
+        )
 
     def test_rejects_a_condition_on_a_retired_question(self) -> None:
         questions = (*QUESTIONS[:8], question("A09", retired=True), *QUESTIONS[9:])
         self.rejected(
             add_output({"A09": "yes"}, id_="R03"),
-            "設問A09は廃止済みです",
+            "Question A09 is deactivated",
             questions=questions,
         )
 
     def test_reports_every_missing_question(self) -> None:
         self.rejected(
-            add_output({"A98": "yes", "A99": "no"}, id_="R03"), "A98は存在しません"
+            add_output({"A98": "yes", "A99": "no"}, id_="R03"),
+            "Question A98 does not exist",
         )
 
     def test_rejects_an_unknown_result_code(self) -> None:
-        self.rejected(add_output(result="ban_forever", id_="R03"), "結果コードが不正")
-        self.rejected(add_output(result=None, id_="R03"), "結果コードが不正")
+        self.rejected(
+            add_output(result="ban_forever", id_="R03"), "The result code is invalid"
+        )
+        self.rejected(add_output(result=None, id_="R03"), "The result code is invalid")
         # 表示名ではなく、コードで受け取る。
-        self.rejected(add_output(result="注意", id_="R03"), "結果コードが不正")
+        self.rejected(
+            add_output(result="注意", id_="R03"), "The result code is invalid"
+        )
 
     def test_rejects_malformed_conditions(self) -> None:
-        self.rejected(add_output({}, id_="R03"), "条件が空")
-        self.rejected(add_output({"A09": "maybe"}, id_="R03"), "yes か no だけ")
-        self.rejected(add_output({"A09": True}, id_="R03"), "yes か no だけ")
-        self.rejected(add_output({"9": "yes"}, id_="R03"), "設問IDの形式")
+        self.rejected(add_output({}, id_="R03"), "conditions are empty")
+        self.rejected(add_output({"A09": "maybe"}, id_="R03"), "must be yes or no")
+        self.rejected(add_output({"A09": True}, id_="R03"), "must be yes or no")
+        self.rejected(add_output({"9": "yes"}, id_="R03"), "question ID format")
 
     def test_rejects_malformed_output(self) -> None:
-        self.rejected("add", "形式が不正")
-        self.rejected({"operation": "add_rule"}, "形式が不正")
-        self.rejected({"operation": "none", "rule": {}}, "操作が不正")
-        self.rejected({"operation": "add_rule", "rule": {"id": "R03"}}, "形式が不正")
-        self.rejected(add_output(id_="r3"), "ルールIDの形式")
+        self.rejected("add", "format is invalid")
+        self.rejected({"operation": "add_rule"}, "format is invalid")
+        self.rejected({"operation": "none", "rule": {}}, "operation is invalid")
+        self.rejected(
+            {"operation": "add_rule", "rule": {"id": "R03"}}, "invalid format"
+        )
+        self.rejected(add_output(id_="r3"), "The rule ID format")
 
     def test_rejects_the_same_id(self) -> None:
-        self.rejected(add_output({"A09": "yes"}, id_="R02"), "R02 は既に存在します")
+        self.rejected(
+            add_output({"A09": "yes"}, id_="R02"), "Rule ID R02 already exists"
+        )
 
     def test_rejects_the_same_conditions_and_result_in_any_order(self) -> None:
         self.rejected(
             add_output({"A02": "no", "A01": "yes"}, id_="R03", result="caution"),
-            "ルールR01が既に存在します（重複）",
+            "Rule R01 with the same conditions and result already exists (duplicate)",
         )
 
     def test_same_conditions_with_a_different_result_is_not_a_duplicate(self) -> None:
@@ -150,10 +161,12 @@ class TestValidation(unittest.TestCase):
         self.validate(add_output({"A01": "no", "A02": "no"}, id_="R03"))
 
     def test_only_the_next_id_is_allowed_and_removed_ids_are_not_reused(self) -> None:
-        self.rejected(add_output(id_="R09"), "追加できるルールIDは R03 だけ")
+        self.rejected(
+            add_output(id_="R09"), "The only rule ID that can be added is R03"
+        )
         self.rejected(
             add_output({"A09": "yes"}, id_="R03"),
-            "追加できるルールIDは R04 だけ",
+            "The only rule ID that can be added is R04",
             used=frozenset({"R03"}),
         )
         self.assertEqual(next_rule_id(self.CURRENT, frozenset({"R05"})), "R06")
@@ -167,10 +180,10 @@ class TestValidation(unittest.TestCase):
 
     def test_rejects_removing_a_rule_that_does_not_exist(self) -> None:
         self.rejected(
-            {"operation": "remove_rule", "rule_id": "R09"}, "R09 は存在しません"
+            {"operation": "remove_rule", "rule_id": "R09"}, "Rule ID R09 does not exist"
         )
-        self.rejected({"operation": "remove_rule", "rule_id": 9}, "ルールIDの形式")
-        self.rejected({"operation": "remove_rule"}, "形式が不正")
+        self.rejected({"operation": "remove_rule", "rule_id": 9}, "The rule ID format")
+        self.rejected({"operation": "remove_rule"}, "format is invalid")
 
 
 class TestIdBeyondTwoDigits(unittest.TestCase):
@@ -204,7 +217,7 @@ class TestIdBeyondTwoDigits(unittest.TestCase):
         for bad in ("R1", "R1x0", "r100"):
             with self.assertRaises(InvalidProposal, msg=bad) as caught:
                 self.validate(add_output({"A09": "yes"}, id_=bad))
-            self.assertIn("ルールIDの形式", str(caught.exception))
+            self.assertIn("The rule ID format", str(caught.exception))
 
 
 class FakeRuleProposer:
@@ -345,17 +358,17 @@ class TestAddProposal(RuleAdminTestCase):
         before = self.get_list()
         status, body = self.propose(UNKNOWN_QUESTION_PROMPT)
         self.assertEqual(status, 422)
-        self.assertIn("設問A99は存在しません", body["detail"])
+        self.assertIn("Question A99 does not exist", body["detail"])
         self.assertEqual(self.get_list(), before)
 
     def test_rejects_a_rule_that_refers_to_a_retired_question(self) -> None:
         # どのルールも参照しない設問（追加したA13）を、廃止する。
         self.add_a13()
-        self.question_decision("設問A13を廃止して")
+        self.question_decision("Deactivate question A13")
         before = self.get_list()
         status, body = self.propose("設問A13がYesのとき注意とするルールを追加して")
         self.assertEqual(status, 422)
-        self.assertIn("設問A13は廃止済みです", body["detail"])
+        self.assertIn("Question A13 is deactivated", body["detail"])
         self.assertEqual(self.get_list(), before)
 
     def test_rejects_a_duplicate_of_an_existing_rule_in_any_condition_order(
@@ -378,7 +391,11 @@ class TestAddProposal(RuleAdminTestCase):
                 "POST", f"{server.base_url}/api/admin/rule-proposals", {"prompt": "x"}
             )
             self.assertEqual(status, 422)
-            self.assertIn("ルールR01が既に存在します（重複）", body["detail"])
+            self.assertIn(
+                "Rule R01 with the same conditions and result already exists "
+                "(duplicate)",
+                body["detail"],
+            )
             self.assertEqual(
                 send("GET", f"{server.base_url}/api/admin/rules")[1], before
             )
@@ -453,7 +470,7 @@ class TestAddDecision(RuleAdminTestCase):
         after_first = self.get_list()
         status, body = self.decide(second["proposal_id"], "yes")
         self.assertEqual(status, 409)
-        self.assertIn("変わった", body["detail"])
+        self.assertIn("changed", body["detail"])
         self.assertEqual(self.get_list(), after_first)  # R03は消えていない
         self.assertEqual(self.decide(second["proposal_id"], "yes")[0], 404)
 
@@ -466,7 +483,7 @@ class TestAddDecision(RuleAdminTestCase):
         self.assertEqual(self.ids(applied), [*INITIAL_IDS, "R04"])
         status, body = self.decide(second["proposal_id"], "yes")
         self.assertEqual(status, 409)
-        self.assertIn("変わった", body["detail"])
+        self.assertIn("changed", body["detail"])
         after = self.get_list()
         self.assertEqual(self.ids(after), [*INITIAL_IDS, "R04"])  # R04は1件だけ
         self.assertEqual(after["revision"], 2)
@@ -476,12 +493,12 @@ class TestAddDecision(RuleAdminTestCase):
         self.add_a13()
         _, proposal = self.propose("設問A13がYesのとき問題なしとするルールを追加して")
         self.question_decision(
-            "設問A13を廃止して"
+            "Deactivate question A13"
         )  # ルールはまだ反映前なので、廃止できる
         before = self.get_list()
         status, body = self.decide(proposal["proposal_id"], "yes")
         self.assertEqual(status, 409)
-        self.assertIn("設問の一覧が提案の後に変わった", body["detail"])
+        self.assertIn("The question list changed after the proposal", body["detail"])
         self.assertEqual(self.get_list(), before)
         self.assertEqual(self.decide(proposal["proposal_id"], "yes")[0], 404)
 
@@ -494,7 +511,7 @@ class TestAddDecision(RuleAdminTestCase):
         before = self.get_list()
         status, body = self.decide(proposal["proposal_id"], "yes")
         self.assertEqual(status, 409)
-        self.assertIn("設問の一覧が提案の後に変わった", body["detail"])
+        self.assertIn("The question list changed after the proposal", body["detail"])
         self.assertEqual(self.get_list(), before)  # 部分反映しない
         self.assertEqual(self.decide(proposal["proposal_id"], "yes")[0], 404)
 
@@ -550,7 +567,7 @@ class TestRemoval(RuleAdminTestCase):
         before = self.get_list()
         status, body = self.propose(REMOVE_PROMPT)
         self.assertEqual(status, 422)
-        self.assertIn("R03 は存在しません", body["detail"])
+        self.assertIn("Rule ID R03 does not exist", body["detail"])
         self.assertEqual(self.get_list(), before)
 
     def test_a_removed_id_is_not_reused_by_the_next_added_rule(self) -> None:
@@ -601,7 +618,7 @@ class TestIsolationAndQuestionIntegrity(RuleAdminTestCase):
         status, retire = send(
             "POST",
             f"{self.base}/api/admin/question-proposals",
-            {"prompt": "設問A13を廃止して"},
+            {"prompt": "Deactivate question A13"},
         )
         self.assertEqual(status, 201)
         self.assertEqual([r["rule_id"] for r in retire["references"]], ["R04"])
@@ -622,7 +639,7 @@ class TestIsolationAndQuestionIntegrity(RuleAdminTestCase):
         _, retire = send(
             "POST",
             f"{self.base}/api/admin/question-proposals",
-            {"prompt": "設問A13を廃止して"},
+            {"prompt": "Deactivate question A13"},
         )
         self.assertIs(retire["can_retire"], True)
         _, rule_proposal = self.propose("設問A13がYesのとき注意とするルールを追加して")
@@ -717,7 +734,7 @@ class TestRequestWording(RuleAdminTestCase):
 
     def test_a_removal_with_an_id_is_a_removal_even_with_a_result_name(self) -> None:
         for prompt in (
-            "ルールR03を削除して",
+            "Remove rule R03",
             "アカウント削除のルールR03を削除して",
         ):
             status, body = self.propose(prompt)
@@ -812,7 +829,7 @@ class TestRuleApprovalIsSerializedWithQuestionRetirement(unittest.TestCase):
                 f"{q_url}/{added['proposal_id']}/decision",
                 {"decision": "yes"},
             )
-            _, retire = send("POST", q_url, {"prompt": "設問A13を廃止して"})
+            _, retire = send("POST", q_url, {"prompt": "Deactivate question A13"})
             self.assertIs(retire["can_retire"], True)
             _, rule = send(
                 "POST",

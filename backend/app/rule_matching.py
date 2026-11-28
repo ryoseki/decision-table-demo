@@ -37,10 +37,10 @@ class RowDisplay(StrEnum):
 class Result(StrEnum):
     """定義済みの判定結果（重い順）。値は表示名で、DBの結果コードではない。"""
 
-    ACCOUNT_DELETION = "アカウント削除"
-    ACCOUNT_SUSPENSION = "アカウント一時凍結"
-    CAUTION = "注意"
-    NO_ISSUE = "問題なし"
+    ACCOUNT_DELETION = "Account deletion"
+    ACCOUNT_SUSPENSION = "Account suspension"
+    CAUTION = "Caution"
+    NO_ISSUE = "No issue"
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ class Rule:
 def _parse(pattern: str) -> dict[str, Answer]:
     marks = pattern.split()
     if len(marks) != len(QUESTION_IDS) or set(marks) - {"Y", "N"}:
-        raise ValueError("条件はY／Nを12問分指定してください")
+        raise ValueError("Specify Y/N for all 12 questions")
     return {
         q: Answer.YES if m == "Y" else Answer.NO
         for q, m in zip(QUESTION_IDS, marks, strict=True)
@@ -105,7 +105,7 @@ def match_rules(
     """
     unknown = set(answers) - set(QUESTION_IDS)
     if unknown:
-        raise ValueError(f"未知の設問ID: {sorted(unknown)}")
+        raise ValueError(f"Unknown question IDs: {sorted(unknown)}")
     # 文字列（"yes"等）も受け付けるが、Answerにない値は黙って扱わず拒否する。
     answers = {q: Answer(a) for q, a in answers.items()}
     matches = []

@@ -21,7 +21,10 @@ def _template(summary: str, user_id: str, a09_answer: str) -> dict:
     return {
         "summary": summary,
         "user": {"user_id": user_id},
-        "inquiry": {"subject": "架空の問い合わせ", "body": f"{summary}（架空）"},
+        "inquiry": {
+            "subject": "Fictional inquiry",
+            "body": f"{summary} (fictional inquiry)",
+        },
         "a09_answer": a09_answer,
         "result_code": None,
     }
@@ -29,10 +32,10 @@ def _template(summary: str, user_id: str, a09_answer: str) -> dict:
 
 # user_id が偶数なら A09=Yes、奇数なら No（モックの規則と同じ）。
 SAMPLE_TEMPLATES: tuple[dict, ...] = (
-    _template("身に覚えのないログインの通知が届いた", "456", "yes"),
-    _template("メールアドレス変更の通知に心当たりがない", "457", "no"),
-    _template("APIキー発行の通知に心当たりがない", "458", "yes"),
-    _template("ログイン失敗の通知が夜間に何件も届いた", "460", "yes"),
+    _template("Unrecognized login notification", "456", "yes"),
+    _template("Unrecognized email address change notification", "457", "no"),
+    _template("Unrecognized API key issuance notification", "458", "yes"),
+    _template("Many failed-login notifications overnight", "460", "yes"),
 )
 
 _OPERATION_KEY = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}")
@@ -53,7 +56,9 @@ def _operation_key(request: Request) -> str:
     if len(keys) != 1 or not _OPERATION_KEY.fullmatch(keys[0]):
         raise HTTPException(
             status_code=422,
-            detail="有効な依頼ID（Idempotency-Key）が必要です。案件は作成されていません",
+            detail=(
+                "A valid request ID (Idempotency-Key) is required. No case was created"
+            ),
         )
     return keys[0]
 
@@ -61,7 +66,7 @@ def _operation_key(request: Request) -> str:
 def _store(request: Request):  # noqa: ANN202
     store = request.app.state.case_store
     if not hasattr(store, "create_sample_operation"):
-        raise HTTPException(status_code=503, detail="保存先のDBが設定されていません")
+        raise HTTPException(status_code=503, detail="The database is not configured")
     return store
 
 
@@ -79,8 +84,8 @@ def create_sample_case(request: Request, response: Response) -> dict:
     except StoreBusy:
         raise HTTPException(
             status_code=503,
-            detail="保存先が混み合っています。もう一度押してください。"
-            "同じ操作の再試行なので、案件は重複しません",
+            detail="The database is busy. Please try again. "
+            "This retries the same operation, so the case will not be duplicated",
             headers={"Retry-After": "1"},
         ) from None
     response.status_code = 201 if created else 200

@@ -32,7 +32,7 @@ const goTo = (hash: string) =>
 
 test("ハッシュが空なら一覧を表示する（APIから取得した案件を）", async () => {
   render(<App />);
-  expect(screen.getByRole("heading", { name: "審査対象一覧" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Cases to review" })).toBeTruthy();
   expect(await screen.findByText("CASE-B")).toBeTruthy();
   expect(screen.queryByTestId("save-note")).toBeNull();
 });
@@ -41,7 +41,7 @@ test("#/cases/<案件ID> なら、その案件の詳細を表示する", async (
   window.location.hash = "#/cases/CASE-B";
   render(<App />);
   expect(await screen.findByTestId("save-note")).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "審査対象一覧" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Cases to review" })).toBeNull();
 });
 
 test("ハッシュを変えると、一覧と詳細が切り替わる", async () => {
@@ -50,27 +50,27 @@ test("ハッシュを変えると、一覧と詳細が切り替わる", async ()
   goTo("#/cases/CASE-B");
   expect(await screen.findByTestId("save-note")).toBeTruthy();
   goTo("#/");
-  expect(screen.getByRole("heading", { name: "審査対象一覧" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Cases to review" })).toBeTruthy();
   expect(await screen.findByText("CASE-B")).toBeTruthy();
 });
 
 test("ヘッダーの「設問管理」から設問管理（デモ）へ入り、「案件一覧」で戻れる", async () => {
   render(<App />);
   await screen.findByText("CASE-B");
-  const link = screen.getByRole("link", { name: "設問管理" });
+  const link = screen.getByRole("link", { name: "Question admin" });
   expect(link.getAttribute("href")).toBe("#/admin/questions");
   stubFetch({ "GET /api/admin/questions": { body: { revision: 1, questions: [{ id: "A01", text: "設問？" }] } } });
   goTo("#/admin/questions");
-  expect(screen.getByRole("heading", { name: "設問管理（デモ）" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Question admin (demo)" })).toBeTruthy();
   expect(await screen.findByText("設問？")).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "審査対象一覧" })).toBeNull();
-  expect(screen.getByRole("link", { name: "案件一覧" }).getAttribute("href")).toBe("#/");
+  expect(screen.queryByRole("heading", { name: "Cases to review" })).toBeNull();
+  expect(screen.getByRole("link", { name: "Cases" }).getAttribute("href")).toBe("#/");
 });
 
 test("ヘッダーの「判定ルール管理」から判定ルール管理（デモ）へ入る。設問管理とは別の画面で、操作の対象が分かる", async () => {
   render(<App />);
   await screen.findByText("CASE-B");
-  const link = screen.getByRole("link", { name: "判定ルール管理" });
+  const link = screen.getByRole("link", { name: "Rule admin" });
   expect(link.getAttribute("href")).toBe("#/admin/rules");
   const rule = { rule_id: "R01", revision: 1, result_code: "caution", conditions: { A01: "yes" } };
   stubFetch({
@@ -78,14 +78,14 @@ test("ヘッダーの「判定ルール管理」から判定ルール管理（�
     "GET /api/admin/questions": { body: { revision: 1, questions: [{ id: "A01", text: "設問？" }] } },
   });
   goTo("#/admin/rules");
-  expect(screen.getByRole("heading", { name: "判定ルール管理（デモ）" })).toBeTruthy();
-  expect(screen.getByTestId("target").textContent).toBe("操作の対象: 判定ルール");
+  expect(screen.getByRole("heading", { name: "Rule admin (demo)" })).toBeTruthy();
+  expect(screen.getByTestId("target").textContent).toBe("Editing: Judgment rules");
   expect(await screen.findByText("R01")).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "設問管理（デモ）" })).toBeNull();
+  expect(screen.queryByRole("heading", { name: "Question admin (demo)" })).toBeNull();
 
   goTo("#/admin/questions");
-  expect(screen.getByRole("heading", { name: "設問管理（デモ）" })).toBeTruthy();
-  expect(screen.getByTestId("target").textContent).toBe("操作の対象: 設問");
+  expect(screen.getByRole("heading", { name: "Question admin (demo)" })).toBeTruthy();
+  expect(screen.getByTestId("target").textContent).toBe("Editing: Questions");
   expect(await screen.findByText("設問？")).toBeTruthy();
 });
 
@@ -104,8 +104,8 @@ test("設問管理で作った未承認の追加案は、画面を切り替え�
   await screen.findByText("CASE-B");
   goTo("#/admin/questions");
   await screen.findByText("設問12？");
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "依頼" } });
-  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "依頼" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
   await screen.findByTestId("proposal");
 
   goTo("#/"); // 承認せずに別の画面へ
@@ -135,8 +135,8 @@ test("判定ルール管理で作った未承認の案は、画面を切り替�
   await screen.findByText("CASE-B");
   goTo("#/admin/rules");
   await screen.findByText("R01");
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "依頼" } });
-  fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "依頼" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
   await screen.findByTestId("proposal");
 
   goTo("#/"); // 承認せずに別の画面へ

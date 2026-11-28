@@ -68,5 +68,7 @@
 - 採用方針は案件の要件に照らして決め、検証方法と結果を記録する。
 - 既存の根拠を再利用する場合は、その適用条件を確認する。
 
+- アプリの英語表記は [docs/requirements.md](docs/requirements.md#アプリの英語表記用語) の表に合わせる。
+
 # 個人開発作業ログ用
 READ .pkb-outbox\README.md

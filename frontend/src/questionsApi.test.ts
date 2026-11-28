@@ -41,11 +41,11 @@ test("決定: 提案IDをエンコードしてPOSTし、反映の有無と一覧
 
 test("失敗の分類: 422・502・409・404・その他は、状態と文言を分ける。どれも成功にしない", async () => {
   const cases: [number, string][] = [
-    [422, "検証で拒否されました"],
-    [502, "AIの応答を得られませんでした"],
-    [504, "タイムアウトしました"],
-    [409, "最新の一覧を表示しています"],
-    [404, "もう一度、追加案を作ってください"],
+    [422, "rejected by validation"],
+    [502, "Could not get an AI response"],
+    [504, "timed out"],
+    [409, "Showing the latest list"],
+    [404, "Please create the add proposal again"],
     [500, "HTTP 500"],
   ];
   for (const [status, text] of cases) {
@@ -68,12 +68,12 @@ test("決定の通信エラーは、反映の有無を言い切らない。提�
   stubFetch({ "POST /api/admin/question-proposals/p1/decision": new Error("down") });
   const decision = await decideQuestionProposal("p1", "no").catch((e: unknown) => e);
   expect((decision as ApiError).status).toBe(0);
-  expect((decision as ApiError).message).toContain("確認できていません");
-  expect((decision as ApiError).message).not.toContain("変わっていません");
+  expect((decision as ApiError).message).toContain("It is unknown whether");
+  expect((decision as ApiError).message).not.toContain("has not changed");
 
   stubFetch({ "POST /api/admin/question-proposals": new Error("down") });
   const created = await createQuestionProposal("x").catch((e: unknown) => e);
-  expect((created as ApiError).message).toContain("変わっていません");
+  expect((created as ApiError).message).toContain("has not changed");
 });
 
 test("廃止案の作成: 廃止対象・参照ルール・廃止できるか・既存案件への影響を返す（結果コードは表示名にする）", async () => {
@@ -97,7 +97,7 @@ test("廃止案の作成: 廃止対象・参照ルール・廃止できるか・
       },
     },
   });
-  expect(await createQuestionProposal("設問A13を廃止して")).toEqual({
+  expect(await createQuestionProposal("Deactivate question A13")).toEqual({
     kind: "retire",
     proposalId: "p2",
     before: [{ id: "A13", text: "失効？" }],
@@ -105,11 +105,11 @@ test("廃止案の作成: 廃止対象・参照ルール・廃止できるか・
     retiredId: "A13",
     retiredText: "失効？",
     source: { kind: "mock" },
-    references: [{ ruleId: "R01", revision: 2, result: "注意" }],
+    references: [{ ruleId: "R01", revision: 2, result: "Caution" }],
     canRetire: false,
     impact: {
       unjudged: [{ caseId: "C1", summary: "概要1", answer: "yes" }],
-      judged: [{ caseId: "C2", summary: "概要2", answer: null, result: "問題なし" }],
+      judged: [{ caseId: "C2", summary: "概要2", answer: null, result: "No issue" }],
     },
   });
 });
@@ -118,13 +118,13 @@ test("廃止の拒否（409）は、サーバーの文言を出す。成功に�
   stubFetch({
     "POST /api/admin/question-proposals/p2/decision": {
       status: 409,
-      body: { detail: "設問A09は、現行の判定ルール（R01）が参照しているため、廃止できません。設問の一覧は変わっていません" },
+      body: { detail: "Question A09 cannot be deactivated because the current judgment rules (R01) reference it. The question list has not changed" },
     },
   });
   const error = (await decideQuestionProposal("p2", "yes").catch((e: unknown) => e)) as ApiError;
   expect(error.status).toBe(409);
   expect(error.message).toContain("R01");
-  expect(error.message).toContain("廃止できません");
+  expect(error.message).toContain("cannot be deactivated");
 });
 
 const bedrock = { kind: "bedrock", model_id: "demo.model-v1:0", region: "region-demo-1" };
@@ -134,7 +134,7 @@ test("実接続の生成元: 一覧・追加案・廃止案・決定のどれで
   stubFetch({
     "GET /api/admin/questions": { body: { revision: 1, questions: q, source: bedrock } },
     "POST /api/admin/question-proposals": (init) =>
-      (JSON.parse(String(init?.body)) as { prompt: string }).prompt === "廃止"
+      (JSON.parse(String(init?.body)) as { prompt: string }).prompt === "Deactivating"
         ? {
             status: 201,
             body: {
@@ -153,22 +153,22 @@ test("実接続の生成元: 一覧・追加案・廃止案・決定のどれで
     "POST /api/admin/question-proposals/p1/decision": { body: { applied: true, revision: 2, questions: q, source: bedrock } },
   });
   expect((await getDemoQuestions()).source).toEqual(bedrockSource);
-  expect((await createQuestionProposal("追加")).source).toEqual(bedrockSource);
-  expect((await createQuestionProposal("廃止")).source).toEqual(bedrockSource);
+  expect((await createQuestionProposal("Added")).source).toEqual(bedrockSource);
+  expect((await createQuestionProposal("Deactivating")).source).toEqual(bedrockSource);
   expect((await decideQuestionProposal("p1", "yes")).source).toEqual(bedrockSource);
 });
 
 test("失敗の文言: モックの表記を決め打ちせず、サーバーの固定の理由を出す（422・502・504）", async () => {
   const cases: [number, string, string][] = [
-    [422, "AIの出力をJSONとして読めませんでした", "AIの応答が検証で拒否されました（AIの出力をJSONとして読めませんでした）"],
-    [502, "AIのサービスに接続できませんでした", "AIの応答を得られませんでした（AIのサービスに接続できませんでした）"],
-    [504, "AIの応答がタイムアウトしました", "AIの応答がタイムアウトしました（AIの応答がタイムアウトしました）"],
+    [422, "Could not read the AI output as JSON", "The AI response was rejected by validation (Could not read the AI output as JSON)"],
+    [502, "Could not connect to the AI service", "Could not get an AI response (Could not connect to the AI service)"],
+    [504, "The AI response timed out", "The AI response timed out (The AI response timed out)"],
   ];
   for (const [status, detail, expected] of cases) {
     stubFetch({ "POST /api/admin/question-proposals": { status, body: { detail } } });
     const error = (await createQuestionProposal("x").catch((e: unknown) => e)) as ApiError;
     expect(error.message, String(status)).toContain(expected);
-    expect(error.message, String(status)).not.toContain("モック");
-    expect(error.message, String(status)).toContain("デモの設問一覧は変わっていません");
+    expect(error.message, String(status)).not.toContain("mock");
+    expect(error.message, String(status)).toContain("The demo question list has not changed");
   }
 });

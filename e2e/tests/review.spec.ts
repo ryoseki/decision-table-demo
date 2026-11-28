@@ -11,9 +11,9 @@ import { backendUrl } from "../playwright.config";
 const intake = async (request: APIRequestContext, userId: string, failQuestions: string[] = []) => {
   const response = await request.post(`${backendUrl}/api/intake/cases`, {
     data: {
-      summary: "心当たりのないログインについて問い合わせが届いた。（架空・E2E）",
+      summary: "An inquiry arrived about an unrecognized login. (fictional, E2E)",
       user: { user_id: userId },
-      inquiry: { subject: "心当たりのないログイン", body: "架空の問い合わせ。" },
+      inquiry: { subject: "Unrecognized login", body: "A fictional inquiry." },
       ...(failQuestions.length > 0 ? { demo_controls: { fault_questions: failQuestions } } : {}),
     },
   });
@@ -27,12 +27,12 @@ const pressed = (page: import("@playwright/test").Page, q: string, v: "Yes" | "N
 // 判定登録済みの案件は、画面では閲覧のみ: ［判定する］がなく、回答・結果の操作が無効。
 const expectReadOnly = async (page: import("@playwright/test").Page) => {
   await expect(page.getByTestId("readonly-note")).toBeVisible();
-  await expect(page.getByRole("button", { name: "判定する" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Submit judgment" })).toHaveCount(0);
   for (const q of ["A01", "A09"]) {
     await expect(pressed(page, q, "Yes")).toBeDisabled();
     await expect(pressed(page, q, "No")).toBeDisabled();
   }
-  await expect(page.getByRole("radio", { name: "問題なし" })).toBeDisabled();
+  await expect(page.getByRole("radio", { name: "No issue" })).toBeDisabled();
 };
 
 // APIから直接再保存しても、409で拒否され、保存済みの結果・回答・採用ルールは変わらない。
@@ -51,18 +51,18 @@ test("例7: 受付 → 画面で開く → 結果を選んで判定 → 開き�
   await page.goto(`/#/cases/${case_id}`);
   await expect(page.getByTestId("save-note")).toBeVisible();
   await expect(pressed(page, "A09", "Yes")).toHaveAttribute("aria-pressed", "true"); // 受付で取得した値
-  await expect(page.getByText(/登録済みの結果/)).toHaveCount(0); // まだ判定していない
+  await expect(page.getByText(/Registered result/)).toHaveCount(0); // まだ判定していない
 
-  await page.getByRole("radio", { name: "注意" }).check();
-  await page.getByRole("button", { name: "判定する" }).click();
-  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 注意");
+  await page.getByRole("radio", { name: "Caution" }).check();
+  await page.getByRole("button", { name: "Submit judgment" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("Saved. Registered result: Caution");
 
   // 保存に成功した画面も、閲覧のみ（編集も再保存もできない）。
   await expectReadOnly(page);
 
   await page.reload(); // 開き直す
-  await expect(page.getByText("登録済みの結果: 注意")).toBeVisible();
-  await expect(page.getByRole("radio", { name: "注意" })).toBeChecked();
+  await expect(page.getByText("Registered result: Caution")).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Caution" })).toBeChecked();
   await expect(pressed(page, "A09", "Yes")).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("registered")).toHaveCount(0); // 「保存しました」は、保存した直後だけ
   await expectReadOnly(page); // 開き直しても、閲覧のみ
@@ -108,12 +108,12 @@ test("例1〜3: DBのルールを取得して照合する。訂正で表示が�
   await click(page, "A01", "Yes");
   await click(page, "A03", "No");
   for (const rule of ["R01", "R02", "R03"]) await expectDisplay(page, rule, "gray");
-  await page.getByRole("radio", { name: "問題なし" }).check();
-  await page.getByRole("button", { name: "判定する" }).click();
-  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 問題なし");
+  await page.getByRole("radio", { name: "No issue" }).check();
+  await page.getByRole("button", { name: "Submit judgment" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("Saved. Registered result: No issue");
 
   await page.reload(); // 開き直す
-  await expect(page.getByText("登録済みの結果: 問題なし")).toBeVisible();
+  await expect(page.getByText("Registered result: No issue")).toBeVisible();
   await expect(pressed(page, "A01", "Yes")).toHaveAttribute("aria-pressed", "true");
   await expect(pressed(page, "A03", "No")).toHaveAttribute("aria-pressed", "true");
   for (const rule of ["R01", "R02", "R03"]) await expectDisplay(page, rule, "gray");
@@ -140,15 +140,15 @@ test("例8〜10: 通常表示の行だけ採用でき、結果と違っても保
   await page.getByTestId("adopt-R01").click();
   await expect(page.getByTestId("adopted-R01")).toBeVisible();
   // 採用したR01の結果（注意）の選択肢に、印が付く。結果は自動では選ばれない。
-  await expect(page.getByTestId("outcome-注意").getByTestId("outcome-hint")).toBeVisible();
-  await expect(page.getByRole("radio", { name: "注意" })).not.toBeChecked();
-  await page.getByRole("radio", { name: "問題なし" }).check();
-  await page.getByRole("button", { name: "判定する" }).click();
-  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 問題なし");
+  await expect(page.getByTestId("outcome-Caution").getByTestId("outcome-hint")).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Caution" })).not.toBeChecked();
+  await page.getByRole("radio", { name: "No issue" }).check();
+  await page.getByRole("button", { name: "Submit judgment" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("Saved. Registered result: No issue");
   await page.reload();
   await expect(page.getByTestId("adopted-R01")).toBeVisible();
-  await expect(page.getByTestId("adopted-note")).toContainText("R01（版 1）");
-  await expect(page.getByText("登録済みの結果: 問題なし")).toBeVisible();
+  await expect(page.getByTestId("adopted-note")).toContainText("R01 (revision 1)");
+  await expect(page.getByText("Registered result: No issue")).toBeVisible();
   // 登録後は閲覧のみ: 採用の付け外しも、回答の訂正もできない。
   await expect(page.getByTestId("adopt-R01")).toHaveCount(0);
   await expectReadOnly(page);
@@ -169,9 +169,9 @@ test("例8〜10: 通常表示の行だけ採用でき、結果と違っても保
   await click(page, "A01", "No");
   await expectDisplay(page, "R01", "gray");
   await expect(page.getByTestId("adopted-R01")).toHaveCount(0);
-  await expect(page.getByTestId("adopted-note")).toContainText("採用ルール: なし");
-  await page.getByRole("radio", { name: "問題なし" }).check();
-  await page.getByRole("button", { name: "判定する" }).click();
+  await expect(page.getByTestId("adopted-note")).toContainText("Adopted rule: none");
+  await page.getByRole("radio", { name: "No issue" }).check();
+  await page.getByRole("button", { name: "Submit judgment" }).click();
   await expect(page.getByTestId("registered")).toBeVisible();
   await page.reload();
   await expect(page.getByTestId("adopted-R01")).toHaveCount(0);
@@ -186,15 +186,15 @@ test("例4〜6: 取得に失敗した案件は確認待ち。結果だけ保存�
   expect(first.answers).toEqual({ A09: "pending" });
   const q09 = page.getByTestId("q-A09");
   await page.goto(`/#/cases/${first.case_id}`);
-  await expect(q09).toContainText("確認待ち");
+  await expect(q09).toContainText("Pending");
   await expect(pressed(page, "A09", "Yes")).toHaveAttribute("aria-pressed", "false");
   await expect(pressed(page, "A09", "No")).toHaveAttribute("aria-pressed", "false");
-  await page.getByRole("radio", { name: "注意" }).check();
-  await page.getByRole("button", { name: "判定する" }).click();
-  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 注意");
+  await page.getByRole("radio", { name: "Caution" }).check();
+  await page.getByRole("button", { name: "Submit judgment" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("Saved. Registered result: Caution");
   await page.reload();
-  await expect(page.getByText("登録済みの結果: 注意")).toBeVisible();
-  await expect(q09).toContainText("確認待ち");
+  await expect(page.getByText("Registered result: Caution")).toBeVisible();
+  await expect(q09).toContainText("Pending");
   await expectReadOnly(page); // 確認待ちのままでも、登録後は、あとから手入力で解消できない
   const savedFirst = await (await request.get(`${backendUrl}/api/cases/${first.case_id}`)).json();
   await expectResaveRefused(request, first.case_id, savedFirst);
@@ -204,16 +204,16 @@ test("例4〜6: 取得に失敗した案件は確認待ち。結果だけ保存�
   // 開き直すと、Noと問題なしが保存されている。
   const second = await intake(request, "458", ["A09"]);
   await page.goto(`/#/cases/${second.case_id}`);
-  await expect(q09).toContainText("確認待ち");
+  await expect(q09).toContainText("Pending");
   await pressed(page, "A09", "No").click();
-  await expect(q09).not.toContainText("確認待ち");
-  await page.getByRole("radio", { name: "問題なし" }).check();
-  await page.getByRole("button", { name: "判定する" }).click();
-  await expect(page.getByTestId("registered")).toHaveText("保存しました。登録結果: 問題なし");
+  await expect(q09).not.toContainText("Pending");
+  await page.getByRole("radio", { name: "No issue" }).check();
+  await page.getByRole("button", { name: "Submit judgment" }).click();
+  await expect(page.getByTestId("registered")).toHaveText("Saved. Registered result: No issue");
   await page.reload();
-  await expect(page.getByText("登録済みの結果: 問題なし")).toBeVisible();
+  await expect(page.getByText("Registered result: No issue")).toBeVisible();
   await expect(pressed(page, "A09", "No")).toHaveAttribute("aria-pressed", "true");
-  await expect(q09).not.toContainText("確認待ち");
+  await expect(q09).not.toContainText("Pending");
   const saved = await (await request.get(`${backendUrl}/api/cases/${second.case_id}`)).json();
   expect(saved.result.result_code).toBe("no_issue");
   expect(saved.questions.find((q: { question_code: string }) => q.question_code === "A09").answer).toBe("no");
@@ -225,19 +225,19 @@ test("例4〜6: 取得に失敗した案件は確認待ち。結果だけ保存�
   await page.goto(`/#/cases/${third.case_id}`);
   await expect(page.getByTestId("save-note")).toBeVisible();
   await pressed(page, "A01", "Yes").click();
-  await page.getByRole("radio", { name: "アカウント削除" }).check();
+  await page.getByRole("radio", { name: "Account deletion" }).check();
   await page.reload();
   await expect(pressed(page, "A01", "Yes")).toHaveAttribute("aria-pressed", "false"); // 未保存の回答は残らない
-  await expect(page.getByRole("radio", { name: "アカウント削除" })).not.toBeChecked(); // 結果も残らない
-  await expect(page.getByText(/登録済みの結果/)).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "Account deletion" })).not.toBeChecked(); // 結果も残らない
+  await expect(page.getByText(/Registered result/)).toHaveCount(0);
   await expect(pressed(page, "A09", "Yes")).toHaveAttribute("aria-pressed", "true"); // 受付で取得した A09 は、そのまま
 });
 
 test("一覧に、受付した案件が出て、そこから詳細を開ける", async ({ page, request }) => {
   const { case_id } = await intake(request, "458");
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "審査対象一覧" })).toBeVisible();
-  const open = page.getByRole("link", { name: new RegExp(`審査を開く.*${case_id}`) });
+  await expect(page.getByRole("heading", { name: "Cases to review" })).toBeVisible();
+  const open = page.getByRole("link", { name: new RegExp(`Open review.*${case_id}`) });
   await expect(open).toBeVisible();
   await open.click();
   await expect(page).toHaveURL(new RegExp(`#/cases/${case_id}$`));
@@ -280,6 +280,6 @@ test("承認後の照合一覧はA09条件のないR01と追加設問を参照�
   await expectDisplay(page, "R01", "normal");
   await expect(page.getByTestId("rule-R04")).toBeVisible();
   await page.goto(`/#/cases/${result.case_id}`);
-  await expect(page.getByText("登録済みの結果: 注意")).toBeVisible();
+  await expect(page.getByText("Registered result: Caution")).toBeVisible();
   expect(await (await request.get(`${backendUrl}/api/cases/${result.case_id}`)).json()).toEqual(savedBefore);
 });
