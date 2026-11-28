@@ -24,7 +24,7 @@ export function stubFetch(routes: Routes) {
   const spy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const key = `${init?.method ?? "GET"} ${String(input)}`;
     const route = routes[key];
-    if (route === undefined) throw new Error(`想定外のリクエスト: ${key}`);
+    if (route === undefined) throw new Error(`Unexpected request: ${key}`);
     const reply = typeof route === "function" ? route(init) : route;
     if (reply instanceof Error) throw reply;
     const status = reply.status ?? 200;
@@ -37,9 +37,9 @@ export function stubFetch(routes: Routes) {
 /** API の一覧の1行（GET /api/cases）。 */
 export const apiRow = (over: Record<string, unknown> = {}) => ({
   case_id: "CASE-X",
-  summary: "架空の概要",
+  summary: "Fictional summary",
   user_id: "456",
-  inquiry: { subject: "架空の件名", body: "架空の本文" },
+  inquiry: { subject: "Fictional subject", body: "Fictional body" },
   result_code: null,
   counts: { yes: 1, no: 0, pending: 0, unanswered: 11 },
   ...over,
@@ -48,9 +48,9 @@ export const apiRow = (over: Record<string, unknown> = {}) => ({
 /** API の案件の詳細（GET /api/cases/{id}）。A09 だけ yes、ほかは未回答。 */
 export const apiCase = (over: Record<string, unknown> = {}) => ({
   case_id: "CASE-X",
-  summary: "架空の概要",
+  summary: "Fictional summary",
   user: { user_id: "456" },
-  inquiry: { subject: "架空の件名", body: "架空の本文" },
+  inquiry: { subject: "Fictional subject", body: "Fictional body" },
   period_start_at: null,
   period_end_at: null,
   questions: Array.from({ length: 12 }, (_, i) => {

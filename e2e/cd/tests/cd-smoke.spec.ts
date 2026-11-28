@@ -17,7 +17,7 @@ test("初期画面がHTTP 200で、見出しとバンドルが読み込まれる
   const response = await page.goto("/");
   expect(response?.status()).toBe(200);
   // 見出しはReactが描画するため、バンドルのJSが実際に動いたことの確認になる。
-  await expect(page.getByRole("heading", { name: "不正審査デモ" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fraud Review Demo" })).toBeVisible();
 
   const scripts = await page
     .locator("script[src]")

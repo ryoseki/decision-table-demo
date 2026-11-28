@@ -46,13 +46,13 @@ const ruleRoutes = (source: unknown): Routes => ({
 
 async function proposeQuestion() {
   await screen.findByText("設問1？");
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "失効の設問を追加して" } });
-  fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "失効の設問を追加して" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
 }
 async function proposeRule() {
   await screen.findByText("R02");
-  fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "ルールを追加して" } });
-  fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+  fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "ルールを追加して" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
 }
 
 test("設問管理（モック）: 説明は「モックです」。差分に「生成元: モック」が出る", async () => {
@@ -61,8 +61,8 @@ test("設問管理（モック）: 説明は「モックです」。差分に「
   await proposeQuestion();
   const proposal = await screen.findByTestId("proposal");
   expect(within(proposal).getByTestId("source-badge").dataset.source).toBe("mock");
-  expect(within(proposal).getByTestId("source-badge").textContent).toContain("生成元: モック");
-  expect(screen.getByTestId("mock-note").textContent).toContain("モックです");
+  expect(within(proposal).getByTestId("source-badge").textContent).toContain("Source: Mock");
+  expect(screen.getByTestId("mock-note").textContent).toContain("This is a mock");
   expect(screen.queryByText(/Amazon Bedrock/)).toBeNull();
 });
 
@@ -73,14 +73,14 @@ test("設問管理（実接続）: 説明は実接続で、差分に生成元・
   const proposal = await screen.findByTestId("proposal");
   const badge = within(proposal).getByTestId("source-badge");
   expect(badge.dataset.source).toBe("bedrock");
-  expect(badge.textContent).toContain("生成元: Amazon Bedrock（実接続）");
+  expect(badge.textContent).toContain("Source: Amazon Bedrock (live connection)");
   expect(badge.textContent).toContain("demo.model-v1:0");
   expect(badge.textContent).toContain("region-demo-1");
   const note = screen.getByTestId("mock-note").textContent ?? "";
-  expect(note).toContain("実接続です");
-  expect(note).toContain("利用料金が発生します");
-  expect(note).not.toContain("モックです");
-  expect(note).toContain("再起動すると初期状態に戻ります"); // 保存の範囲の説明は、実接続でも残る
+  expect(note).toContain("Live connection");
+  expect(note).toContain("incurs usage charges");
+  expect(note).not.toContain("This is a mock");
+  expect(note).toContain("returns to its initial state when the backend restarts"); // 保存の範囲の説明は、実接続でも残る
 });
 
 test("設問管理（実接続）: Yesで反映しても、実接続の説明のまま（モックの説明に戻らない）", async () => {
@@ -89,26 +89,26 @@ test("設問管理（実接続）: Yesで反映しても、実接続の説明の
   await proposeQuestion();
   await screen.findByTestId("proposal");
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
-  expect((await screen.findByTestId("proposal-notice")).textContent).toContain("反映しました");
-  expect(screen.getByTestId("mock-note").textContent).toContain("実接続です");
+  expect((await screen.findByTestId("proposal-notice")).textContent).toContain("Applied to");
+  expect(screen.getByTestId("mock-note").textContent).toContain("Live connection");
   expect(screen.queryByTestId("source-badge")).toBeNull(); // プレビューを閉じた
 });
 
 test("設問管理: 生成元が分かる前（一覧の読み込み中）は、モックとも実接続とも言わない", async () => {
   stubFetch({ "GET /api/admin/questions": () => new Error("down") });
   render(<QuestionAdmin />);
-  expect(screen.getByTestId("mock-note").textContent).toContain("確認しています");
+  expect(screen.getByTestId("mock-note").textContent).toContain("Checking the AI source");
   await screen.findByTestId("list-error");
-  expect(screen.getByTestId("mock-note").textContent).not.toContain("モックです");
-  expect(screen.getByTestId("mock-note").textContent).not.toContain("実接続です");
+  expect(screen.getByTestId("mock-note").textContent).not.toContain("This is a mock");
+  expect(screen.getByTestId("mock-note").textContent).not.toContain("Live connection");
 });
 
 test("設問管理（実接続）の接続エラー: 原因ごとの固定の文言を出し、成功にも、モックにも見せない", async () => {
   const cases: [number, string, string][] = [
-    [504, "AIの応答がタイムアウトしました", "タイムアウトしました"],
-    [502, "AIのサービスに接続できませんでした", "AIの応答を得られませんでした"],
-    [502, "AIのサービスへのアクセスが許可されていません（権限とモデルの利用設定を確認してください）", "アクセスが許可されていません"],
-    [422, "AIの出力をJSONとして読めませんでした", "検証で拒否されました"],
+    [504, "The AI response timed out", "timed out"],
+    [502, "Could not connect to the AI service", "Could not get an AI response"],
+    [502, "Access to the AI service is not permitted (check the permissions and model access settings)", "not permitted"],
+    [422, "Could not read the AI output as JSON", "rejected by validation"],
   ];
   for (const [status, detail, expected] of cases) {
     stubFetch({ ...questionRoutes(bedrock), "POST /api/admin/question-proposals": { status, body: { detail } } });
@@ -117,8 +117,8 @@ test("設問管理（実接続）の接続エラー: 原因ごとの固定の文
     const text = (await screen.findByTestId("proposal-error")).textContent ?? "";
     expect(text, detail).toContain(expected);
     expect(text, detail).toContain(detail);
-    expect(text, detail).toContain("デモの設問一覧は変わっていません");
-    expect(text, detail).not.toContain("モック");
+    expect(text, detail).toContain("The demo question list has not changed");
+    expect(text, detail).not.toContain("mock");
     expect(screen.queryByTestId("proposal"), detail).toBeNull(); // 成功の差分を出さない
     expect(screen.queryByTestId("source-badge"), detail).toBeNull(); // 生成元は、成功した提案にだけ付く
     expect(screen.queryByTestId("proposal-notice"), detail).toBeNull();
@@ -132,7 +132,7 @@ test("判定ルール管理（モック）: 差分に「生成元: モック」�
   await proposeRule();
   const proposal = await screen.findByTestId("proposal");
   expect(within(proposal).getByTestId("source-badge").dataset.source).toBe("mock");
-  expect(screen.getByTestId("mock-note").textContent).toContain("モックです");
+  expect(screen.getByTestId("mock-note").textContent).toContain("This is a mock");
 });
 
 test("判定ルール管理（実接続）: 説明と差分に、実接続・モデル・リージョンが出る。Yesの後も変わらない", async () => {
@@ -144,19 +144,19 @@ test("判定ルール管理（実接続）: 説明と差分に、実接続・モ
   expect(badge.dataset.source).toBe("bedrock");
   expect(badge.textContent).toContain("demo.model-v1:0");
   expect(badge.textContent).toContain("region-demo-1");
-  expect(screen.getByTestId("mock-note").textContent).toContain("実接続です");
-  expect(screen.getByTestId("mock-note").textContent).not.toContain("モックです");
+  expect(screen.getByTestId("mock-note").textContent).toContain("Live connection");
+  expect(screen.getByTestId("mock-note").textContent).not.toContain("This is a mock");
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
-  expect((await screen.findByTestId("proposal-notice")).textContent).toContain("反映しました");
-  expect(screen.getByTestId("mock-note").textContent).toContain("実接続です");
+  expect((await screen.findByTestId("proposal-notice")).textContent).toContain("Applied to");
+  expect(screen.getByTestId("mock-note").textContent).toContain("Live connection");
 });
 
 test("判定ルール管理（実接続）の接続エラー: 原因ごとの固定の文言（設問管理と同じ網羅）を出す。成功にもモックにも見せない", async () => {
   const cases: [number, string, string][] = [
-    [504, "AIの応答がタイムアウトしました", "タイムアウトしました"],
-    [502, "AIのサービスに接続できませんでした", "AIの応答を得られませんでした"],
-    [502, "AIのサービスへのアクセスが許可されていません（権限とモデルの利用設定を確認してください）", "アクセスが許可されていません"],
-    [422, "AIの出力をJSONとして読めませんでした", "検証で拒否されました"],
+    [504, "The AI response timed out", "timed out"],
+    [502, "Could not connect to the AI service", "Could not get an AI response"],
+    [502, "Access to the AI service is not permitted (check the permissions and model access settings)", "not permitted"],
+    [422, "Could not read the AI output as JSON", "rejected by validation"],
   ];
   for (const [status, detail, expected] of cases) {
     stubFetch({ ...ruleRoutes(bedrock), "POST /api/admin/rule-proposals": { status, body: { detail } } });
@@ -165,8 +165,8 @@ test("判定ルール管理（実接続）の接続エラー: 原因ごとの固
     const text = (await screen.findByTestId("proposal-error")).textContent ?? "";
     expect(text, detail).toContain(expected);
     expect(text, detail).toContain(detail);
-    expect(text, detail).toContain("判定ルールの一覧は変わっていません");
-    expect(text, detail).not.toContain("モック");
+    expect(text, detail).toContain("The judgment rule list has not changed");
+    expect(text, detail).not.toContain("mock");
     expect(screen.queryByTestId("proposal"), detail).toBeNull();
     expect(screen.queryByTestId("source-badge"), detail).toBeNull();
     expect(screen.queryByTestId("proposal-notice"), detail).toBeNull();
@@ -217,19 +217,19 @@ function expectSource(proposal: HTMLElement, kind: "mock" | "bedrock") {
   const badge = within(proposal).getByTestId("source-badge");
   expect(badge.dataset.source).toBe(kind);
   if (kind === "bedrock") {
-    expect(badge.textContent).toContain("生成元: Amazon Bedrock（実接続）");
+    expect(badge.textContent).toContain("Source: Amazon Bedrock (live connection)");
     expect(badge.textContent).toContain("demo.model-v1:0");
     expect(badge.textContent).toContain("region-demo-1");
   } else {
-    expect(badge.textContent).toContain("生成元: モック");
+    expect(badge.textContent).toContain("Source: Mock");
     expect(badge.textContent).not.toContain("Bedrock");
   }
   expectNote(kind);
 }
 function expectNote(kind: "mock" | "bedrock") {
   const note = screen.getByTestId("mock-note").textContent ?? "";
-  expect(note).toContain(kind === "bedrock" ? "実接続です" : "モックです");
-  expect(note).not.toContain(kind === "bedrock" ? "モックです" : "実接続です");
+  expect(note).toContain(kind === "bedrock" ? "Live connection" : "This is a mock");
+  expect(note).not.toContain(kind === "bedrock" ? "This is a mock" : "Live connection");
 }
 
 const sources: ["mock" | "bedrock", unknown][] = [
@@ -242,14 +242,14 @@ for (const [kind, source] of sources) {
     stubFetch(retireRoutes(source));
     render(<QuestionAdmin />);
     await screen.findByText(newQuestion.text);
-    fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "設問A13を廃止して" } });
-    fireEvent.click(screen.getByRole("button", { name: "追加案を作る" }));
+    fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "Deactivate question A13" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
     const proposal = await screen.findByTestId("proposal");
-    expect(within(proposal).getByRole("heading", { name: /廃止案の確認/ })).toBeTruthy();
+    expect(within(proposal).getByRole("heading", { name: /Proposed change: deactivate question/ })).toBeTruthy();
     expectSource(proposal, kind);
 
     fireEvent.click(screen.getByRole("button", { name: "Yes" }));
-    expect((await screen.findByTestId("proposal-notice")).textContent).toContain("設問A13を廃止");
+    expect((await screen.findByTestId("proposal-notice")).textContent).toContain("question A13 deactivated");
     expect(screen.queryByTestId("source-badge")).toBeNull();
     expectNote(kind);
   });
@@ -258,14 +258,14 @@ for (const [kind, source] of sources) {
     stubFetch(removeRoutes(source));
     render(<RuleAdmin />);
     await screen.findByText("R03");
-    fireEvent.change(screen.getByLabelText("変更の依頼（自然文）"), { target: { value: "ルールR03を削除して" } });
-    fireEvent.click(screen.getByRole("button", { name: "案を作る" }));
+    fireEvent.change(screen.getByLabelText("Change request (plain language)"), { target: { value: "Remove rule R03" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create proposal" }));
     const proposal = await screen.findByTestId("proposal");
-    expect(within(proposal).getByRole("heading", { name: /削除案の確認/ })).toBeTruthy();
+    expect(within(proposal).getByRole("heading", { name: /Proposed change: remove rule/ })).toBeTruthy();
     expectSource(proposal, kind);
 
     fireEvent.click(screen.getByRole("button", { name: "Yes" }));
-    expect((await screen.findByTestId("proposal-notice")).textContent).toContain("ルールR03を削除");
+    expect((await screen.findByTestId("proposal-notice")).textContent).toContain("rule R03 removed");
     expect(screen.queryByTestId("source-badge")).toBeNull();
     expectNote(kind);
   });
@@ -281,7 +281,7 @@ test("設問管理: 競合（409）のあと、一覧の取り直しに失敗し
       listCalls += 1;
       return listCalls === 1 ? { body: { revision: 1, questions, mock: false, persistence: "memory", source: bedrock } } : { status: 500, body: {} };
     },
-    "POST /api/admin/question-proposals/p1/decision": { status: 409, body: { detail: "設問の一覧が提案の後に変わったため、反映しませんでした" } },
+    "POST /api/admin/question-proposals/p1/decision": { status: 409, body: { detail: "設問の一覧が提案の後に変わったため、nothing was applied" } },
   });
   render(<QuestionAdmin />);
   await proposeQuestion();
@@ -289,10 +289,10 @@ test("設問管理: 競合（409）のあと、一覧の取り直しに失敗し
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
   await screen.findByTestId("list-error");
   const note = screen.getByTestId("mock-note").textContent ?? "";
-  expect(note).toContain("確認できませんでした");
-  expect(note).not.toContain("確認しています");
-  expect(note).not.toContain("モックです");
-  expect(note).not.toContain("実接続です");
+  expect(note).toContain("Could not determine the AI source");
+  expect(note).not.toContain("Checking the AI source");
+  expect(note).not.toContain("This is a mock");
+  expect(note).not.toContain("Live connection");
 });
 
 test("判定ルール管理: 競合（409）のあと、一覧の取り直しに失敗したら、「確認しています」のままにせず、確認できなかったと伝える", async () => {
@@ -303,7 +303,7 @@ test("判定ルール管理: 競合（409）のあと、一覧の取り直しに
       listCalls += 1;
       return listCalls === 1 ? { body: { revision: 1, rules, mock: false, persistence: "memory", source: bedrock } } : { status: 500, body: {} };
     },
-    "POST /api/admin/rule-proposals/p1/decision": { status: 409, body: { detail: "判定ルールの一覧が提案の後に変わったため、反映しませんでした" } },
+    "POST /api/admin/rule-proposals/p1/decision": { status: 409, body: { detail: "判定ルールの一覧が提案の後に変わったため、nothing was applied" } },
   });
   render(<RuleAdmin />);
   await proposeRule();
@@ -311,8 +311,8 @@ test("判定ルール管理: 競合（409）のあと、一覧の取り直しに
   fireEvent.click(screen.getByRole("button", { name: "Yes" }));
   await screen.findByTestId("list-error");
   const note = screen.getByTestId("mock-note").textContent ?? "";
-  expect(note).toContain("確認できませんでした");
-  expect(note).not.toContain("確認しています");
-  expect(note).not.toContain("モックです");
-  expect(note).not.toContain("実接続です");
+  expect(note).toContain("Could not determine the AI source");
+  expect(note).not.toContain("Checking the AI source");
+  expect(note).not.toContain("This is a mock");
+  expect(note).not.toContain("Live connection");
 });

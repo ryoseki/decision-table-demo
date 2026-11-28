@@ -26,12 +26,12 @@ export type RuleProposal = {
 export type RuleDecision = "yes" | "no";
 export type RuleDecisionResult = DemoRuleList & { applied: boolean };
 
-const SUBJECT = "判定ルールの一覧";
+const SUBJECT = "The judgment rule list";
 // 提案は追加案・削除案・更新案がある。404の案内で「追加案」と決め打ちしない。
-const PROPOSAL_NAME = "案";
-const NETWORK_UNCHANGED = `サーバーに接続できませんでした。${SUBJECT}は変わっていません。`;
+const PROPOSAL_NAME = "proposal";
+const NETWORK_UNCHANGED = `Could not connect to the server. ${SUBJECT} has not changed.`;
 const NETWORK_UNKNOWN =
-  "サーバーに接続できませんでした。反映されたかどうかを確認できていません。もう一度送るか、一覧を再読み込みして確認してください。";
+  "Could not connect to the server. It is unknown whether the change was applied. Send it again or reload the list to check.";
 
 type ApiRule = { rule_id: string; revision: number; result_code: string; conditions: Record<string, "yes" | "no"> };
 type ApiList = { revision: number; rules: ApiRule[]; source?: unknown; persistence?: unknown; template_reuse?: boolean };
@@ -74,7 +74,7 @@ export async function createRuleProposal(prompt: string, requestId = proposalReq
   if (b.kind === "update") {
     const additions = Object.entries(b.added_conditions ?? {});
     if (!targetRule?.rule_id || additions.length === 0 || additions.some(([, answer]) => answer !== "yes" && answer !== "no")) {
-      throw new ApiError(502, `更新案の対象のルールまたは追加する条件を読み取れませんでした。案は表示せず、${SUBJECT}は変わっていません。`);
+      throw new ApiError(502, `Could not read the target rule or the conditions to add for the update proposal. The proposal is not shown, and ${SUBJECT} has not changed.`);
     }
   }
   return {

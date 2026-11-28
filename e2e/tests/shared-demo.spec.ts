@@ -3,7 +3,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import { backendUrl, frontendUrl } from "../playwright.config";
 
 const SHARED_BACKEND = "http://e2e-shared-backend:8000";
-const PROMPT = "E2E用の架空の共有設問";
+const PROMPT = "A fictional shared question for E2E";
 
 async function openSharedQuestions(page: Page, address: string | null = "192.0.2.10") {
   // エッジ（CloudFront Functions）が付与する専用ヘッダーを、テストのHTTP境界で再現する。
@@ -20,8 +20,8 @@ async function openSharedQuestions(page: Page, address: string | null = "192.0.2
 
 test("共有DBへの承認が別ブラウザに見え、利用枠超過では共有一覧が変わらない", async ({ page, browser }) => {
   await openSharedQuestions(page);
-  await page.getByLabel("変更の依頼（自然文）").fill(PROMPT);
-  await page.getByRole("button", { name: "追加案を作る" }).click();
+  await page.getByLabel("Change request (plain language)").fill(PROMPT);
+  await page.getByRole("button", { name: "Create proposal" }).click();
   await expect(page.getByTestId("proposal")).toBeVisible();
   await page.getByRole("button", { name: "Yes", exact: true }).click();
   await expect(page.getByTestId("proposal-notice")).toBeVisible();
@@ -30,13 +30,13 @@ test("共有DBへの承認が別ブラウザに見え、利用枠超過では共
   try {
     const visitor = await another.newPage();
     await openSharedQuestions(visitor);
-    const current = visitor.getByRole("region", { name: "現行のデモの設問一覧" });
+    const current = visitor.getByRole("region", { name: "Current demo question list" });
     await expect(current.getByText(PROMPT)).toBeVisible();
-    await expect(visitor.getByTestId("mock-note")).toContainText("他の来訪者にも見えます");
+    await expect(visitor.getByTestId("mock-note")).toContainText("visible to other visitors");
     const count = await current.getByRole("row").count();
-    await visitor.getByLabel("変更の依頼（自然文）").fill("利用枠超過の架空の依頼");
-    await visitor.getByRole("button", { name: "追加案を作る" }).click();
-    await expect(visitor.getByRole("alert")).toContainText("上限");
+    await visitor.getByLabel("Change request (plain language)").fill("A fictional request over the usage quota");
+    await visitor.getByRole("button", { name: "Create proposal" }).click();
+    await expect(visitor.getByRole("alert")).toContainText("limit");
     await expect(visitor.getByTestId("proposal")).toHaveCount(0);
     await expect(current.getByRole("row")).toHaveCount(count);
   } finally {
@@ -50,9 +50,9 @@ test("共有DBへの承認が別ブラウザに見え、利用枠超過では共
 async function intake(request: APIRequestContext, userId: string) {
   const response = await request.post(`${backendUrl}/api/intake/cases`, {
     data: {
-      summary: "共有ルール承認の確認用の案件。（架空・E2E）",
+      summary: "A case for checking shared rule approval. (fictional, E2E)",
       user: { user_id: userId },
-      inquiry: { subject: "心当たりのないログイン", body: "架空の問い合わせ。" },
+      inquiry: { subject: "Unrecognized login", body: "A fictional inquiry." },
     },
   });
   expect(response.status()).toBe(201);
@@ -80,8 +80,8 @@ test("共有DBで承認した判定ルールが、判定未登録の案件の照
     await route.fulfill({ response });
   });
   await page.goto("/#/admin/rules");
-  await page.getByLabel("変更の依頼（自然文）").fill("E2E用の架空のルールを追加して");
-  await page.getByRole("button", { name: "案を作る" }).click();
+  await page.getByLabel("Change request (plain language)").fill("Add a fictional rule for E2E");
+  await page.getByRole("button", { name: "Create proposal" }).click();
   await expect(page.getByTestId("proposal")).toBeVisible();
   await page.getByRole("button", { name: "Yes", exact: true }).click();
   await expect(page.getByTestId("proposal-notice")).toBeVisible();
@@ -91,17 +91,17 @@ test("共有DBで承認した判定ルールが、判定未登録の案件の照
   await expect(page.getByTestId("rule-R04")).toBeVisible(); // 実際の /api/rules で照合している
   expect(await judgment()).toEqual(before);
   await page.goto(`/#/cases/${judgedId}`);
-  await expect(page.getByText("登録済みの結果: 注意")).toBeVisible();
+  await expect(page.getByText("Registered result: Caution")).toBeVisible();
 });
 
 
-const TEMPLATE_HEADING = "AIを経由せずに反映する変更の依頼(完全一致)";
+const TEMPLATE_HEADING = "Saved requests (exact match, no AI call)";
 
 test("未知の依頼はBedrockで差分を作り、Yesで反映すると自動登録される。同じ依頼はAIを呼ばず、削除すると通常の生成に戻る", async ({ page }) => {
-  const prompt = "E2E用の再利用候補";
+  const prompt = "A reuse candidate for E2E";
   await openSharedQuestions(page, null);
-  const input = page.getByLabel("変更の依頼（自然文）");
-  const propose = page.getByRole("button", { name: "追加案を作る" });
+  const input = page.getByLabel("Change request (plain language)");
+  const propose = page.getByRole("button", { name: "Create proposal" });
   const summary = page.getByText(TEMPLATE_HEADING);
   // 定型文の一覧は、初期状態で閉じている。
   await expect(summary).toBeVisible();
@@ -112,35 +112,35 @@ test("未知の依頼はBedrockで差分を作り、Yesで反映すると自動�
   await page.getByRole("button", { name: "Yes", exact: true }).click();
   await expect(page.getByTestId("proposal-notice")).toBeVisible();
   // 登録の操作は画面にない。反映と同時に自動登録され、開いた一覧に現れる。
-  await expect(page.getByRole("button", { name: "再利用に登録" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Register for reuse" })).toHaveCount(0);
   await summary.click();
   const panel = page.locator("details.template-panel");
   await expect(panel.getByText(prompt, { exact: false })).toBeVisible();
   // 同じ文言は、再入力時の状態で既に操作済み（同じ設問がある）なので、重複して反映せず理由を出す。
   // 利用枠は使い切っているため、Bedrockを呼んでいれば「上限」になる。理由が出るのはアプリ内の経路。
   await propose.click();
-  await expect(page.getByRole("alert")).toContainText("既に存在");
+  await expect(page.getByRole("alert")).toContainText("already exists");
   await expect(page.getByTestId("proposal")).toHaveCount(0);
   // 削除すると、次の依頼から通常の生成（Bedrock）に戻る。
-  await panel.getByRole("button", { name: prompt + "を定型文から削除" }).click();
+  await panel.getByRole("button", { name: prompt + "" }).click();
   await expect(panel.getByText(prompt, { exact: false })).toHaveCount(0);
   await propose.click();
-  await expect(page.getByRole("alert")).toContainText("上限");
+  await expect(page.getByRole("alert")).toContainText("limit");
 });
 
 test("初期の定型文は、Bedrockを呼ばずに差分を作り、Yesで反映する。同じ依頼は、現在の状態で操作できない理由を出す", async ({ page }) => {
   await openSharedQuestions(page, "192.0.2.30");
   await page.goto("/#/admin/rules");
-  const prompt = "ルールR03を削除して";
-  await page.getByLabel("変更の依頼（自然文）").fill(prompt);
-  await page.getByRole("button", { name: "案を作る" }).click();
+  const prompt = "Remove rule R03";
+  await page.getByLabel("Change request (plain language)").fill(prompt);
+  await page.getByRole("button", { name: "Create proposal" }).click();
   await expect(page.getByTestId("source-badge")).toHaveAttribute("data-source", "template");
   await expect(page.getByTestId("proposal")).toContainText("R03");
   await page.getByRole("button", { name: "Yes", exact: true }).click();
   await expect(page.getByTestId("proposal-notice")).toBeVisible();
   // 反映済み。もう一度入力しても、重複して反映せず、理由を出す（Bedrockの枠も使わない）。
-  await page.getByLabel("変更の依頼（自然文）").fill(prompt);
-  await page.getByRole("button", { name: "案を作る" }).click();
+  await page.getByLabel("Change request (plain language)").fill(prompt);
+  await page.getByRole("button", { name: "Create proposal" }).click();
   await expect(page.getByRole("alert")).toContainText("R03");
   await expect(page.getByTestId("proposal")).toHaveCount(0);
   // 反映後も、定型文は一覧に残る（削除されない限り使える）。

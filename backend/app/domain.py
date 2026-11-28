@@ -141,10 +141,10 @@ def operation_from_receipt(target: str, payload: dict) -> dict:
 INITIAL_TEMPLATES = (
     (
         "question",
-        "設問A13を廃止して",
+        "Deactivate question A13",
         {"operation": "retire_question", "question_id": "A13"},
     ),
-    ("rule", "ルールR03を削除して", {"operation": "remove_rule", "rule_id": "R03"}),
+    ("rule", "Remove rule R03", {"operation": "remove_rule", "rule_id": "R03"}),
 )
 
 

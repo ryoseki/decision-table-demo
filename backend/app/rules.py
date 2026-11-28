@@ -25,5 +25,5 @@ def list_rules(request: Request) -> list[dict]:
         return shared.list_rows()
     store = request.app.state.case_store
     if not hasattr(store, "list_rules"):
-        raise HTTPException(status_code=503, detail="保存先のDBが設定されていません")
+        raise HTTPException(status_code=503, detail="The database is not configured")
     return store.list_rules()

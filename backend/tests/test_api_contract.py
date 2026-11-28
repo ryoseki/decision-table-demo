@@ -113,9 +113,7 @@ class ContractStore(intake.InMemoryCaseStore):
         if stored.get("result") is not None:
             raise JudgmentAlreadyRecorded(case_id)  # 登録済みは何も変えない
         if result_code not in RESULT_CODES:
-            raise InvalidJudgment(
-                f"result_code が定義済みのコードではありません: {result_code}"
-            )
+            raise InvalidJudgment(f"result_code is not a defined code: {result_code}")
         for code, answer in answers.items():
             if code not in QUESTION_CODES:
                 raise InvalidJudgment(f"案件にない設問です: {code}")
@@ -129,7 +127,8 @@ class ContractStore(intake.InMemoryCaseStore):
             for row in self.rule_rows
         ):
             raise InvalidJudgment(
-                f"採用ルールが存在しません: {rule_id} の版 {rule_revision}"
+                f"The adopted rule does not exist: rule {rule_id} revision "
+                f"{rule_revision}"
             )
         stored["result"] = {
             "result_code": result_code,
@@ -196,7 +195,7 @@ class CasesApiContract(unittest.TestCase):
     def test_get_unknown_case_is_404(self):
         status, body = send("GET", f"{self.server.base_url}/api/cases/CASE-NOPE")
         self.assertEqual(status, 404)
-        self.assertEqual(body["detail"], "案件がありません")
+        self.assertEqual(body["detail"], "Case not found")
 
     def test_get_after_intake_is_unjudged_and_does_not_call_the_mock(self):
         case_id = self.intake("456")
@@ -266,7 +265,7 @@ class CasesApiContract(unittest.TestCase):
     def test_put_unknown_case_is_404(self):
         status, body = self.judge("CASE-NOPE", {"result_code": "caution"})
         self.assertEqual(status, 404)
-        self.assertEqual(body["detail"], "案件がありません")
+        self.assertEqual(body["detail"], "Case not found")
 
     def test_put_saves_the_result_and_keeps_the_answers(self):
         case_id = self.intake_with_pending_a09()
@@ -313,7 +312,7 @@ class CasesApiContract(unittest.TestCase):
                     },
                 )
                 self.assertEqual(status, 422)
-                self.assertIn("採用ルールが存在しません", body["detail"])
+                self.assertIn("The adopted rule does not exist", body["detail"])
                 self.assertEqual(self.get(case_id), before)  # 結果も回答も変わらない
 
     def test_put_updates_only_the_given_answers(self):
@@ -362,7 +361,7 @@ class CasesApiContract(unittest.TestCase):
             with self.subTest(payload=payload):
                 status, body = self.judge(case_id, payload)
                 self.assertEqual(status, 409)
-                self.assertIn("再保存できません", body["detail"])
+                self.assertIn("cannot be saved again", body["detail"])
                 self.assertEqual(self.get(case_id), before)  # 結果も回答も採用も不変
 
     def test_put_rejects_adding_an_answer_to_a_case_registered_with_only_a_result(self):
@@ -716,7 +715,7 @@ class StoreBusyContract(unittest.TestCase):
         error = self.put_judgment()
         self.assertEqual(error.code, 503)
         self.assertEqual(error.headers["Retry-After"], "1")
-        self.assertIn("混み合っています", json.loads(error.read())["detail"])
+        self.assertIn("busy", json.loads(error.read())["detail"])
         # 再試行は保存先の中の仕事。HTTP層は1回しか呼ばず、何も保存されない。
         self.assertEqual(len(self.store.save_calls), 1)
         self.assertEqual(self.store.cases, {})
@@ -737,7 +736,7 @@ class StoreBusyContract(unittest.TestCase):
             "POST", f"{self.server.base_url}/api/intake/cases", case_payload("456")
         )
         self.assertEqual(status, 503)
-        self.assertIn("混み合っています", body["detail"])
+        self.assertIn("busy", body["detail"])
         self.assertEqual(self.mock_calls, [], "1回目の保存に失敗したらHTTPは呼ばない")
         request = urllib.request.Request(
             f"{self.server.base_url}/api/intake/cases",

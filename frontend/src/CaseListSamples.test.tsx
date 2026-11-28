@@ -42,7 +42,7 @@ function stubApi(opts: { lists: Reply[]; posts: (Reply | (() => Promise<Reply>))
         postCount += 1;
         keys.push(new Headers(init?.headers).get("Idempotency-Key"));
         next = posts.shift();
-      } else throw new Error(`想定外のリクエスト: ${key}`);
+      } else throw new Error(`Unexpected request: ${key}`);
       if (next === undefined) throw new Error(`応答の用意がない: ${key}`);
       const reply = typeof next === "function" ? await next() : next;
       return new Response(JSON.stringify(reply.body ?? {}), { status: reply.status ?? 200 });
@@ -51,7 +51,7 @@ function stubApi(opts: { lists: Reply[]; posts: (Reply | (() => Promise<Reply>))
   return { keys, postCount: () => postCount };
 }
 
-const button = () => screen.getByRole("button", { name: /サンプル案件を作成|作成中/ });
+const button = () => screen.getByRole("button", { name: /Create sample case|Creating/ });
 const idsShown = () =>
   screen.queryAllByRole("row").slice(1).map((r) => within(r).getByRole("rowheader").textContent);
 
@@ -72,7 +72,7 @@ test("押すと一覧に1件追加され、次に押してもさらに1件増え
   expect(api.keys[1]).not.toBe(api.keys[0]); // 成功のあとの押下は、新しい操作
   expect(screen.getByTestId("sample-notice").textContent).toContain(idOf(2));
   expect(idOf(2)).toHaveLength(13);
-  expect(screen.getByRole("link", { name: "審査を開く（" + idOf(2) + "）" }).getAttribute("href")).toBe(`#/cases/${idOf(2)}`);
+  expect(screen.getByRole("link", { name: "Open review (" + idOf(2) + ")" }).getAttribute("href")).toBe(`#/cases/${idOf(2)}`);
 });
 
 test("作成中はボタンを無効にして「作成中…」を出し、連打してもPOSTは1回だけ", async () => {
@@ -84,12 +84,12 @@ test("作成中はボタンを無効にして「作成中…」を出し、連�
   const target = button();
   fireEvent.click(target);
   fireEvent.click(target);
-  await waitFor(() => expect(button().textContent).toBe("作成中…"));
+  await waitFor(() => expect(button().textContent).toBe("Creating…"));
   expect(button().hasAttribute("disabled")).toBe(true);
   expect(api.postCount()).toBe(1);
   release(created(1));
   await screen.findByRole("table");
-  expect(button().textContent).toBe("サンプル案件を作成");
+  expect(button().textContent).toBe("Create sample case");
   expect(button().hasAttribute("disabled")).toBe(false);
 });
 
@@ -100,7 +100,7 @@ test("失敗したら、作成できなかったことと再試行できるこ�
   fireEvent.click(button());
   const alert = await screen.findByTestId("sample-error");
   expect(alert.getAttribute("role")).toBe("alert");
-  expect(alert.textContent).toContain("作成できませんでした");
-  expect(alert.textContent).toContain("再試行できます");
+  expect(alert.textContent).toContain("Could not create");
+  expect(alert.textContent).toContain("retry");
   expect(button().hasAttribute("disabled")).toBe(false);
 });

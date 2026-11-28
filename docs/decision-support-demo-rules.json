@@ -1,5 +1,5 @@
 {
-  "_note": "開発用DB（docker compose up）に入れる架空の判定ルール。画面の受入例1〜3用の組み合わせで、業務上の不正認定ルールではない。スキーマ検証用の docs/decision-support-sample.json とは別。",
+  "_note": "Fictional judgment rules loaded into the development database (docker compose up). Combinations for screen acceptance examples 1-3, not business fraud determination rules. Separate from docs/decision-support-sample.json, which is for schema verification.",
   "decision_rules": [
     {
       "rule_id": "R01",

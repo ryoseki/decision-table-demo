@@ -180,16 +180,16 @@ class SelectableResultsNeverRestricted(unittest.TestCase):
     def test_result_order_heavy_first(self):
         self.assertEqual(
             [r.value for r in Result],
-            ["アカウント削除", "アカウント一時凍結", "注意", "問題なし"],
+            ["Account deletion", "Account suspension", "Caution", "No issue"],
         )
 
 
 class DemoRulesMatchRequirements(unittest.TestCase):
     def test_rules_equal_requirements_table(self):
         table = {
-            "R01": ("注意", "YYYYYNYYYNYY"),
-            "R02": ("問題なし", "YNYYYYYYYYYN"),
-            "R03": ("アカウント一時凍結", "NYYYYNYYYNYY"),
+            "R01": ("Caution", "YYYYYNYYYNYY"),
+            "R02": ("No issue", "YNYYYYYYYYYN"),
+            "R03": ("Account suspension", "NYYYYNYYYNYY"),
         }
         for rule in DEMO_RULES:
             label, pattern = table[rule.rule_id]

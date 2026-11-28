@@ -27,8 +27,11 @@ from tests.test_api_contract import ContractStore
 from tests.test_intake import _Server, case_payload, send
 
 ADD_PROMPT = "APIキーの失効履歴を確認する設問を追加して"
-RETIRE_A13 = "設問A13を廃止して"
-A13_TEXT = "対象期間にAPIキーが失効されたか？"
+RETIRE_A13 = "Deactivate question A13"
+A13_TEXT = (
+    "Was an API key revoked during the target period? / "
+    "対象期間にAPIキーが失効されたか？"
+)
 
 
 def rule_row(rule_id: str, revision: int, *question_ids: str) -> dict:
@@ -232,7 +235,7 @@ class TestRetirementProposal(RetirementTestCase):
         self.assertEqual(self.decide(proposal["proposal_id"], "yes")[0], 200)
         status, body = self.propose(RETIRE_A13)
         self.assertEqual(status, 422)
-        self.assertIn("廃止済み", body["detail"])
+        self.assertIn("deactivated", body["detail"])
 
     def test_retirement_needs_a_rule_and_case_store_503_and_changes_nothing(
         self,
@@ -294,7 +297,7 @@ class TestRetirementDecision(RetirementTestCase):
         status, body = self.decide(proposal["proposal_id"], "yes")
         self.assertEqual(status, 409)
         self.assertIn("R01", body["detail"])
-        self.assertIn("廃止できません", body["detail"])
+        self.assertIn("cannot be deactivated", body["detail"])
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.decide(proposal["proposal_id"], "yes")[0], 404)
 
@@ -488,7 +491,7 @@ class TestPureFunctions(unittest.TestCase):
                 {"operation": "retire_question", "question_id": "A99"},
                 self.CURRENT,
             ),
-            "形式": (
+            "format": (
                 {"operation": "retire_question", "question_id": "13"},
                 self.CURRENT,
             ),
@@ -497,7 +500,7 @@ class TestPureFunctions(unittest.TestCase):
                 {"operation": "retire_question", "question_id": "A13", "x": 1},
                 self.CURRENT,
             ),
-            "廃止済み": (
+            "retired": (
                 {"operation": "retire_question", "question_id": "A13"},
                 retired,
             ),

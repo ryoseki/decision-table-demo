@@ -7,7 +7,7 @@ import { questions, type QuestionId } from "./questions";
 export type Answer = "yes" | "no" | "pending";
 
 /** 画面案の登録結果（定義済みの4種。初版の範囲で合意済みの名称） */
-export type ResultName = "アカウント削除" | "アカウント一時凍結" | "注意" | "問題なし";
+export type ResultName = "Account deletion" | "Account suspension" | "Caution" | "No issue";
 
 export type ReviewCase = {
   caseId: string;
@@ -42,9 +42,9 @@ export const cases: readonly ReviewCase[] = [
   {
     caseId: "CASE-A",
     userId: "456",
-    summary: "心当たりのないログインとクレジット消費",
+    summary: "Unrecognized login and credit usage",
     inquiry:
-      "昨夜のログインに心当たりがなく、今朝クレジットが減っていた。調査資料にはAPIキーへの言及がある。",
+      "I do not recognize last night's login, and my credits had dropped this morning. The investigation materials mention an API key.",
     answers: {
       A01: "yes", A02: "yes", A03: "yes", A04: "yes", A05: "yes", A06: "no",
       A07: "yes", A08: "yes", A09: "yes", A10: "no", A11: "yes", A12: "yes",
@@ -54,54 +54,54 @@ export const cases: readonly ReviewCase[] = [
   {
     caseId: "CASE-B",
     userId: "782",
-    summary: "身に覚えのないログイン通知",
-    inquiry: "知らない端末からログインしたという通知メールが届いた。まだ何も調べていない。",
+    summary: "Unrecognized login notification",
+    inquiry: "I received an email saying someone logged in from an unknown device. I have not checked anything yet.",
     answers: {},
   },
   {
     caseId: "CASE-C",
     userId: "219",
-    summary: "メールアドレス変更の通知に心当たりがない",
-    inquiry: "登録メールアドレスが変わったという通知が届いたが、自分では変更していない。",
+    summary: "Unrecognized email address change notification",
+    inquiry: "I received a notification that my registered email address changed, but I did not change it.",
     answers: { A01: "yes", A03: "yes" },
   },
   {
     caseId: "CASE-D",
     userId: "903",
-    summary: "APIキー発行の通知に心当たりがない",
-    inquiry: "新しいAPIキーが発行されたという通知が届いたが、自分では発行していない。",
+    summary: "Unrecognized API key issuance notification",
+    inquiry: "I received a notification that a new API key was issued, but I did not issue it.",
     answers: { A01: "yes", A03: "no", A05: "no", A07: "yes", A09: "pending" },
     autoQuestions: ["A01", "A03", "A09"],
-    pendingReasons: { A09: "APIキー発行履歴の自動回答を取得できませんでした（通信エラー）。" },
+    pendingReasons: { A09: "Could not retrieve the automatic answer from the API key issuance history (communication error)." },
   },
   {
     caseId: "CASE-E",
     userId: "118",
-    summary: "ログイン失敗の通知が多数届いた",
-    inquiry: "ログインに失敗したという通知が夜間に何件も届いた。サインインできている。",
+    summary: "Many failed-login notifications overnight",
+    inquiry: "Many notifications of failed logins arrived overnight. I can sign in.",
     answers: { A01: "yes", A03: "no" },
-    result: "問題なし",
+    result: "No issue",
   },
   {
     caseId: "CASE-F",
     userId: "561",
-    summary: "APIの利用量が急に増えた",
-    inquiry: "APIの利用量が普段より急に増えているので確認してほしい。",
+    summary: "API usage suddenly increased",
+    inquiry: "API usage has suddenly increased compared with usual. Please check.",
     answers: { A01: "yes", A03: "no", A09: "no" },
-    result: "問題なし",
+    result: "No issue",
   },
   {
     caseId: "CASE-G",
     userId: "340",
-    summary: "パスワード変更の覚えがない",
-    inquiry: "パスワードが変更されたと表示されたが、自分では変更した覚えがない。",
+    summary: "Unrecognized password change",
+    inquiry: "It showed that my password was changed, but I do not recall changing it.",
     answers: { A01: "no", A02: "no", A05: "pending" },
-    pendingReasons: { A05: "アカウント変更履歴を取得できませんでした（通信エラー）。" },
+    pendingReasons: { A05: "The account change history could not be retrieved (communication error)." },
   },
 ];
 
-export type CaseStatus = "未審査" | "取得エラー" | "登録済み";
-export const caseStatuses: readonly CaseStatus[] = ["未審査", "取得エラー", "登録済み"];
+export type CaseStatus = "Not reviewed" | "Pending data" | "Registered";
+export const caseStatuses: readonly CaseStatus[] = ["Not reviewed", "Pending data", "Registered"];
 
 export type Tally = { yes: number; no: number; pending: number; unanswered: number };
 
@@ -121,13 +121,13 @@ export function tally(c: ReviewCase): Tally {
 export function answerLabel(answer: Answer | null | undefined): string {
   if (answer === "yes") return "Yes";
   if (answer === "no") return "No";
-  if (answer === "pending") return "確認待ち";
-  return "未回答";
+  if (answer === "pending") return "Pending";
+  return "Unanswered";
 }
 
 /** 表示用の状態。登録結果の有無と、回答の集計（確認待ちの有無）から計算する。 */
 export function statusOf(c: { result?: ResultName; counts: Tally }): CaseStatus {
-  if (c.result !== undefined) return "登録済み";
-  if (c.counts.pending > 0) return "取得エラー";
-  return "未審査";
+  if (c.result !== undefined) return "Registered";
+  if (c.counts.pending > 0) return "Pending data";
+  return "Not reviewed";
 }

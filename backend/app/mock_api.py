@@ -33,7 +33,10 @@ async def auto_answer(
     x_mock_fault: Annotated[str | None, Header()] = None,
 ) -> dict[str, str | int]:
     if question_code not in AUTO_ANSWER_KEYS:
-        raise HTTPException(status_code=404, detail="自動回答の対象外の設問です")
+        raise HTTPException(
+            status_code=404,
+            detail="This question is not eligible for automatic answers",
+        )
     if x_mock_fault == FAULT_TIMEOUT:
         await asyncio.sleep(FAULT_DELAY_SECONDS)
     if body.sample_number is not None:
@@ -43,7 +46,9 @@ async def auto_answer(
     else:
         raise HTTPException(
             status_code=422,
-            detail="user_id を整数にできません（sample_number もありません）",
+            detail=(
+                "user_id cannot be read as an integer (and there is no sample_number)"
+            ),
         )
     # 偶数がYes、奇数がNo（設計案の規則）。
     answer = "yes" if number % 2 == 0 else "no"

@@ -39,7 +39,7 @@ test("取得中は読み込み中を表示し、取得できたら、行を案�
   await screen.findByRole("table");
   expect(screen.queryByTestId("list-loading")).toBeNull();
   expect(rowsShown()).toEqual(["CASE-A", "CASE-B", "CASE-C"]);
-  expect(screen.getByText(/件を表示/).textContent).toContain("3件を表示（全3件）");
+  expect(screen.getByText(/Showing/).textContent).toContain("Showing 3 of 3");
 });
 
 test("各行に、user_id、概要、回答の件数、状態（結果と確認待ちから導く）を表示する", async () => {
@@ -49,17 +49,17 @@ test("各行に、user_id、概要、回答の件数、状態（結果と確認�
   const row = (id: string) => screen.getByText(id).closest("tr")!;
   expect(row("CASE-A").textContent).toContain("user_id 123");
   expect(row("CASE-A").textContent).toContain("ログインの通知");
-  expect(within(row("CASE-A")).getByText("未審査")).toBeTruthy();
-  expect(within(row("CASE-B")).getByText("取得エラー")).toBeTruthy(); // 確認待ちがある
-  expect(within(row("CASE-B")).getByText("確認待ち 1")).toBeTruthy();
-  expect(within(row("CASE-C")).getByText("登録済み")).toBeTruthy(); // 結果がある
+  expect(within(row("CASE-A")).getByText("Not reviewed")).toBeTruthy();
+  expect(within(row("CASE-B")).getByText("Pending data")).toBeTruthy(); // 確認待ちがある
+  expect(within(row("CASE-B")).getByText("Pending 1")).toBeTruthy();
+  expect(within(row("CASE-C")).getByText("Registered")).toBeTruthy(); // 結果がある
 });
 
 test("各行から、案件の詳細へ移れる（リンク先は #/cases/<案件ID>）", async () => {
   stubFetch({ "GET /api/cases": { body: ROWS } });
   render(<Harness />);
   await screen.findByRole("table");
-  const link = screen.getByRole("link", { name: /審査を開く.*CASE-B/ });
+  const link = screen.getByRole("link", { name: /Open review.*CASE-B/ });
   expect(link.getAttribute("href")).toBe("#/cases/CASE-B");
 });
 
@@ -80,11 +80,11 @@ test("状態で絞り込む。条件に合う案件がなければ空の表示�
   stubFetch({ "GET /api/cases": { body: ROWS } });
   render(<Harness />);
   await screen.findByRole("table");
-  fireEvent.change(screen.getByLabelText("状態"), { target: { value: "取得エラー" } });
+  fireEvent.change(screen.getByLabelText("Status"), { target: { value: "Pending data" } });
   expect(rowsShown()).toEqual(["CASE-B"]);
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "存在しない語" } });
   expect(screen.getByTestId("empty-list")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "条件をクリア" }));
+  fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
   expect(rowsShown()).toEqual(["CASE-A", "CASE-B", "CASE-C"]);
 });
 
@@ -98,9 +98,9 @@ test("取得に失敗したら、エラーを表示する（行は出さない�
   stubFetch({ "GET /api/cases": { status: 503 } });
   render(<Harness />);
   const alert = await screen.findByTestId("list-error");
-  expect(alert.textContent).toContain("取得できませんでした");
+  expect(alert.textContent).toContain("Could not retrieve");
   expect(alert.textContent).toContain("HTTP 503");
-  expect(alert.textContent).toContain("混み合っています");
+  expect(alert.textContent).toContain("busy");
   expect(screen.queryByRole("table")).toBeNull();
   expect(screen.queryByRole("searchbox")).toBeNull(); // 取得できていないときは、検索欄を出さない
 });

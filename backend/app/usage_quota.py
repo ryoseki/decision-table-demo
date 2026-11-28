@@ -60,14 +60,15 @@ class QuotaLimits:
         for value in (self.per_ip, self.global_):
             if not LIMIT_RANGE[0] <= value <= LIMIT_RANGE[1]:
                 raise ValueError(
-                    f"利用枠の上限は {LIMIT_RANGE[0]} 以上 {LIMIT_RANGE[1]} 以下"
+                    f"The usage quota limit must be between {LIMIT_RANGE[0]} and "
+                    f"{LIMIT_RANGE[1]}"
                 )
 
 
 def usage_day(now: datetime) -> date:
     """日本時間での、その時刻の日付（利用枠の1日）。タイムゾーンなしは拒否する。"""
     if now.tzinfo is None:
-        raise ValueError("now はタイムゾーン付きにする")
+        raise ValueError("now must be timezone-aware")
     return now.astimezone(JST).date()
 
 
@@ -85,17 +86,17 @@ def viewer_key(header_value: str | None) -> str:
     スコープID・IPとして読めない値は拒否する。
     """
     if header_value is None:
-        raise ViewerAddressUnavailable("ヘッダーがありません")
+        raise ViewerAddressUnavailable("The header is missing")
     if (
         not header_value
         or not header_value.isascii()
         or not all(c in "0123456789abcdefABCDEF:." for c in header_value)
     ):
-        raise ViewerAddressUnavailable("ヘッダーの形式が不正です")
+        raise ViewerAddressUnavailable("The header format is invalid")
     try:
         address = ipaddress.ip_address(header_value)
     except ValueError:
-        raise ViewerAddressUnavailable("IPアドレスを読み取れません") from None
+        raise ViewerAddressUnavailable("Cannot read the IP address") from None
     if isinstance(address, ipaddress.IPv6Address):
         if address.ipv4_mapped is not None:
             address = address.ipv4_mapped
@@ -108,5 +109,5 @@ def viewer_key(header_value: str | None) -> str:
 def hash_subject(secret: bytes, key: str) -> str:
     """接続元の文字列を、鍵付きHMAC-SHA256の16進に変換する（保存・集計に使う値）。"""
     if len(secret) < MIN_SECRET_BYTES:
-        raise ValueError(f"HMACの鍵は {MIN_SECRET_BYTES} バイト以上にする")
+        raise ValueError(f"The HMAC key must be at least {MIN_SECRET_BYTES} bytes")
     return hmac.new(secret, key.encode("ascii"), sha256).hexdigest()

@@ -19,20 +19,20 @@ test("一覧: 行を、画面の形に変換する。結果コードは表示名
   expect(rows[0]).toEqual({
     caseId: "CASE-A",
     userId: "456",
-    summary: "架空の概要",
-    inquiry: "架空の本文",
+    summary: "Fictional summary",
+    inquiry: "Fictional body",
     counts: { yes: 1, no: 0, pending: 0, unanswered: 11 },
   });
   expect(rows[0]).not.toHaveProperty("result"); // 未判定は、結果なし
-  expect(rows[1].result).toBe("注意");
+  expect(rows[1].result).toBe("Caution");
 });
 
 test("詳細: 回答のある設問だけを answers にする（未回答は入れない）。結果を表示名にする", async () => {
   stubFetch({ "GET /api/cases/CASE-X": { body: apiCase({ result: { result_code: "no_issue" } }) } });
   const c = await getCase("CASE-X");
-  expect(c).toMatchObject({ caseId: "CASE-X", userId: "456", summary: "架空の概要", inquiry: "架空の本文" });
+  expect(c).toMatchObject({ caseId: "CASE-X", userId: "456", summary: "Fictional summary", inquiry: "Fictional body" });
   expect(c.answers).toEqual({ A09: "yes" });
-  expect(c.result).toBe("問題なし");
+  expect(c.result).toBe("No issue");
 });
 
 test("詳細: 案件IDは、URLエンコードして送る", async () => {
@@ -48,7 +48,7 @@ test("詳細: 確認待ちの回答を、そのまま pending にする", async 
 });
 
 test("詳細: 404 と 500 は ApiError にし、statusを保つ", async () => {
-  stubFetch({ "GET /api/cases/NONE": { status: 404, body: { detail: "案件がありません" } } });
+  stubFetch({ "GET /api/cases/NONE": { status: 404, body: { detail: "Case not found" } } });
   await expect(getCase("NONE")).rejects.toMatchObject({ name: "ApiError", status: 404 });
   stubFetch({ "GET /api/cases/BAD": { status: 500 } });
   await expect(getCase("BAD")).rejects.toMatchObject({ status: 500 });
@@ -59,17 +59,17 @@ test("通信できないときは、status 0 の ApiError にする", async () =
   const error = await listCases().catch((e: unknown) => e);
   expect(error).toBeInstanceOf(ApiError);
   expect(error).toMatchObject({ status: 0 });
-  expect(describeError(error)).toContain("接続できませんでした");
+  expect(describeError(error)).toContain("Could not connect");
 });
 
 test("定義にない結果コードが返ってきたら、例外にする", async () => {
   stubFetch({ "GET /api/cases": { body: [apiRow({ result_code: "unknown" })] } });
-  await expect(listCases()).rejects.toThrow("定義にない結果コード");
+  await expect(listCases()).rejects.toThrow("Unknown result code");
 });
 
 test("保存: PUT で、結果コードだけを送る（回答を渡さないとき）", async () => {
   const spy = stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 204 } });
-  await saveJudgment("CASE-X", "アカウント一時凍結");
+  await saveJudgment("CASE-X", "Account suspension");
   const init = spy.mock.calls[0][1] as RequestInit;
   expect(init.method).toBe("PUT");
   const headers = new Headers(init.headers);
@@ -80,40 +80,40 @@ test("保存: PUT で、結果コードだけを送る（回答を渡さない�
 
 test("保存: 422 などの拒否は ApiError にする", async () => {
   stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 422, body: { detail: "x" } } });
-  await expect(saveJudgment("CASE-X", "注意")).rejects.toMatchObject({ status: 422 });
+  await expect(saveJudgment("CASE-X", "Caution")).rejects.toMatchObject({ status: 422 });
 });
 
 test("保存: 登録済みの案件への保存（409）は、status 409 の ApiError にする（画面が、再試行を促さずに扱える）", async () => {
-  stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 409, body: { detail: "登録済み" } } });
-  const error = await saveJudgment("CASE-X", "注意").catch((e: unknown) => e);
+  stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 409, body: { detail: "Registered" } } });
+  const error = await saveJudgment("CASE-X", "Caution").catch((e: unknown) => e);
   expect(error).toBeInstanceOf(ApiError);
   expect(error).toMatchObject({ status: 409 });
 });
 
 test("保存: 503（保存先が混み合っている）は、混み合っている旨と、入力が残る旨を伝える", async () => {
   stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 503, body: { detail: "x" } } });
-  const error = await saveJudgment("CASE-X", "注意").catch((e: unknown) => e);
+  const error = await saveJudgment("CASE-X", "Caution").catch((e: unknown) => e);
   expect(error).toBeInstanceOf(ApiError);
   expect((error as ApiError).status).toBe(503);
-  expect(describeError(error)).toContain("混み合っています");
-  expect(describeError(error)).toContain("入力は残っています");
+  expect(describeError(error)).toContain("busy");
+  expect(describeError(error)).toContain("Your input is kept");
 });
 
 test("取得: 503 は、混み合っている旨だけを伝える（保存の入力は無いので、入力が残る旨は言わない）", async () => {
   stubFetch({ "GET /api/cases/CASE-X": { status: 503, body: { detail: "x" } } });
   const error = await getCase("CASE-X").catch((e: unknown) => e);
   expect((error as ApiError).status).toBe(503);
-  expect(describeError(error)).toContain("混み合っています");
-  expect(describeError(error)).not.toContain("入力は残っています");
+  expect(describeError(error)).toContain("busy");
+  expect(describeError(error)).not.toContain("Your input is kept");
 });
 
 test("ApiError でないものは、一般の文言にする", () => {
-  expect(describeError(new Error("内部の詳細"))).toBe("予期しないエラーが発生しました");
+  expect(describeError(new Error("内部の詳細"))).toBe("An unexpected error occurred");
 });
 
 test("保存: 変更した回答があれば、answers として一緒に送る", async () => {
   const spy = stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 204 } });
-  await saveJudgment("CASE-X", "問題なし", { A09: "no", A03: "yes" });
+  await saveJudgment("CASE-X", "No issue", { A09: "no", A03: "yes" });
   const init = spy.mock.calls[0][1] as RequestInit;
   expect(JSON.parse(init.body as string)).toEqual({ result_code: "no_issue", answers: { A09: "no", A03: "yes" } });
 });
@@ -128,7 +128,7 @@ test("ルール: APIの行を、照合用の形（id・結果の表示名・12�
     },
   });
   const rules = await listRules();
-  expect(rules.map((r) => [r.id, r.result])).toEqual([["R01", "注意"], ["R02", "アカウント削除"]]);
+  expect(rules.map((r) => [r.id, r.result])).toEqual([["R01", "Caution"], ["R02", "Account deletion"]]);
   expect(Object.keys(rules[0].expected)).toHaveLength(12);
   expect(rules[0].expected.A12).toBe("yes");
   expect(rules[1].expected.A01).toBe("no");
@@ -147,9 +147,9 @@ test("ルール: 一部の設問だけに条件があるルールは、その設
 
 test("ルール: 条件の値が yes／no でない・A01〜A12にない設問は、黙って使わず、エラーにする", async () => {
   stubFetch({ "GET /api/rules": { body: [{ rule_id: "R09", revision: 1, result_code: "caution", conditions: { A05: "maybe" } }] } });
-  await expect(listRules()).rejects.toThrow(/R09.*A05/);
+  await expect(listRules()).rejects.toThrow(/R09.*A05|A05.*R09/);
   stubFetch({ "GET /api/rules": { body: [{ rule_id: "R08", revision: 1, result_code: "caution", conditions: { B99: "yes" } }] } });
-  await expect(listRules()).rejects.toThrow(/R08.*B99/);
+  await expect(listRules()).rejects.toThrow(/R08.*B99|B99.*R08/);
 });
 
 test("ルール: 定義にない結果コードは、エラーにする", async () => {
@@ -180,9 +180,9 @@ test("ルール: 版（revision）を持つ", async () => {
 
 test("判定: 採用ルールは、採用しているときだけ rule_id と rule_revision を送る。結果だけなら送らない", async () => {
   const spy = stubFetch({ "PUT /api/cases/CASE-X/judgment": { status: 204 } });
-  await saveJudgment("CASE-X", "注意", {}, { ruleId: "R01", revision: 2 });
+  await saveJudgment("CASE-X", "Caution", {}, { ruleId: "R01", revision: 2 });
   expect(JSON.parse(String(spy.mock.calls[0][1]?.body))).toEqual({ result_code: "caution", rule_id: "R01", rule_revision: 2 });
-  await saveJudgment("CASE-X", "注意", {});
+  await saveJudgment("CASE-X", "Caution", {});
   expect(JSON.parse(String(spy.mock.calls[1][1]?.body))).toEqual({ result_code: "caution" });
 });
 

@@ -20,7 +20,7 @@ intake() {
   local summary="$1" user_id="$2" fault="${3:-}" controls=""
   [ -n "$fault" ] && controls=",\"demo_controls\":{\"fault_questions\":[\"$fault\"]}"
   local body response
-  body="{\"summary\":\"$summary\",\"user\":{\"user_id\":\"$user_id\"},\"inquiry\":{\"subject\":\"架空の問い合わせ\",\"body\":\"$summary（架空）\"}$controls}"
+  body="{\"summary\":\"$summary\",\"user\":{\"user_id\":\"$user_id\"},\"inquiry\":{\"subject\":\"Fictional inquiry\",\"body\":\"$summary (fictional inquiry)\"}$controls}"
   if ! response="$(curl -sf -X POST "$api/api/intake/cases" -H 'Content-Type: application/json' -d "$body")"; then
     echo "デモ案件: 受付に失敗しました（$summary）。" >&2
     return 1
@@ -29,10 +29,10 @@ intake() {
 }
 
 # user_id が偶数なら A09=Yes、奇数なら No（モックの契約）。
-a="$(intake "身に覚えのないログインの通知が届いた" 456)" || exit 1
-b="$(intake "メールアドレス変更の通知に心当たりがない" 457)" || exit 1
-c="$(intake "APIキー発行の通知に心当たりがない（取得に失敗）" 458 A09)" || exit 1
-d="$(intake "ログイン失敗の通知が夜間に何件も届いた" 460)" || exit 1
+a="$(intake "Unrecognized login notification" 456)" || exit 1
+b="$(intake "Unrecognized email address change notification" 457)" || exit 1
+c="$(intake "Unrecognized API key issuance notification (retrieval failed)" 458 A09)" || exit 1
+d="$(intake "Many failed-login notifications overnight" 460)" || exit 1
 
 # 登録済みの案件: 結果「問題なし」（no_issue）を保存する。
 if ! curl -sf -X PUT "$api/api/cases/$d/judgment" -H 'Content-Type: application/json' \

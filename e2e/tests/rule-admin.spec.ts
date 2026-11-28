@@ -11,9 +11,9 @@ import { backendUrl } from "../playwright.config";
 // 前提: 実行開始時のデモのルール一覧は初期状態（R01〜R03。次の追加はR04）。playwright.config.ts は retries: 0 で、
 // 失敗しても同じ起動中に再試行しない（再試行すると、反映済みのR04が残り、初期状態の前提が崩れる）。
 // 再実行は、バックエンドを再起動（compose の作り直し）してから行う。retries を設定する場合は、この前提を見直す。
-const UNKNOWN_PROMPT = "設問A99がYesのとき注意とするルールを追加して";
+const UNKNOWN_PROMPT = "Add a rule that gives Caution when A99 is Yes";
 // 追加するR04は、次のテスト（条件の更新）の準備を兼ねる。A09は、更新の依頼で足すので、ここでは使わない。
-const PROMPT = "設問A10がNo、設問A11がYesのとき注意とするルールを追加して";
+const PROMPT = "Add a rule that gives Caution when A10 is No and A11 is Yes";
 
 type ApiRule = { rule_id: string; conditions: Record<string, string>; result_code: string };
 
@@ -28,24 +28,24 @@ test("判定ルールの追加案: 存在しない設問は検証エラーで変
   const initialReview = await reviewRuleIds();
 
   await page.goto("/");
-  await page.getByRole("link", { name: "判定ルール管理" }).click();
-  await expect(page.getByRole("heading", { name: "判定ルール管理（デモ）" })).toBeVisible();
-  await expect(page.getByTestId("target")).toHaveText("操作の対象: 判定ルール"); // 設問ではなく、判定ルールを操作する画面
-  await expect(page.getByTestId("mock-note")).toContainText("モックです");
-  await expect(page.getByTestId("mock-note")).not.toContainText("実接続です");
-  const current = page.getByRole("region", { name: "現行のデモの判定ルール一覧" });
+  await page.getByRole("link", { name: "Rule admin" }).click();
+  await expect(page.getByRole("heading", { name: "Rule admin (demo)" })).toBeVisible();
+  await expect(page.getByTestId("target")).toHaveText("Editing: Judgment rules"); // 設問ではなく、判定ルールを操作する画面
+  await expect(page.getByTestId("mock-note")).toContainText("This is a mock");
+  await expect(page.getByTestId("mock-note")).not.toContainText("Live connection");
+  const current = page.getByRole("region", { name: "Current demo rule list" });
   await expect(current.getByRole("row")).toHaveCount(4); // 見出し + R01〜R03
   const initial = await demoRules();
   expect(initial.rules.map((r) => r.rule_id)).toEqual(["R01", "R02", "R03"]);
 
   const propose = async (prompt: string) => {
-    await page.getByLabel("変更の依頼（自然文）").fill(prompt);
-    await page.getByRole("button", { name: "案を作る" }).click();
+    await page.getByLabel("Change request (plain language)").fill(prompt);
+    await page.getByRole("button", { name: "Create proposal" }).click();
   };
 
   // 1) 存在しない設問を参照するルールの案: 検証エラー。プレビューは出ず、現行データは変わらない。
   await propose(UNKNOWN_PROMPT);
-  await expect(page.getByTestId("proposal-error")).toContainText("設問A99は存在しません");
+  await expect(page.getByTestId("proposal-error")).toContainText("Question A99 does not exist");
   await expect(page.getByTestId("proposal")).toHaveCount(0);
   await expect(current.getByRole("row")).toHaveCount(4);
   expect(await demoRules()).toEqual(initial);
@@ -54,20 +54,20 @@ test("判定ルールの追加案: 存在しない設問は検証エラーで変
   await propose(PROMPT);
   await expect(page.getByTestId("proposal")).toBeVisible();
   await expect(page.getByTestId("proposal-error")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: /判定ルールの追加案の確認/ })).toBeVisible();
-  const before = page.getByRole("region", { name: "Before（現行）" });
-  const after = page.getByRole("region", { name: "After（反映した場合）" });
+  await expect(page.getByRole("heading", { name: /Proposed change: add rule/ })).toBeVisible();
+  const before = page.getByRole("region", { name: "Before (current)" });
+  const after = page.getByRole("region", { name: "After (if applied)" });
   await expect(before.getByRole("row")).toHaveCount(4);
   await expect(after.getByRole("row")).toHaveCount(5);
-  const added = after.getByTestId("After（反映した場合）-R04");
-  await expect(added).toContainText("追加");
+  const added = after.getByTestId("After (if applied)-R04");
+  await expect(added).toContainText("Added");
   await expect(added).toContainText("A10=No");
   await expect(added).toContainText("A11=Yes");
   await expect(added).toHaveClass(/row-added/);
-  await expect(page.getByText("反映しますか？")).toBeVisible();
+  await expect(page.getByText("Apply this change?")).toBeVisible();
   // 生成元: 既定のモックで動いたことが、差分の確認画面に出る（Bedrockの実接続とは区別される）。
   await expect(page.getByTestId("source-badge")).toHaveAttribute("data-source", "mock");
-  await expect(page.getByTestId("source-badge")).toContainText("生成元: モック");
+  await expect(page.getByTestId("source-badge")).toContainText("Source: Mock");
   expect(await demoRules()).toEqual(initial); // 承認前は変わらない
   await page.getByRole("button", { name: "No" }).click();
   await expect(page.getByTestId("proposal")).toHaveCount(0);
@@ -78,14 +78,14 @@ test("判定ルールの追加案: 存在しない設問は検証エラーで変
   await propose(PROMPT);
   await expect(page.getByTestId("proposal")).toBeVisible();
   await page.getByRole("button", { name: "Yes" }).click();
-  await expect(page.getByTestId("proposal-notice")).toContainText("デモの判定ルール一覧に反映しました");
+  await expect(page.getByTestId("proposal-notice")).toContainText("Applied to the demo rule list");
   await expect(page.getByTestId("proposal")).toHaveCount(0);
   await expect(current.getByRole("row")).toHaveCount(5);
-  await expect(current.getByTestId("現行のデモの判定ルール一覧-R04")).toBeVisible();
+  await expect(current.getByTestId("Current demo rule list-R04")).toBeVisible();
 
   // 再読み込みしても残る（バックエンドのメモリ。DBではない）。審査画面のルールは変わらない。
   await page.reload();
-  await expect(current.getByTestId("現行のデモの判定ルール一覧-R04")).toBeVisible();
+  await expect(current.getByTestId("Current demo rule list-R04")).toBeVisible();
   const state = await demoRules();
   expect(state.persistence).toBe("memory");
   const r04 = state.rules.at(-1);
@@ -104,7 +104,7 @@ test("判定ルールの追加案: 存在しない設問は検証エラーで変
 // 生成は、既定のモック（固定の規則。生成スタブ）。
 // 細かい挙動（版の競合、定型依頼の再利用、無効な参照など）は、画面の部品テスト（RuleAdminUpdate.test.tsx）と
 // API契約テスト（backend/tests/test_rule_update.py）、DB統合テスト（test_db_store.py）で確認する。
-const UPDATE_PROMPT = "R04にA09がYesを追加して";
+const UPDATE_PROMPT = "Add condition A09=Yes to R04";
 
 test("判定ルールの更新案: R04の条件だけが追加され（R05は作られない）、No で変わらず、Yes で反映される。対象がない・追加済みは理由が出て変わらない", async ({
   page,
@@ -130,18 +130,18 @@ test("判定ルールの更新案: R04の条件だけが追加され（R05は作
   expect(r04Before).toMatchObject({ revision: 1, result_code: "caution", conditions: { A10: "no", A11: "yes" } });
 
   await page.goto("/");
-  await page.getByRole("link", { name: "判定ルール管理" }).click();
-  await expect(page.getByRole("heading", { name: "判定ルール管理（デモ）" })).toBeVisible();
-  const current = page.getByRole("region", { name: "現行のデモの判定ルール一覧" });
+  await page.getByRole("link", { name: "Rule admin" }).click();
+  await expect(page.getByRole("heading", { name: "Rule admin (demo)" })).toBeVisible();
+  const current = page.getByRole("region", { name: "Current demo rule list" });
   await expect(current.getByRole("row")).toHaveCount(5); // 見出し + R01〜R04
   const propose = async (prompt: string) => {
-    await page.getByLabel("変更の依頼（自然文）").fill(prompt);
-    await page.getByRole("button", { name: "案を作る" }).click();
+    await page.getByLabel("Change request (plain language)").fill(prompt);
+    await page.getByRole("button", { name: "Create proposal" }).click();
   };
 
   // 拒否: 対象のルールがない → 理由が出て、プレビューは出ず、現行のルール一覧は変わらない。
-  await propose("R09にA09がYesを追加して");
-  await expect(page.getByTestId("proposal-error")).toContainText("ルールID R09 は存在しません");
+  await propose("Add condition A09=Yes to R09");
+  await expect(page.getByTestId("proposal-error")).toContainText("Rule ID R09 does not exist");
   await expect(page.getByTestId("proposal")).toHaveCount(0);
   expect(await demoRules()).toEqual(initial);
 
@@ -150,32 +150,32 @@ test("判定ルールの更新案: R04の条件だけが追加され（R05は作
   const proposal = page.getByTestId("proposal");
   await expect(proposal).toBeVisible();
   await expect(page.getByTestId("proposal-error")).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: /判定ルールの更新案の確認/ })).toBeVisible();
-  await expect(page.getByTestId("update-summary")).toContainText("更新の対象: ルールR04");
-  await expect(page.getByTestId("update-summary")).toContainText("追加する条件: A09=Yes");
-  const before = page.getByRole("region", { name: "Before（現行）" });
-  const after = page.getByRole("region", { name: "After（反映した場合）" });
+  await expect(page.getByRole("heading", { name: /Proposed change: update rule/ })).toBeVisible();
+  await expect(page.getByTestId("update-summary")).toContainText("Rule to update: R04");
+  await expect(page.getByTestId("update-summary")).toContainText("Conditions to add: A09=Yes");
+  const before = page.getByRole("region", { name: "Before (current)" });
+  const after = page.getByRole("region", { name: "After (if applied)" });
   await expect(before.getByRole("row")).toHaveCount(5);
   await expect(after.getByRole("row")).toHaveCount(5); // ルールの数は同じ（R05は出ない）
-  await expect(after.getByTestId("After（反映した場合）-R05")).toHaveCount(0);
-  const beforeRow = before.getByTestId("Before（現行）-R04");
-  const afterRow = after.getByTestId("After（反映した場合）-R04");
+  await expect(after.getByTestId("After (if applied)-R05")).toHaveCount(0);
+  const beforeRow = before.getByTestId("Before (current)-R04");
+  const afterRow = after.getByTestId("After (if applied)-R04");
   await expect(beforeRow).toHaveClass(/row-updated/);
   await expect(afterRow).toHaveClass(/row-updated/);
-  await expect(afterRow).toContainText("更新");
+  await expect(afterRow).toContainText("Updated");
   await expect(beforeRow).not.toContainText("A09");
-  await expect(afterRow.locator("[data-added='true']")).toHaveText(/A09=Yes（追加）/);
+  await expect(afterRow.locator("[data-added='true']")).toHaveText(/A09=Yes \(added\)/);
   await expect(afterRow).toContainText("A10=No"); // 既存の条件は残る
   await expect(afterRow).toContainText("A11=Yes");
-  await expect(afterRow).toContainText("注意"); // 結果は変わらない
+  await expect(afterRow).toContainText("Caution"); // 結果は変わらない
   await expect(page.getByTestId("source-badge")).toHaveAttribute("data-source", "mock");
-  await expect(page.getByText("反映しますか？")).toBeVisible();
+  await expect(page.getByText("Apply this change?")).toBeVisible();
   expect(await demoRules()).toEqual(initial); // 承認前は変わらない
 
   // No: 承認済みのルールを変更しない。
   await page.getByRole("button", { name: "No" }).click();
   await expect(proposal).toHaveCount(0);
-  await expect(page.getByTestId("proposal-notice")).toContainText("この更新案は反映していません");
+  await expect(page.getByTestId("proposal-notice")).toContainText("This update proposal was not applied");
   await expect(current.getByRole("row")).toHaveCount(5);
   expect(await demoRules()).toEqual(initial);
 
@@ -183,17 +183,17 @@ test("判定ルールの更新案: R04の条件だけが追加され（R05は作
   await propose(UPDATE_PROMPT);
   await expect(proposal).toBeVisible();
   await page.getByRole("button", { name: "Yes" }).click();
-  await expect(page.getByTestId("proposal-notice")).toContainText("デモの判定ルール一覧に反映しました（ルールR04の条件を更新）");
+  await expect(page.getByTestId("proposal-notice")).toContainText("Applied to the demo rule list (rule R04 conditions updated)");
   await expect(proposal).toHaveCount(0);
   await expect(current.getByRole("row")).toHaveCount(5);
-  await expect(current.getByTestId("現行のデモの判定ルール一覧-R05")).toHaveCount(0);
-  const r04Row = current.getByTestId("現行のデモの判定ルール一覧-R04");
+  await expect(current.getByTestId("Current demo rule list-R05")).toHaveCount(0);
+  const r04Row = current.getByTestId("Current demo rule list-R04");
   await expect(r04Row.getByRole("cell").nth(0)).toHaveText("2"); // 版は進む
-  await expect(r04Row.getByRole("cell").nth(1)).toHaveText("注意");
+  await expect(r04Row.getByRole("cell").nth(1)).toHaveText("Caution");
 
   // 再読み込みしても残る。R04だけが変わり、他のルールと審査画面のルールは変わらない。
   await page.reload();
-  await expect(current.getByTestId("現行のデモの判定ルール一覧-R04")).toBeVisible();
+  await expect(current.getByTestId("Current demo rule list-R04")).toBeVisible();
   const state = await demoRules();
   expect(state.rules.map((r) => r.rule_id)).toEqual(["R01", "R02", "R03", "R04"]);
   expect(state.rules.slice(0, 3)).toEqual(initial.rules.slice(0, 3));
@@ -207,7 +207,7 @@ test("判定ルールの更新案: R04の条件だけが追加され（R05は作
 
   // 拒否: 同じ条件を追加済み → 理由が出て、現行のルール一覧は変わらない。
   await propose(UPDATE_PROMPT);
-  await expect(page.getByTestId("proposal-error")).toContainText("追加済み");
+  await expect(page.getByTestId("proposal-error")).toContainText("already has the condition");
   await expect(page.getByTestId("proposal")).toHaveCount(0);
   expect(await demoRules()).toEqual(state);
 });

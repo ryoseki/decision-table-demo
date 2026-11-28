@@ -18,7 +18,7 @@ function ConditionText({ rule, addedQuestions = [] }: { rule: DemoRuleRow; added
         return (
           <span key={c.questionId} className={isAdded ? "condition condition-added" : "condition"} data-added={isAdded ? "true" : undefined}>
             {c.questionId}={ANSWER_LABEL[c.answer]}
-            {isAdded && "（追加）"}{" "}
+            {isAdded && " (added)"}{" "}
           </span>
         );
       })}
@@ -27,7 +27,7 @@ function ConditionText({ rule, addedQuestions = [] }: { rule: DemoRuleRow; added
 }
 
 /** 提案の種類ごとの呼び名。 */
-const KIND_NAME = { add: "追加案", remove: "削除案", update: "更新案" } as const;
+const KIND_NAME = { add: "add proposal", remove: "remove proposal", update: "update proposal" } as const;
 
 const naturalOrder = (a: string, b: string) => a.localeCompare(b, "en", { numeric: true });
 
@@ -66,8 +66,8 @@ function RuleTable({
       <table className={grid ? "case-table question-table rule-grid" : "case-table question-table"}>
         <thead>
           <tr>
-            <th scope="col">ルール</th><th scope="col">版</th><th scope="col">結果</th>
-            {grid ? columns.map((q) => <th key={q} scope="col">{q}</th>) : <th scope="col">条件（設問＝回答）</th>}
+            <th scope="col">Rule</th><th scope="col">Revision</th><th scope="col">Result</th>
+            {grid ? columns.map((q) => <th key={q} scope="col">{q}</th>) : <th scope="col">Conditions (question=answer)</th>}
           </tr>
         </thead>
         <tbody>
@@ -83,9 +83,9 @@ function RuleTable({
               >
                 <th scope="row" className="case-id">
                   {r.ruleId}
-                  {adding && <span className="badge added-label">追加</span>}
-                  {removing && <span className="badge retired-label">削除</span>}
-                  {updating && <span className="badge updated-label">更新</span>}
+                  {adding && <span className="badge added-label">Added</span>}
+                  {removing && <span className="badge retired-label">Removed</span>}
+                  {updating && <span className="badge updated-label">Updated</span>}
                 </th>
                 <td>{r.revision}</td>
                 <td>{r.result}</td>
@@ -107,9 +107,9 @@ function RuleTable({
   );
   return (
     <section className="pane" aria-label={title}>
-      <div className="pane-head"><h3>{title}</h3><span>{rules.length}件</span></div>
+      <div className="pane-head"><h3>{title}</h3><span>{rules.length} rules</span></div>
       {grid ? (
-        <div className="rule-grid-scroll" role="group" tabIndex={0} aria-label={`${title}の表（横にスクロールできます）`}>{table}</div>
+        <div className="rule-grid-scroll" role="group" tabIndex={0} aria-label={`${title} table (scrolls horizontally)`}>{table}</div>
       ) : (
         table
       )}
@@ -179,11 +179,11 @@ export default function RuleAdmin() {
       if (result.applied) setTemplateVersion((v) => v + 1);
       setAiPrompt(decision === "no" && proposal.source.kind === "template" ? proposedPrompt : null);
       setProposal(null);
-      const applied = { add: "を追加", remove: "を削除", update: "の条件を更新" }[proposal.kind];
+      const applied = { add: " added", remove: " removed", update: " conditions updated" }[proposal.kind];
       setNotice(
         result.applied
-          ? `デモの判定ルール一覧に反映しました（ルール${proposal.targetId}${applied}）`
-          : `この${KIND_NAME[proposal.kind]}は反映していません。下の一覧は、サーバーの最新の状態です。`,
+          ? `Applied to the demo rule list (rule ${proposal.targetId}${applied})`
+          : `This ${KIND_NAME[proposal.kind]} was not applied. The list below shows the latest state on the server.`,
       );
     } catch (e) {
       setError(describeError(e));
@@ -201,26 +201,26 @@ export default function RuleAdmin() {
   return (
     <section aria-labelledby="rules-title">
       <div className="page-head">
-        <h2 id="rules-title" tabIndex={-1}>判定ルール管理（デモ）</h2>
-        <p className="lead">自然文で、判定ルールの追加案・削除案・更新案（既存ルールへの条件の追加）を作り、変更前と変更後の差分を確認して、反映するかを決めます。</p>
+        <h2 id="rules-title" tabIndex={-1}>Rule admin (demo)</h2>
+        <p className="lead">Write a request in plain language to create an add, remove, or update proposal (adding conditions to an existing rule), review the before/after difference, and decide whether to apply it.</p>
       </div>
-      <p className="target-badge" data-testid="target">操作の対象: 判定ルール</p>
+      <p className="target-badge" data-testid="target">Editing: Judgment rules</p>
 
       <p className="note note-top" data-testid="mock-note">
         <AiNote source={list.status === "ok" ? list.data.source : null} failed={list.status === "error"} />
         {list.status === "ok" && (list.data.persistence === "database" ? (
-          <> 承認したルールは全員に共有され、判定未登録の案件を開いたときの照合に使われます。</>
+          <> Approved rules are shared with everyone and are used for matching when a case without a registered judgment is opened.</>
         ) : (
-          <> 反映先は、サーバーのメモリ上のデモのルール一覧だけです。再読み込みしても残りますが、バックエンドを再起動すると初期状態に戻ります（永続保存ではありません）。
-        審査画面で照合に使うルール、案件、データベースは変わりません。</>
+          <> Changes apply only to the demo rule list in server memory. It survives a reload, but returns to its initial state when the backend restarts (not persistent storage).
+        The rules used for matching on the review screen, the cases, and the database do not change.</>
         ))}
-        ルールが参照する設問・結果は、アプリが検証します（存在しない設問、定義にない結果、重複するルールは拒否します）。
+        The app validates the questions and results a rule references (it rejects nonexistent questions, undefined results, and duplicate rules).
       </p>
 
-      {list.status === "loading" && <p className="count" role="status">読み込み中…</p>}
+      {list.status === "loading" && <p className="count" role="status">Loading…</p>}
       {list.status === "error" && (
         <div className="error" role="alert" data-testid="list-error">
-          <p className="empty-title">デモの判定ルール一覧を取得できませんでした</p>
+          <p className="empty-title">Could not retrieve the demo rule list</p>
           <p>{list.message}</p>
         </div>
       )}
@@ -232,18 +232,18 @@ export default function RuleAdmin() {
           void create();
         }}
       >
-        <label htmlFor="rule-prompt"><strong>変更の依頼（自然文）</strong></label>
+        <label htmlFor="rule-prompt"><strong>Change request (plain language)</strong></label>
         <textarea
           id="rule-prompt"
           rows={3}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="例: 設問A09がYes、設問A10がNoのとき注意とするルールを追加して"
+          placeholder="Example: Add a rule that gives Caution when question A09 is Yes and question A10 is No"
         />
-        <p className="hint">削除の依頼の例: ルールR03を削除して</p>
-        <p className="hint">既存のルールへの条件の追加（更新）の依頼の例: R04にA09がYesを追加して</p>
+        <p className="hint">Example request to remove a rule: Remove rule R03</p>
+        <p className="hint">Example request to add a condition to an existing rule (update): Add condition A09=Yes to R04</p>
         <div>
-          <button type="submit" className="btn" disabled={busy || prompt.trim() === ""}>案を作る</button>
+          <button type="submit" className="btn" disabled={busy || prompt.trim() === ""}>Create proposal</button>
         </div>
       </form>
 
@@ -252,30 +252,30 @@ export default function RuleAdmin() {
 
       {proposal !== null && (
         <section className="proposal" aria-labelledby="rule-diff-title" data-testid="proposal">
-          <h3 id="rule-diff-title">判定ルールの{KIND_NAME[proposal.kind]}の確認（まだ反映していません）</h3>
+          <h3 id="rule-diff-title">Proposed change: {{ add: "add rule", remove: "remove rule", update: "update rule" }[proposal.kind]} (not applied yet)</h3>
           <SourceBadge source={proposal.source} />
           {proposal.kind === "update" && (
             <p className="update-summary" data-testid="update-summary">
-              更新の対象: ルール{proposal.targetId}（ID・既存の条件・結果は変わらず、条件を追加します）。追加する条件:{" "}
-              {proposal.addedConditions.map((c) => `${c.questionId}=${ANSWER_LABEL[c.answer]}`).join("、")}
+              Rule to update: {proposal.targetId} (ID, existing conditions, and result are unchanged). Conditions to add:{" "}
+              {proposal.addedConditions.map((c) => `${c.questionId}=${ANSWER_LABEL[c.answer]}`).join(", ")}
             </p>
           )}
           <div className="diff">
             <RuleTable
-              title="Before（現行）"
+              title="Before (current)"
               rules={proposal.before}
               removedId={proposal.kind === "remove" ? proposal.targetId : undefined}
               updatedId={proposal.kind === "update" ? proposal.targetId : undefined}
             />
             <RuleTable
-              title="After（反映した場合）"
+              title="After (if applied)"
               rules={proposal.after}
               addedId={proposal.kind === "add" ? proposal.targetId : undefined}
               updatedId={proposal.kind === "update" ? proposal.targetId : undefined}
               addedQuestions={proposal.addedConditions.map((c) => c.questionId)}
             />
           </div>
-          <p className="confirm-q" id="rule-confirm-q"><strong>反映しますか？</strong></p>
+          <p className="confirm-q" id="rule-confirm-q"><strong>Apply this change?</strong></p>
           <div className="confirm-actions" role="group" aria-labelledby="rule-confirm-q">
             <button type="button" className="btn" disabled={busy} onClick={() => void decide("yes")}>Yes</button>
             <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => void decide("no")}>No</button>
@@ -285,12 +285,12 @@ export default function RuleAdmin() {
 
       {list.status === "ok" && (
         <div className="current-list">
-          <RuleTable title="現行のデモの判定ルール一覧" rules={list.data.rules} grid />
+          <RuleTable title="Current demo rule list" rules={list.data.rules} grid />
         </div>
       )}
       {aiPrompt !== null && (
         <button type="button" className="btn ghost" disabled={busy} onClick={() => void create(true, aiPrompt)}>
-          AIで再提案
+          Re-propose with AI
         </button>
       )}
       {list.status === "ok" && list.data.templateReuse && (

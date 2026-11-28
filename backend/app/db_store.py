@@ -132,7 +132,9 @@ class PostgresCaseStore:
                 (answer, answer, case_id, question_code),
             ).rowcount
             if updated != 1:
-                raise RuntimeError("自動回答を保存できる確認待ちの回答がありません")
+                raise RuntimeError(
+                    "There is no pending answer that can store an automatic answer"
+                )
 
     # --- 共有のサンプル案件（app.sample_cases） ------------------------------------
 
@@ -191,7 +193,7 @@ class PostgresCaseStore:
                 return self._create_sample_operation(sample)
             except _CaseIdCollision:
                 continue
-        raise StoreBusy("短い案件IDを確保できませんでした")
+        raise StoreBusy("Could not allocate a short case ID")
 
     @with_occ_retry
     def _create_sample_operation(self, sample: dict[str, Any]) -> tuple[str, bool]:
@@ -223,7 +225,7 @@ class PostgresCaseStore:
                 if winner is None:
                     # 別要求の確定が現在のスナップショットに見えない場合は再接続。
                     raise psycopg.errors.SerializationFailure(
-                        "操作の保存を再確認します"
+                        "Rechecking the saved operation"
                     )
                 return winner[0], False
             if not self._insert_sample_case(conn, {**sample, "case_id": case_id}):
@@ -388,9 +390,7 @@ class PostgresCaseStore:
         - 失敗すれば結果も回答も保存されない。
         """
         if result_code not in RESULT_CODES:
-            raise InvalidJudgment(
-                f"result_code が定義済みのコードではありません: {result_code}"
-            )
+            raise InvalidJudgment(f"result_code is not a defined code: {result_code}")
         rule_id, rule_revision = adopted_rule if adopted_rule else (None, None)
         with self._connect() as conn:
             current = conn.execute(
@@ -415,7 +415,8 @@ class PostgresCaseStore:
                 is None
             ):
                 raise InvalidJudgment(
-                    f"採用ルールが存在しません: {rule_id} の版 {rule_revision}"
+                    f"The adopted rule does not exist: rule {rule_id} revision "
+                    f"{rule_revision}"
                 )
             existing = dict(
                 conn.execute(
@@ -432,13 +433,17 @@ class PostgresCaseStore:
             }
             for question_code, answer in answers.items():
                 if question_code not in valid_questions:
-                    raise InvalidJudgment(f"案件にない設問です: {question_code}")
+                    raise InvalidJudgment(
+                        f"The question is not in this case: {question_code}"
+                    )
                 # 確認待ちは、登録でyes／noに変える以外では作れない。
                 # yes／noから戻せない。
                 if answer == "pending" and existing.get(question_code) != "pending":
-                    raise InvalidJudgment(f"{question_code}: pending にはできません")
+                    raise InvalidJudgment(
+                        f"Question {question_code} cannot be set to Pending"
+                    )
                 if answer not in (*HUMAN_ANSWERS, "pending"):
-                    raise InvalidJudgment(f"{question_code}: 回答が不正です")
+                    raise InvalidJudgment(f"Question {question_code}: invalid answer")
             # 条件付きの更新: 未登録（result_code が NULL）のときだけ書く。ロックに
             # 頼らず、競合した保存（OCCで後から来た側）も、登録済みを上書きしない。
             # 0行なら、回答も書かずに戻す（with が例外でロールバックする）。

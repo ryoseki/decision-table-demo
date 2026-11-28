@@ -78,17 +78,18 @@ class IntakeRequest(BaseModel):
     def _period_is_both_or_neither(self) -> IntakeRequest:
         if (self.period_start_at is None) != (self.period_end_at is None):
             raise ValueError(
-                "period_start_at と period_end_at は両方指定するか、両方省く"
+                "Specify both period_start_at and period_end_at, or omit both"
             )
         if self.period_start_at is not None:
             try:
                 ordered = self.period_start_at < self.period_end_at
             except TypeError:  # タイムゾーンの有無が揃っていない
                 raise ValueError(
-                    "period_start_at と period_end_at のタイムゾーンの有無を揃える"
+                    "Make period_start_at and period_end_at both timezone-aware or "
+                    "both naive"
                 ) from None
             if not ordered:
-                raise ValueError("period_start_at は period_end_at より前にする")
+                raise ValueError("period_start_at must be before period_end_at")
         return self
 
 
@@ -177,7 +178,7 @@ def fetch_auto_answer(
         or payload.get("question_code") != question_code
         or payload.get("answer") not in _VALID_ANSWERS
     ):
-        raise AutoAnswerError("不正な応答")
+        raise AutoAnswerError("Invalid response")
     return payload["answer"]
 
 
@@ -186,7 +187,7 @@ def intake_case(body: IntakeRequest, request: Request) -> dict:
     base_url = os.environ.get("MOCK_BASE_URL")
     if not base_url:
         # 設定不備。案件を作る前に失敗させる。
-        raise HTTPException(status_code=500, detail="MOCK_BASE_URL が未設定です")
+        raise HTTPException(status_code=500, detail="MOCK_BASE_URL is not set")
     store: CaseStore = request.app.state.case_store
 
     case = body.model_dump(exclude={"demo_controls"}, mode="json")
@@ -195,7 +196,7 @@ def intake_case(body: IntakeRequest, request: Request) -> dict:
     except StoreBusy:
         raise HTTPException(
             status_code=503,
-            detail="保存先が混み合っています。入力は残っています。もう一度受け付けてください",
+            detail="The database is busy. Your input is kept. Please submit again",
             headers={"Retry-After": "1"},
         ) from None
 

@@ -115,7 +115,7 @@ def case_payload(user_id: str, **extra) -> dict:
     return {
         "summary": "心当たりのないログインについて問い合わせが届いた。（架空）",
         "user": {"user_id": user_id},
-        "inquiry": {"subject": "心当たりのないログイン", "body": "架空の問い合わせ。"},
+        "inquiry": {"subject": "Unrecognized login", "body": "架空の問い合わせ。"},
         **extra,
     }
 

@@ -59,7 +59,8 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
 .case-id { font-weight: 700; white-space: nowrap; }
 .case-summary { display: block; font-weight: 700; }
 .case-table .counts { margin-top: 2px; }
-.case-table td.op { text-align: right; }
+.case-table td.op { text-align: right; white-space: nowrap; }
+.btn.open { white-space: nowrap; }
 
 .badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 0.8rem; font-weight: 700; white-space: nowrap; border: 1px solid transparent; }
 .st-todo { background: var(--surface-alt); color: var(--muted); border-color: var(--line-strong); }
@@ -94,7 +95,7 @@ input[type="search"], select { font: inherit; padding: 9px 12px; border: 1px sol
   .case-table, .case-table tbody, .case-table tr, .case-table th, .case-table td { display: block; }
   .case-table tr { padding: 10px 16px; border-bottom: 1px solid var(--line); }
   .case-table th, .case-table td { padding: 2px 0; border: 0; }
-  .case-table td[data-label]::before { content: attr(data-label) "　"; color: var(--muted); font-size: 0.8rem; }
+  .case-table td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: 0.8rem; }
   .case-table td.op { text-align: left; padding-top: 8px; }
   .toolbar .count { margin-left: 0; width: 100%; }
 }

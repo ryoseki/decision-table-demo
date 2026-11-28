@@ -84,7 +84,7 @@ class PublicWriteGuard:
             scope["method"], scope["path"], internal
         ):
             response = JSONResponse(
-                {"detail": "この経路・メソッドでの書き込みは、公開デモでは使えません"},
+                {"detail": ("This operation is not available in the public demo")},
                 status_code=405,
             )
             await response(scope, receive, send)

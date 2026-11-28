@@ -3,12 +3,12 @@ import { describeError } from "./api";
 import { call as callApi } from "./questionsApi";
 
 // 設問・ルールの画面で共有する。エラーの文言に、設問一覧と書かない。
-const SUBJECT = "AIを経由せずに反映する変更の依頼の一覧";
-const NETWORK_UNKNOWN = "サーバーに接続できませんでした。削除されたかどうかを確認できていません。画面を再読み込みして確認してください。";
-const call = (path: string, init?: RequestInit) => callApi(path, init, NETWORK_UNKNOWN, SUBJECT, "提案");
+const SUBJECT = "The list of saved requests";
+const NETWORK_UNKNOWN = "Could not connect to the server. It is unknown whether the request was deleted. Reload the page to check.";
+const call = (path: string, init?: RequestInit) => callApi(path, init, NETWORK_UNKNOWN, SUBJECT, "");
 
-export const TEMPLATE_HEADING = "AIを経由せずに反映する変更の依頼(完全一致)";
-export const TEMPLATE_NOTE = "意図と異なる変更案が出る場合は、該当する依頼を削除してください。";
+export const TEMPLATE_HEADING = "Saved requests (exact match, no AI call)";
+export const TEMPLATE_NOTE = "If an unintended change proposal appears, delete the matching request.";
 
 /**
  * 定型文（完全一致の依頼）の一覧。登録は、Yesで反映したときにサーバーが自動で行うため、この部品には
@@ -56,8 +56,8 @@ export function TemplatePanel({ target, refreshKey }: { target: "question" | "ru
         {prompts.map((prompt) => (
           <li key={prompt}>
             {prompt}{" "}
-            <button type="button" className="btn ghost" disabled={busy} aria-label={`${prompt}を定型文から削除`}
-              onClick={() => void remove(prompt)}>削除</button>
+            <button type="button" className="btn ghost" disabled={busy} aria-label={`Delete ${prompt} from saved requests`}
+              onClick={() => void remove(prompt)}>Delete</button>
           </li>
         ))}
       </ul>

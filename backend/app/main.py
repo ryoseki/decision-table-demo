@@ -27,7 +27,7 @@ from app import (
 from app.domain import source_of
 from app.public_guard import PublicWriteGuard
 
-app = FastAPI(title="不正審査デモ API")
+app = FastAPI(title="Fraud Review Demo API")
 # 書き込みは、公開する経路とメソッドだけに限る（CloudFrontは7メソッドを許可するため）。
 app.state.internal_mock_token = (
     secrets.token_urlsafe(32) if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") else ""
@@ -121,15 +121,15 @@ def _load_release(release_file: Path) -> dict[str, str | bool]:
     try:
         data = json.loads(release_file.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        raise RuntimeError(f"RELEASE_FILE を読み込めません: {release_file}") from error
+        raise RuntimeError(f"Cannot read RELEASE_FILE: {release_file}") from error
     if not isinstance(data, dict):
-        raise RuntimeError("release.json がオブジェクトではありません")
+        raise RuntimeError("release.json is not an object")
     source_sha = data.get("sourceSHA")
     eligible = data.get("releaseEligible")
     if not isinstance(source_sha, str) or not _SHA_PATTERN.fullmatch(source_sha):
-        raise RuntimeError("release.json の sourceSHA が不正です")
+        raise RuntimeError("sourceSHA in release.json is invalid")
     if not isinstance(eligible, bool):
-        raise RuntimeError("release.json の releaseEligible が真偽値ではありません")
+        raise RuntimeError("releaseEligible in release.json is not a boolean")
     return {"sourceSHA": source_sha, "releaseEligible": eligible}
 
 
@@ -138,7 +138,7 @@ def _enable_packaged_ui(
 ) -> None:
     index = static_dir / "index.html"
     if not index.is_file() or 'id="root"' not in index.read_text(encoding="utf-8"):
-        raise RuntimeError(f"STATIC_DIR に有効な index.html がありません: {index}")
+        raise RuntimeError(f"STATIC_DIR has no valid index.html: {index}")
     release = _load_release(release_file)
 
     @application.get("/release")
@@ -157,5 +157,5 @@ _static_dir = os.environ.get("STATIC_DIR")
 if _static_dir:
     _release_file = os.environ.get("RELEASE_FILE")
     if not _release_file:
-        raise RuntimeError("STATIC_DIR を設定する場合は RELEASE_FILE も必要です")
+        raise RuntimeError("RELEASE_FILE is also required when STATIC_DIR is set")
     _enable_packaged_ui(app, Path(_static_dir), Path(_release_file))

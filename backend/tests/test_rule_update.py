@@ -72,12 +72,12 @@ def update_prompt(additions: dict[str, str]) -> str:
 # R04は A10=No を持つ。(追加する条件, 拒否理由) 。「追加済み」は同じ値、
 # 「書き換え」は違う値。新規の条件が先でも後でも、1つでも既存なら全体を拒否する。
 PARTLY_EXISTING = (
-    ({"A09": "yes", "A10": "no"}, "追加済み"),
-    ({"A10": "no", "A09": "yes"}, "追加済み"),
-    ({"A10": "no", "A11": "yes"}, "追加済み"),
-    ({"A11": "yes", "A10": "no"}, "追加済み"),
-    ({"A09": "yes", "A10": "yes"}, "書き換えは扱えません"),
-    ({"A10": "yes", "A11": "no"}, "書き換えは扱えません"),
+    ({"A09": "yes", "A10": "no"}, "already has the condition"),
+    ({"A10": "no", "A09": "yes"}, "already has the condition"),
+    ({"A10": "no", "A11": "yes"}, "already has the condition"),
+    ({"A11": "yes", "A10": "no"}, "already has the condition"),
+    ({"A09": "yes", "A10": "yes"}, "Rewriting existing conditions is not supported"),
+    ({"A10": "yes", "A11": "no"}, "Rewriting existing conditions is not supported"),
 )
 
 
@@ -111,7 +111,7 @@ class TestUpdateIntent(unittest.TestCase):
     def test_other_requests_are_not_updates(self) -> None:
         for prompt in (
             ADD_PROMPT,  # IDなしの新規追加
-            "ルールR03を削除して",
+            "Remove rule R03",
             "アカウント削除のルールR03を削除して",
             "新しいルールとしてR04と同じ形でA09がYesを追加して",
             "R04を追加して",  # 条件なし
@@ -135,7 +135,7 @@ class TestUpdateIntent(unittest.TestCase):
     def test_contradicting_conditions_in_the_request_are_rejected(self) -> None:
         with self.assertRaises(InvalidProposal) as caught:
             read_update_intent("R04にA09がYesとA09がNoを追加して")
-        self.assertIn("食い違", str(caught.exception))
+        self.assertIn("conflicting", str(caught.exception))
 
 
 class TestValidation(unittest.TestCase):
@@ -178,15 +178,22 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(proposal.after[0], self.CURRENT[0])
 
     def test_rejects_a_new_rule_returned_for_an_update_request(self) -> None:
-        self.rejected(add_r05_output(), "更新ではない案")
-        self.rejected({"operation": "remove_rule", "rule_id": "R04"}, "更新ではない案")
+        self.rejected(add_r05_output(), "is not an update")
+        self.rejected(
+            {"operation": "remove_rule", "rule_id": "R04"}, "is not an update"
+        )
 
     def test_rejects_a_target_or_conditions_that_differ_from_the_request(self) -> None:
-        self.rejected(update_output("R01"), "更新の対象が依頼と違います")
-        self.rejected(update_output(add_conditions={"A09": "no"}), "条件が依頼と違い")
+        self.rejected(
+            update_output("R01"), "The update target differs from the request"
+        )
+        self.rejected(
+            update_output(add_conditions={"A09": "no"}),
+            "The conditions to add differ from the request",
+        )
         self.rejected(
             update_output(add_conditions={"A09": "yes", "A02": "yes"}),
-            "条件が依頼と違い",
+            "The conditions to add differ from the request",
         )
 
     def test_rejects_a_new_rule_for_a_request_that_names_a_rule_but_is_unclear(
@@ -194,10 +201,10 @@ class TestValidation(unittest.TestCase):
     ) -> None:
         # 更新と読めない言い回しの依頼が、新規作成に落ちない（曖昧として拒否）。
         for prompt in ("R04にA09のYesを追加して", "R04に条件を追加して"):
-            self.rejected(add_r05_output(), "曖昧です", prompt=prompt)
+            self.rejected(add_r05_output(), "ambiguous", prompt=prompt)
         # 読み取れる言い回しなら更新の依頼で、新規作成の案は更新ではないとして拒否する。
         self.rejected(
-            add_r05_output(), "更新ではない案", prompt="R04にA09をYesで追加して"
+            add_r05_output(), "is not an update", prompt="R04にA09をYesで追加して"
         )
         # 条件を足す兆候のない依頼（既存の定型依頼の形）は、曖昧とは見なさない。
         self.validate(add_r05_output(), prompt="R04を追加")
@@ -213,7 +220,7 @@ class TestValidation(unittest.TestCase):
         # 更新と読めない依頼が新規作成（R05）に落ちないよう、理由つきで拒否する。
         for prompt in LOWERCASE_ID_PROMPTS:
             with self.subTest(prompt):
-                self.rejected(add_r05_output(), "反映できません", prompt=prompt)
+                self.rejected(add_r05_output(), "cannot be applied", prompt=prompt)
                 # 更新の案が返っても、依頼から更新と読めないので反映可能にしない。
                 with self.assertRaises(InvalidProposal):
                     self.validate(update_output(), prompt=prompt)
@@ -225,58 +232,72 @@ class TestValidation(unittest.TestCase):
 
     def test_rejects_an_update_when_the_request_does_not_name_one(self) -> None:
         self.rejected(
-            update_output(), "更新案は反映できません", prompt="ルールを直して"
+            update_output(),
+            "The update proposal cannot be applied",
+            prompt="ルールを直して",
         )
 
     def test_rejects_an_ambiguous_request_with_several_rules(self) -> None:
         self.rejected(
             update_output(),
-            "更新の対象が曖昧",
+            "the update target is ambiguous",
             prompt="R01とR04にA09がYesを追加して",
         )
 
     def test_rejects_a_missing_rule_or_question(self) -> None:
         prompt = "R09にA09がYesを追加して"
-        self.rejected(
-            update_output("R09"), "ルールID R09 は存在しません", prompt=prompt
-        )
+        self.rejected(update_output("R09"), "Rule ID R09 does not exist", prompt=prompt)
         prompt = "R04にA99がYesを追加して"
         self.rejected(
             update_output(add_conditions={"A99": "yes"}),
-            "設問A99は存在しません",
+            "Question A99 does not exist",
             prompt=prompt,
         )
 
     def test_rejects_a_retired_question(self) -> None:
         questions = (*QUESTIONS[:8], question("A09", retired=True), *QUESTIONS[9:])
-        self.rejected(update_output(), "設問A09は廃止済みです", questions=questions)
+        self.rejected(
+            update_output(), "Question A09 is deactivated", questions=questions
+        )
 
     def test_rejects_a_condition_that_is_already_there(self) -> None:
         current = (rule("R04", "caution", A09="yes", A10="no"),)
-        self.rejected(update_output(), "追加済みです", current=current)
+        self.rejected(update_output(), "already has the condition", current=current)
 
     def test_rejects_rewriting_an_existing_condition(self) -> None:
         current = (rule("R04", "caution", A09="no", A10="no"),)
-        self.rejected(update_output(), "書き換えは扱えません", current=current)
+        self.rejected(
+            update_output(),
+            "Rewriting existing conditions is not supported",
+            current=current,
+        )
 
     def test_rejects_a_result_that_would_duplicate_another_rule(self) -> None:
         current = (*self.CURRENT, rule("R05", "caution", A09="yes", A10="no"))
         self.rejected(
-            update_output(), "ルールR05と同じになります（重複）", current=current
+            update_output(),
+            "would be the same as rule R05 (duplicate)",
+            current=current,
         )
         # 結果が違えば、同じ条件でも重複にしない（既存の方針）。
         other = (*self.CURRENT, rule("R05", "no_issue", A09="yes", A10="no"))
         self.validate(update_output(), current=other)
 
     def test_rejects_malformed_updates(self) -> None:
-        self.rejected(update_output(extra={"result_code": "no_issue"}), "形式が不正")
-        self.rejected(update_output(rule_id=4), "更新の対象が依頼と違います")
         self.rejected(
-            update_output(add_conditions={}), "条件が依頼と違い", prompt=UPDATE_PROMPT
+            update_output(extra={"result_code": "no_issue"}), "format is invalid"
+        )
+        self.rejected(
+            update_output(rule_id=4), "The update target differs from the request"
         )
         self.rejected(
             update_output(add_conditions={}),
-            "追加する条件が空",
+            "The conditions to add differ from the request",
+            prompt=UPDATE_PROMPT,
+        )
+        self.rejected(
+            update_output(add_conditions={}),
+            "The conditions to add are empty",
             prompt=None,  # 依頼との整合の検査を通さず、形式の検査だけを確かめる
         )
 
@@ -286,22 +307,22 @@ class TestValidation(unittest.TestCase):
             return update_output(add_conditions=value)
 
         cases = {  # 理由に含まれる文言 → 拒否される生成の出力
-            "ルールIDの形式が不正": [
+            "The rule ID format is invalid": [
                 update_output(rule_id)
                 for rule_id in ("r04", "R4", "", 4, None)  # 小文字・桁不足・空・数値
             ],
-            "条件の設問IDの形式が不正": [
+            "The question ID format in the conditions is invalid": [
                 with_conditions({q: "yes"}) for q in ("a09", "A9", 9)
             ],
-            "yes か no だけ": [
+            "must be yes or no": [
                 with_conditions({"A09": a}) for a in ("maybe", "Yes", True, None)
             ],
-            "追加する条件が空": [
+            "The conditions to add are empty": [
                 with_conditions(["A09"]),
                 with_conditions("A09=yes"),
                 {**update_output(), "add_conditions": None},
             ],
-            "形式が不正": [  # 欠落・余分な項目・dictでない出力そのもの
+            "format is invalid": [  # 欠落・余分な項目・dictでない出力そのもの
                 {"operation": "update_rule", "add_conditions": {"A09": "yes"}},
                 {"operation": "update_rule", "rule_id": "R04"},
                 update_output(extra={"note": "x"}),
@@ -417,18 +438,26 @@ class TestUpdateProposal(UpdateTestCase):
     def test_rejects_with_a_reason_when_the_target_or_question_is_invalid(self) -> None:
         before = self.get_list()
         cases = (
-            ("R09にA09がYesを追加して", update_output("R09"), "R09 は存在しません"),
+            (
+                "R09にA09がYesを追加して",
+                update_output("R09"),
+                "Rule ID R09 does not exist",
+            ),
             (
                 "R04にA99がYesを追加して",
                 update_output(add_conditions={"A99": "yes"}),
-                "設問A99は存在しません",
+                "Question A99 does not exist",
             ),
             (
                 "R01とR04にA09がYesを追加して",
                 update_output(),
-                "更新の対象が曖昧",
+                "the update target is ambiguous",
             ),
-            ("ルールを直して", update_output(), "更新案は反映できません"),
+            (
+                "ルールを直して",
+                update_output(),
+                "The update proposal cannot be applied",
+            ),
         )
         for prompt, output, message in cases:
             status, body = self.update(output, prompt)
@@ -451,7 +480,7 @@ class TestUpdateProposal(UpdateTestCase):
             ):
                 status, body = self.update(output, prompt)
                 self.assertEqual(status, 422, (prompt, output))
-                self.assertIn("食い違", body["detail"])
+                self.assertIn("conflicting", body["detail"])
                 self.assertIn("A09", body["detail"])
                 self.assertNotIn("proposal_id", body)
                 self.assertEqual(self.get_list(), before, prompt)
@@ -464,7 +493,7 @@ class TestUpdateProposal(UpdateTestCase):
         for prompt in ("R04にA09のYesを追加して", "R04に条件を追加して"):
             status, body = self.update(add_r05_output(), prompt)
             self.assertEqual(status, 422, prompt)
-            self.assertIn("曖昧", body["detail"])
+            self.assertIn("ambiguous", body["detail"])
             self.assertNotIn("proposal_id", body)
             self.assertEqual(self.get_list(), before, prompt)
 
@@ -476,7 +505,7 @@ class TestUpdateProposal(UpdateTestCase):
                 self.assertEqual(status, 422, (prompt, output))
                 self.assertTrue(body["detail"], prompt)  # 理由つき
                 if output["operation"] == "add_rule":
-                    self.assertIn("反映できません", body["detail"], prompt)
+                    self.assertIn("cannot be applied", body["detail"], prompt)
                 self.assertNotIn("proposal_id", body)
                 self.assertEqual(self.get_list(), before, prompt)
         # 明示的な新規追加と、既存の定型依頼（条件を足す兆候なし）は、これまで通り通る。
@@ -502,17 +531,17 @@ class TestUpdateProposal(UpdateTestCase):
             add_r05_output(), "R04に新しい条件A09がYesを追加して"
         )
         self.assertEqual(status, 422)
-        self.assertIn("更新ではない案", body["detail"])
+        self.assertIn("is not an update", body["detail"])
 
     def test_rejects_a_retired_question(self) -> None:
         self.add_a13()
-        self.question_decision("設問A13を廃止して")
+        self.question_decision("Deactivate question A13")
         before = self.get_list()
         status, body = self.update(
             update_output(add_conditions={"A13": "yes"}), "R04にA13がYesを追加して"
         )
         self.assertEqual(status, 422)
-        self.assertIn("設問A13は廃止済みです", body["detail"])
+        self.assertIn("Question A13 is deactivated", body["detail"])
         self.assertEqual(self.get_list(), before)
 
     def test_rejects_an_already_added_or_conflicting_condition(self) -> None:
@@ -521,11 +550,13 @@ class TestUpdateProposal(UpdateTestCase):
         status, body = self.update(
             prompt="R05にA09がYesを追加して", output=update_output("R05")
         )
-        self.assertEqual((status, "追加済み" in body["detail"]), (422, True))
+        self.assertEqual(
+            (status, "already has the condition" in body["detail"]), (422, True)
+        )
         status, body = self.update(
             update_output("R05", {"A09": "no"}), "R05にA09がNoを追加して"
         )
-        self.assertEqual((status, "書き換え" in body["detail"]), (422, True))
+        self.assertEqual((status, "Rewriting" in body["detail"]), (422, True))
         self.assertEqual(self.get_list(), before)
 
     def test_rejects_an_update_that_would_duplicate_another_rule(self) -> None:
@@ -533,7 +564,7 @@ class TestUpdateProposal(UpdateTestCase):
         before = self.get_list()
         status, body = self.update()
         self.assertEqual(status, 422)
-        self.assertIn("ルールR05と同じになります（重複）", body["detail"])
+        self.assertIn("would be the same as rule R05 (duplicate)", body["detail"])
         self.assertEqual(self.get_list(), before)
 
 
@@ -658,7 +689,7 @@ class TestUpdateDecision(UpdateTestCase):
         after_first = self.get_list()
         status, body = self.decide(second["proposal_id"], "yes")
         self.assertEqual(status, 409)
-        self.assertIn("変わった", body["detail"])
+        self.assertIn("changed", body["detail"])
         self.assertEqual(self.get_list(), after_first)  # A11は足されていない
         self.assertEqual(self.rule_conditions(after_first, "R04"), R04_AFTER)
         self.assertEqual(self.decide(second["proposal_id"], "yes")[0], 404)
@@ -679,7 +710,7 @@ class TestUpdateDecision(UpdateTestCase):
         before = self.get_list()
         status, body = self.decide(proposal["proposal_id"], "yes")
         self.assertEqual(status, 409)
-        self.assertIn("設問の一覧が提案の後に変わった", body["detail"])
+        self.assertIn("The question list changed after the proposal", body["detail"])
         self.assertEqual(self.get_list(), before)
         self.assertEqual(self.rule_conditions(before, "R04"), R04_BEFORE)
 
@@ -693,7 +724,7 @@ class TestUpdateDecision(UpdateTestCase):
         status, retire = send(
             "POST",
             f"{self.base}/api/admin/question-proposals",
-            {"prompt": "設問A13を廃止して"},
+            {"prompt": "Deactivate question A13"},
         )
         self.assertEqual(status, 201)
         self.assertIn("R04", [r["rule_id"] for r in retire["references"]])
@@ -758,7 +789,7 @@ class TestUpdateWithTemplateReuse(unittest.TestCase):
         with _Server(app) as server:
             status, body = post(server.base_url + "/api/admin/rule-proposals", prompt)
         self.assertEqual(status, 422)
-        self.assertIn("R09 は存在しません", body["detail"])
+        self.assertIn("Rule ID R09 does not exist", body["detail"])
         self.assertEqual(app.state.rule_proposer.calls, 0)
 
     def test_yes_registers_the_update_and_reuse_checks_the_current_rules(self) -> None:
@@ -780,7 +811,7 @@ class TestUpdateWithTemplateReuse(unittest.TestCase):
             before = app.state.rule_store.snapshot()
             status, body = post(base, UPDATE_PROMPT)
             self.assertEqual(status, 422, body)
-            self.assertIn("追加済み", body["detail"])
+            self.assertIn("already has the condition", body["detail"])
             self.assertEqual(app.state.rule_store.snapshot(), before)
         self.assertEqual(stub.calls, 1)
 
@@ -800,7 +831,7 @@ class TestUpdateWithTemplateReuse(unittest.TestCase):
                             force_ai=force_ai,
                         )
                     self.assertEqual(status, 422, body)
-                    self.assertIn("反映できません", body["detail"])
+                    self.assertIn("cannot be applied", body["detail"])
                     self.assertNotIn("proposal_id", body)
                     self.assertEqual(app.state.rule_store.snapshot(), before)
 
@@ -811,7 +842,7 @@ class TestUpdateWithTemplateReuse(unittest.TestCase):
             base = server.base_url + "/api/admin/rule-proposals"
             status, body = post(base, UPDATE_PROMPT, force_ai=True)
             self.assertEqual(status, 422, body)
-            self.assertIn("更新ではない案", body["detail"])
+            self.assertIn("is not an update", body["detail"])
         self.assertEqual(app.state.rule_proposer.calls, 1)
         self.assertEqual(len(app.state.rule_store.snapshot()[1]), 5)  # 増えていない
 

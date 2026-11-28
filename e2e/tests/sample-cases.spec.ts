@@ -15,8 +15,8 @@ async function useEmptyBackend(page: Page) {
 }
 
 const totalShown = async (page: Page) => {
-  const text = await page.getByText(/件を表示（全\d+件）/).textContent();
-  return Number(/全(\d+)件/.exec(text ?? "")?.[1]);
+  const text = await page.getByText(/Showing \d+ of \d+/).textContent();
+  return Number(/of (\d+)/.exec(text ?? "")?.[1]);
 };
 // 表は overflow: hidden の外枠に入るため、document 幅だけでは内容の見切れを検出できない。
 // 表の外枠の内側でも横はみ出しを確認する。
@@ -39,18 +39,18 @@ test("空の一覧からボタンを押すたびに共有サンプル案件が1�
 
   await useEmptyBackend(page);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "審査対象一覧" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cases to review" })).toBeVisible();
   await expect(page.getByTestId("empty-list")).toBeVisible();
   expect(await totalShown(page)).toBe(0);
 
   // 押すたびに、再読み込みなしで、一覧が1件ずつ増える（別の操作は、別の案件）
   for (let n = 1; n <= CLICKS; n++) {
-    await page.getByRole("button", { name: "サンプル案件を作成" }).click();
-    await expect(page.getByTestId("sample-notice")).toContainText("1件作成しました");
+    await page.getByRole("button", { name: "Create sample case" }).click();
+    await expect(page.getByTestId("sample-notice")).toContainText("Created one sample case");
     await expect(caseRows(page)).toHaveCount(n);
     await expect.poll(() => totalShown(page)).toBe(n);
     // 通知は生成された13文字の案件IDをそのまま表示する
-    await expect(page.getByTestId("sample-notice")).toHaveText(/^サンプル案件を1件作成しました（CASE-[0-9A-F]{8}）。$/);
+    await expect(page.getByTestId("sample-notice")).toHaveText(/^Created one sample case \(CASE-[0-9A-F]{8}\)\.$/);
     await expect(page.getByTestId("sample-notice")).toHaveAttribute("title", SAMPLE_ID);
   }
 
@@ -73,7 +73,7 @@ test("空の一覧からボタンを押すたびに共有サンプル案件が1�
   await page
     .getByRole("row")
     .filter({ has: page.locator(`a[href="#/cases/${encodeURIComponent(target)}"]`) })
-    .getByRole("link", { name: /審査を開く/ })
+    .getByRole("link", { name: /Open review/ })
     .click();
   await expect(page).toHaveURL(new RegExp(`#/cases/${target}$`));
   await expect(page.getByRole("heading", { level: 2 })).toContainText(target); // 見出しの読み上げにも案件IDを含める
@@ -86,13 +86,13 @@ test("空の一覧からボタンを押すたびに共有サンプル案件が1�
   await expect(sub).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.goto("/#/");
-  await expect(page.getByRole("heading", { name: "審査対象一覧" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cases to review" })).toBeVisible();
   await expect(caseRows(page)).toHaveCount(CLICKS);
   await expectNoHorizontalOverflow(page);
   await page.setViewportSize({ width: 1280, height: 800 });
 
   // 一覧へ戻っても、作成した案件は共有のまま残っている
   await page.goto("/#/");
-  await expect(page.getByRole("heading", { name: "審査対象一覧" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Cases to review" })).toBeVisible();
   await expect.poll(() => totalShown(page)).toBe(CLICKS);
 });

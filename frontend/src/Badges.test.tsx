@@ -8,9 +8,9 @@ afterEach(cleanup);
 
 test("状態バッジ: 状態名を表示し、状態ごとのクラスを付ける", () => {
   const cases = [
-    ["未審査", "st-todo"],
-    ["取得エラー", "st-pending"],
-    ["登録済み", "st-done"],
+    ["Not reviewed", "st-todo"],
+    ["Pending data", "st-pending"],
+    ["Registered", "st-done"],
   ] as const;
   for (const [status, className] of cases) {
     const { unmount } = render(<StatusBadge status={status} />);

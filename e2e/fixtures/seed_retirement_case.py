@@ -12,8 +12,8 @@ import sys
 
 from app.db_store import PostgresCaseStore, connect_from_env
 
-MARKER = "（架空・E2E廃止用の未判定案件）"
-QUESTION = ("A13", "api_key", "対象期間にAPIキーが失効されたか？")
+MARKER = " (fictional; unjudged case for the E2E retirement test)"
+QUESTION = ("A13", "api_key", "Was an API key revoked during the target period? / 対象期間にAPIキーが失効されたか？")
 
 
 def main() -> int:
@@ -22,16 +22,16 @@ def main() -> int:
         conn.execute(
             "INSERT INTO review_questions (question_code, category, prompt,"
             " source_kind, source_field, revision)"
-            " VALUES (%s, %s, %s, 'APIキーの履歴', 'APIキーの失効日時', 1)"
+            " VALUES (%s, %s, %s, 'API key history / APIキーの履歴', 'API key revocation time / APIキーの失効日時', 1)"
             " ON CONFLICT (question_code) DO NOTHING",
             (code, category, prompt),
         )
     store = PostgresCaseStore()
     case_id = store.create_case(
         {
-            "summary": f"APIキーの失効について問い合わせが届いた。{MARKER}",
+            "summary": f"An inquiry arrived about an API key revocation.{MARKER}",
             "user": {"user_id": "456"},
-            "inquiry": {"subject": "APIキーの失効", "body": "架空の問い合わせ。"},
+            "inquiry": {"subject": "API key revocation", "body": "A fictional inquiry."},
         }
     )
     with connect_from_env() as conn:

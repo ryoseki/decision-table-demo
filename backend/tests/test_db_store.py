@@ -194,8 +194,8 @@ class DbFlow(unittest.TestCase):
 
         templates = PostgresProposalTemplates(connect)
         templates.bootstrap()
-        self.assertIn("設問A13を廃止して", templates.list_prompts("question"))
-        templates.remove("question", "設問A13を廃止して")
+        self.assertIn("Deactivate question A13", templates.list_prompts("question"))
+        templates.remove("question", "Deactivate question A13")
         templates.bootstrap()
         self.assertEqual(templates.list_prompts("question"), [])
 
@@ -602,7 +602,7 @@ class DbFlow(unittest.TestCase):
                 {"prompt": prompt},
             )
             self.assertEqual(status, 422, prompt)
-            self.assertIn("追加済み", body["detail"])
+            self.assertIn("already has the condition", body["detail"])
             self.assertNotIn("proposal_id", body)
             self.assertEqual(self.rows(self.RULE_ROWS_SQL), rows_before, prompt)
             self.assertEqual(self._history(), history_before, prompt)
@@ -669,7 +669,7 @@ class DbFlow(unittest.TestCase):
                 question_revision=question_revision,
                 prompt=prompt,
             )
-        self.assertIn("追加済み", str(caught.exception))
+        self.assertIn("already has the condition", str(caught.exception))
 
     def _admin_server(self):
         """管理画面のAPI（判定ルール）を、DBの保存先で動かす。呼び出しごとに新しい接続・ストア。"""
@@ -843,7 +843,8 @@ class DbFlow(unittest.TestCase):
         """ルール一覧の版（rule_revision）を進めずに、ルールの中身だけが違う新しい行を足す。
 
         通常の承認・復元は、ルールを変えるたびに rule_revision を進める。そのため、版の
-        比較を通ったあとに「対象がない」「条件が追加済み」になる状態は、通常の操作では
+        比較を通ったあとに「対象がない」「条件が追加済み」になる状態は、
+        通常の操作では
         作れない。承認の防御分岐だけを確かめるため、行を直接足して作る。
         """
         latest = db.latest()
@@ -919,19 +920,21 @@ class DbFlow(unittest.TestCase):
         templates.bootstrap()
         retire = {"operation": "retire_question", "question_id": "A13"}
         remove = {"operation": "remove_rule", "rule_id": "R03"}
-        self.assertEqual(templates.lookup("question", "設問A13を廃止して"), retire)
-        self.assertEqual(templates.lookup("rule", "ルールR03を削除して"), remove)
+        self.assertEqual(
+            templates.lookup("question", "Deactivate question A13"), retire
+        )
+        self.assertEqual(templates.lookup("rule", "Remove rule R03"), remove)
         # 保存層は完全一致だけ。対象違い・表記違い・空白違い・否定は一致しない。
         for target, prompt in (
-            ("rule", "設問A13を廃止して"),
-            ("question", "ルールR03を削除して"),
+            ("rule", "Deactivate question A13"),
+            ("question", "Remove rule R03"),
             ("question", " 設問A13を廃止して"),
             ("question", "設問A13を廃止しないで"),
             ("rule", "ルールr03を削除して"),
             ("rule", "ルールR03の条件を編集して"),
         ):
             self.assertIsNone(templates.lookup(target, prompt), (target, prompt))
-        self.assertEqual(templates.list_prompts("rule"), ["ルールR03を削除して"])
+        self.assertEqual(templates.list_prompts("rule"), ["Remove rule R03"])
         # 対象と文言の組は一意。同じ文言でも対象が違えば別の行にできる。
         insert = (
             "INSERT INTO proposal_templates (target, prompt, operation)"
@@ -939,14 +942,16 @@ class DbFlow(unittest.TestCase):
         )
         with self.assertRaises(psycopg.errors.UniqueViolation):
             with connect() as conn:
-                conn.execute(insert, ("rule", "ルールR03を削除して", "{}"))
+                conn.execute(insert, ("rule", "Remove rule R03", "{}"))
         with connect() as conn:
-            conn.execute(insert, ("question", "ルールR03を削除して", "{}"))
+            conn.execute(insert, ("question", "Remove rule R03", "{}"))
         # 削除した初期定型文は、起動（bootstrap）を繰り返しても復活しない。
-        templates.remove("rule", "ルールR03を削除して")
+        templates.remove("rule", "Remove rule R03")
         PostgresProposalTemplates(connect).bootstrap()
-        self.assertIsNone(templates.lookup("rule", "ルールR03を削除して"))
-        self.assertEqual(templates.lookup("question", "設問A13を廃止して"), retire)
+        self.assertIsNone(templates.lookup("rule", "Remove rule R03"))
+        self.assertEqual(
+            templates.lookup("question", "Deactivate question A13"), retire
+        )
 
     def test_double_approval_of_one_proposal_changes_the_config_once(self):
         db = SharedConfigDb(lambda: _connect(self.schema), reuse_enabled=True)
@@ -1607,7 +1612,7 @@ class DbFlow(unittest.TestCase):
                 },
             )
             self.assertEqual(status, 422, (rule_id, revision))
-            self.assertIn("採用ルールが存在しません", body["detail"])
+            self.assertIn("The adopted rule does not exist", body["detail"])
             self.assertEqual(self.get(case_id), before)  # 結果も回答も変わらない
 
     def test_an_older_revision_of_an_existing_rule_can_be_adopted(self):

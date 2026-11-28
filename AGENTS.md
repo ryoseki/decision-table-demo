@@ -68,5 +68,7 @@
 
 根拠はチャットと、Symphony経由の場合は担当Issueのworkpadに記録する。根拠記録のためだけの新規ファイル作成は必須にしない。
 
+- アプリの英語表記は [docs/requirements.md](docs/requirements.md#アプリの英語表記用語) の表に合わせる。
+
 # 個人開発作業ログ用
 READ .pkb-outbox\README.md

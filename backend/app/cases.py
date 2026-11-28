@@ -25,16 +25,16 @@ class JudgmentRequest(BaseModel):
     @model_validator(mode="after")
     def _rule_is_both_or_neither(self) -> JudgmentRequest:
         if (self.rule_id is None) != (self.rule_revision is None):
-            raise ValueError("rule_id と rule_revision は両方指定するか、両方省く")
+            raise ValueError("Specify both rule_id and rule_revision, or omit both")
         if self.rule_revision is not None and self.rule_revision < 1:
-            raise ValueError("rule_revision は1以上")
+            raise ValueError("rule_revision must be 1 or greater")
         return self
 
 
 def _db_store(request: Request):  # noqa: ANN202
     store = request.app.state.case_store
     if not hasattr(store, "save_judgment") or not hasattr(store, "list_cases"):
-        raise HTTPException(status_code=503, detail="保存先のDBが設定されていません")
+        raise HTTPException(status_code=503, detail="The database is not configured")
     return store
 
 
@@ -61,7 +61,7 @@ def get_case(case_id: str, request: Request) -> dict:
     try:
         case = _db_store(request).get_case(case_id)
     except CaseNotFound:
-        raise HTTPException(status_code=404, detail="案件がありません") from None
+        raise HTTPException(status_code=404, detail="Case not found") from None
     retired = _retired_ids(request)
     return {
         **case,
@@ -82,22 +82,24 @@ def save_judgment(case_id: str, body: JudgmentRequest, request: Request) -> None
     if closed:
         raise HTTPException(
             status_code=422,
-            detail=f"廃止済みの設問には回答できません: {', '.join(closed)}",
+            detail=f"Deactivated questions cannot be answered: {', '.join(closed)}",
         )
     try:
         store.save_judgment(case_id, body.result_code, body.answers, adopted)
     except CaseNotFound:
-        raise HTTPException(status_code=404, detail="案件がありません") from None
+        raise HTTPException(status_code=404, detail="Case not found") from None
     except JudgmentAlreadyRecorded:
         raise HTTPException(
             status_code=409,
-            detail="判定を登録済みの案件は、再保存できません（閲覧のみ）",
+            detail=(
+                "A case with a registered judgment cannot be saved again (read-only)"
+            ),
         ) from None
     except InvalidJudgment as error:
         raise HTTPException(status_code=422, detail=str(error)) from None
     except StoreBusy:
         raise HTTPException(
             status_code=503,
-            detail="保存先が混み合っています。入力は残っています。もう一度保存してください",
+            detail="The database is busy. Your input is kept. Please save again",
             headers={"Retry-After": "1"},
         ) from None

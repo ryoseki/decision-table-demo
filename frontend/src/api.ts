@@ -61,12 +61,12 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
   try {
     response = await fetch(path, init?.body == null ? init : await signedBody(init));
   } catch {
-    throw new ApiError(0, "サーバーに接続できませんでした");
+    throw new ApiError(0, "Could not connect to the server");
   }
   if (response.status === 503) {
-    throw new ApiError(503, "サーバーが混み合っています。しばらくしてから、もう一度お試しください（HTTP 503）");
+    throw new ApiError(503, "The server is busy. Please try again in a while (HTTP 503)");
   }
-  if (!response.ok) throw new ApiError(response.status, `サーバーがエラーを返しました（HTTP ${response.status}）`);
+  if (!response.ok) throw new ApiError(response.status, `The server returned an error (HTTP ${response.status})`);
   return response;
 }
 
@@ -107,10 +107,10 @@ export async function createSampleCase(operationId: string): Promise<SampleCaseR
   });
   try {
     const r = (await response.json()) as { case_id: unknown; created: unknown };
-    if (typeof r.case_id !== "string" || typeof r.created !== "boolean") throw new Error("形式が違う");
+    if (typeof r.case_id !== "string" || typeof r.created !== "boolean") throw new Error("Unexpected response format");
     return { caseId: r.case_id, created: r.created };
   } catch {
-    throw new ApiError(0, "サーバーの応答を読み取れませんでした");
+    throw new ApiError(0, "Could not read the server response");
   }
 }
 
@@ -167,10 +167,10 @@ function toRule(r: ApiRule): Rule {
   const expected: Partial<Record<QuestionId, "yes" | "no">> = {};
   for (const [q, value] of Object.entries(r.conditions)) {
     if (!/^A[0-9]{2,}$/.test(q)) {
-      throw new Error(`ルール${r.rule_id}の条件に、未知の設問${q}があります`);
+      throw new Error(`The conditions of rule ${r.rule_id} include unknown question ${q}`);
     }
     if (value !== "yes" && value !== "no") {
-      throw new Error(`ルール${r.rule_id}の条件${q}が、yes／no ではありません`);
+      throw new Error(`Condition ${q} of rule ${r.rule_id} is neither yes nor no`);
     }
     expected[q as QuestionId] = value;
   }
@@ -213,7 +213,7 @@ export async function saveJudgment(
   } catch (error) {
     if (error instanceof ApiError && error.status === 503) {
       // 保存先の衝突で、サーバー側の再試行を使い切った場合など。入力は画面に残っている。
-      throw new ApiError(503, `${error.message.replace("（HTTP 503）", "")}入力は残っています。（HTTP 503）`);
+      throw new ApiError(503, `${error.message.replace(" (HTTP 503)", ".")} Your input is kept. (HTTP 503)`);
     }
     throw error;
   }
@@ -221,5 +221,5 @@ export async function saveJudgment(
 
 /** 画面に出す、失敗の説明。 */
 export function describeError(error: unknown): string {
-  return error instanceof ApiError ? error.message : "予期しないエラーが発生しました";
+  return error instanceof ApiError ? error.message : "An unexpected error occurred";
 }

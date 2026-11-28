@@ -41,8 +41,10 @@ def with_occ_retry[**P, R](method: Callable[P, R]) -> Callable[P, R]:
                 return method(*args, **kwargs)
             except psycopg.errors.SerializationFailure as error:
                 if attempt == MAX_ATTEMPTS:
-                    raise StoreBusy(f"{MAX_ATTEMPTS}回試しても衝突した") from error
+                    raise StoreBusy(
+                        f"Still conflicting after {MAX_ATTEMPTS} attempts"
+                    ) from error
                 sleep(delay_ceiling(attempt) * (0.5 + 0.5 * jitter()))
-        raise AssertionError("到達しない")  # pragma: no cover
+        raise AssertionError("Unreachable")  # pragma: no cover
 
     return wrapper
